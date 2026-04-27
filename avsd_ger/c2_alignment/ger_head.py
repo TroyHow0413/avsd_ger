@@ -219,7 +219,7 @@ class GERHead(nn.Module):
                 # E4M3格式适配前向推理，E5M2适配反向梯度，兼顾精度与范围
                 dtype = torch.float8_e4m3fn
                 compute_dtype = torch.bfloat16
-                load_mode = "FP8 (Native RTX 5080 optimized)"
+                load_mode = "FP8" #(Native RTX 5080 optimized)
                 # 开启FP8矩阵乘法硬件加速
                 torch.set_float8_matmul_enabled(True)
             else:
@@ -227,8 +227,7 @@ class GERHead(nn.Module):
                 compute_dtype = torch.float16
                 load_mode = "FP16"
             _device_map = "auto"
-            # 开启Flash Attention-2，显存再降40%，速度翻倍
-            attn_implementation = "flash_attention_2"
+            attn_implementation = "sdpa"
         else:
             dtype = torch.float32
             compute_dtype = torch.float32
