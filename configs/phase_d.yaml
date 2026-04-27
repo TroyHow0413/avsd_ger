@@ -1,0 +1,12 @@
+# Phase D override — inherits everything from default.yaml, only flips stub_backbones.
+# Usage:
+#   python scripts/enroll_identity.py --config configs/phase_d.yaml --manifest data/ami_phaseD_manifest.json
+#   python scripts/run_sample.py      --config configs/phase_d.yaml --manifest data/ami_phaseD_manifest.json --utt ES2004a.sync.37
+#
+# Switch BACK to stub mode at any time by using --config configs/default.yaml
+# (stub_backbones: true is still the default there).
+
+defaults:
+  - default          # inherits all settings from default.yaml
+
+stub_backbones: false

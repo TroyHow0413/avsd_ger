@@ -1,0 +1,142 @@
+# AVSD-GER default config -- aligned with AVSR_Framework_Complete.md
+#
+# Toggle `stub_backbones: true` to run the full pipeline on random tensors
+# without downloading any weights -- useful for verifying wiring.
+
+seed: 1337
+device: cuda                 # cuda | cpu | mps
+stub_backbones: false        # set true to run on synthetic tensors without downloading weights
+
+# ---------- Backbones ----------
+asr:
+  model_name: large-v3
+  backend: faster-whisper    # faster-whisper | transformers
+  beam_size: 10
+  n_best: 5
+  # Memory-optimised default for 16 GB GPUs (RTX 3090/4090/5080):
+  #   int8_float16 keeps activations in fp16 but stores weights in int8,
+  #   cutting Whisper-large-v3's GPU footprint from ~3 GB to ~1.5 GB.
+  # WER cost on LibriSpeech is ~0.1-0.3 abs. Switch back to float16 on
+  # 24 GB+ GPUs if you want maximum quality.
+  compute_type: int8_float16
+  expose_encoder: true       # need encoder hidden states for C2 token pooling
+  word_timestamps: true      # REQUIRED -- C2 does token-level alignment
+  language: null
+
+vsr:
+  # ---- AV-HuBERT checkpoint selection -------------------------------------
+  # Two flavours (pick one):
+  #   (A) Pretraining-only — `avhubert_large_lrs3_iter5.pt`. Has encoder
+  #       weights but NO seq2seq decoder + NO target dictionary, so
+  #       lip_hyp will always be empty (visual TEXT path off; the
+  #       continuous-feature `<AV_CTX>` path still works).
+  #   (B) Fine-tuned VSR — `self_large_vox_433h.pt` (recommended; AV-HuBERT
+  #       Large + Self-Training, LRS3+VoxCeleb2 pretrain, LRS3-433h FT).
+  #       Includes decoder + BPE dict, so lip_hyp is real text.
+  #       Download: https://dl.fbaipublicfiles.com/avhubert/model/lrs3_vox/vsr/self_large_vox_433h.pt
+  # checkpoint: checkpoints/avhubert_large_lrs3_iter5.pt   # option (A) — pretraining only, lip_hyp empty
+  checkpoint: checkpoints/self_large_vox_433h.pt           # option (B) — fine-tuned VSR with decoder + dict
+  # config: av_hubert/avhubert/conf/pretrain/large_lrs3_iter5.yaml
+  config: av_hubert/avhubert/conf/finetune/self_large_vox_433h.yaml   # NOTE: filename may differ — check `find av_hubert/avhubert/conf -name "*433h*"`
+  layer: -1
+  emit_text: true   # auto-disabled at load time if the checkpoint has no decoder/dict
+
+# ---------- C1: Identity Pool ----------
+identity:
+  # Spec section 8: ECAPA-TDNN (VoxCeleb2) for audio, ArcFace ResNet-100 (MS-Celeb) for face
+  voice_encoder: speechbrain/spkrec-ecapa-voxceleb   # ECAPA-TDNN, 192-d
+  face_encoder: buffalo_l                            # InsightFace; ArcFace backbone, 512-d
+  voice_dim: 192
+  face_dim: 512
+  fused_dim: 256
+  top_k: 3
+  min_av_consistency: 0.35
+
+  # Dual-gate filtering (spec section 8 step 2)
+  dual_gate:
+    tau_a_snr_db: 8.0        # tau_a -- keep frames with SNR >= this
+    tau_v_lip_conf: 0.7      # tau_v -- keep frames with lip-detector conf >= this
+
+  # Agglomerative cold-start (spec section 8 step 3)
+  cold_start:
+    linkage: average
+    distance_threshold: 0.55 # delta -- data-driven K; above this -> 'unknown'
+    delta_unknown: 0.65      # unknown if nearest cluster dist > this
+
+  # EMA pool refinement by C3 (spec section 5.1 C3)
+  ema_alpha: 0.1             # e_new = (1-alpha)*e_old + alpha*e_obs
+  tau_update: 0.55           # only update pool if acoustic rescore s_i >= this
+
+# ---------- C2: Alignment + GER ----------
+alignment:
+  d_model: 512
+  n_heads: 8
+  n_layers: 2
+  id_injection: concat_linear   # spec choice -- NOT FiLM (see Appendix Table 1)
+  align_granularity: token_level # pool ASR encoder frames into word tokens
+  low_conf_handling: soft_gating # attention * min(SNR, lip_conf)
+  dropout: 0.1
+
+ger:
+  # Spec section 5.2 / 6 finalized: Llama-3-8B LoRA
+  llm_name: meta-llama/Meta-Llama-3-8B-Instruct
+  max_new_tokens: 64        # 64 is plenty for GER on a single utterance (typical sentence < 30 tokens). Halves the KV cache vs. 128 — saves ~0.5 GB on 16 GB GPUs.
+  speaker_special_token: "[Speaker: ID_i]"   # register before training
+  # LLM weight precision. "auto" picks based on detected GPU VRAM:
+  #   >=40GB -> fp16   (full precision, ~16GB weights, A100/H100)
+  #   16-40GB -> int8  (bnb 8-bit, ~9GB,  A6000 / smaller A100)
+  #   <16GB  -> 4bit   (bnb nf4, ~5-6GB,  RTX 3090/4090/5080)
+  # Manual override on CLI via --llm-quant fp16|int8|4bit|auto
+  llm_quant: auto
+  lora:
+    r: 16
+    alpha: 32
+    dropout: 0.05
+    target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+  # Spec section 2 C2 prompt template (verbatim; id_prefix injects [Speaker: ID_i])
+  prompt_template: |
+    {speaker_tag}
+    Audio hypothesis: {asr_nbest}
+    Visual hypothesis: {lip_hyp}
+    Aligned feature context: <AV_CTX>
+    Correct the transcript. Preserve the speaker label.
+    Output:
+
+# ---------- C3: Closed-loop Feedback ----------
+feedback:
+  max_iters: 3
+  tau_update: 0.55
+  confidence_low: 0.35
+  confidence_mid: 0.55
+  weights:
+    asr_rescore: 0.6
+    av_consistency: 0.25
+    nbest_variance: 0.1
+    llm_entropy: 0.05
+
+# ---------- Training (Stage 1 / Stage 2 per spec section 7) ----------
+training:
+  stage1:
+    epochs: 20
+    lr: 1.0e-3
+    warmup_steps: 500
+    freeze: [asr_encoder, vsr_encoder]
+    objective: [infonce_av, infonce_va, ctc]
+    stop_on: av_sid_acc_plateau
+  stage2:
+    epochs: 10
+    lr: 1.0e-4                # spec: exactly 0.1 * Stage 1 LR -- non-negotiable
+    lr_ratio_to_stage1: 0.1
+    freeze: []
+    objective: [ctc, ger_ce, infonce_av, infonce_va]
+  infonce:
+    temperature: 0.07
+    bidirectional: true       # L_total = L_{A->V} + L_{V->A}
+
+# ---------- Ablation flags (spec section 10, Table 2) ----------
+# All false = Full Model. Flip one to reproduce a single ablation row.
+ablation:
+  disable_c1: false             # zero z_id -> GER is not ID-aware
+  disable_c2: false             # skip GER -> return ASR 1-best
+  disable_c3: false             # cap loop at 1 iter, freeze pool
+  disable_conf_gate: false      # promote every ACCEPT -> pool update (spec: must degrade)

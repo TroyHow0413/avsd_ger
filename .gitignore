@@ -1,0 +1,7 @@
+/.cache
+.conda_envs_dir_test
+**/__pycache__/
+/data
+/datasets
+/wandb
+/checkpoints

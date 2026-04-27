@@ -1,0 +1,79 @@
+# Pip-only install path. Prefer environment.yml + conda for the PyTorch + CUDA stack.
+# This file lists the same packages as the `pip:` block of environment.yml,
+# plus the conda-channel deps (numpy, scipy, pyyaml, tqdm) that pip can also serve.
+
+# ---- Core ------------------------------------------------------------------
+# IMPORTANT: torch / torchaudio / torchvision must be installed manually from
+# PyTorch's CUDA-specific wheel index, NOT from PyPI. PyPI only ships the
+# CPU-only wheels of torch.
+#
+# For RTX 50-series (Blackwell, sm_120) — REQUIRED for sm_120 kernel images:
+#     pip install \
+#         "torch>=2.7" "torchaudio>=2.7" "torchvision>=0.22" \
+#         --index-url https://download.pytorch.org/whl/cu128
+#
+# For H100/A100/RTX 30-40-series (sm_80..sm_90):
+#     pip install \
+#         "torch==2.6.*" "torchaudio==2.6.*" "torchvision==0.21.*" \
+#         --index-url https://download.pytorch.org/whl/cu124
+#
+# DO NOT pass --no-deps — torch's exact-pinned cu12 runtime libs (cublas,
+# cudnn, cufft, ..., plus sympy + triton) must be installed, otherwise GPU ops
+# fail with `libXXX.so: cannot open shared object`.
+#
+# Verify after install:  python -c "import torch; print(torch.cuda.get_arch_list())"
+# For RTX 5080 the list MUST contain 'sm_120'.
+numpy>=1.24,<2.0
+scipy>=1.11             # Hungarian assignment in avsd_ger/eval/metrics.py
+pyyaml>=6.0
+tqdm>=4.66
+einops>=0.7.0
+
+# ---- ASR backbone ---------------------------------------------------------
+faster-whisper>=1.0.0   # CTranslate2 Whisper-large-v3
+transformers>=4.49,<4.55    # torch 2.6 satisfies >=2.4 requirement; cap <4.55 for stability
+tokenizers>=0.21,<0.22      # transformers 4.49+ mandates this exact range
+huggingface_hub>=0.27,<0.32 # transformers 4.49 compatible
+accelerate>=0.28.0
+
+# ---- VSR backbone ---------------------------------------------------------
+# fairseq from source (PyPI fairseq is stale):
+#   pip install "git+https://github.com/facebookresearch/fairseq.git@v0.12.2"
+# AV-HuBERT repo on PYTHONPATH:
+#   git clone https://github.com/facebookresearch/av_hubert.git
+
+# ---- Identity encoders ----------------------------------------------------
+speechbrain>=1.0.0      # ECAPA-TDNN
+insightface>=0.7.3      # ArcFace
+onnxruntime>=1.17       # InsightFace backend (use onnxruntime-gpu if you want CUDA exec)
+
+# ---- GER head -------------------------------------------------------------
+peft>=0.10.0            # Llama-3-8B LoRA
+sentencepiece>=0.2.0
+bitsandbytes>=0.45,<0.48 # 0.43+ uses torch.library.impl_abstract (added in torch 2.4); cap <0.48 for stability
+
+
+# ---- Audio / video IO -----------------------------------------------------
+librosa>=0.10.1
+opencv-python>=4.9,<4.10   # 4.10+ hard-requires numpy>=2 (ABI); conflicts with insightface needing numpy<2
+soundfile>=0.12
+python_speech_features>=0.6  # required by AV-HuBERT hubert_dataset.py (logfbank); not on conda-forge, pip only
+
+# torch's wheel pulls all of these (cublas, cudnn, cufft, ..., nccl, nvtx,
+# plus sympy + triton) as EXACT-version deps. The exact versions DIFFER by
+# torch version + CUDA toolkit:
+#   * torch 2.6 + cu124 -> nvidia-cudnn-cu12==9.1.0.70, nvidia-cusparselt-cu12==0.6.2
+#   * torch 2.7 + cu128 -> nvidia-cudnn-cu12==9.5.x,    nvidia-cusparselt-cu12==0.7.x
+# A stale exact pin in this file FORCES a resolver conflict. Let torch pull
+# them by installing torch WITHOUT --no-deps from the right index URL.
+# To audit current versions:  pip show torch | grep Requires
+
+# ---- Power monitor (avsd_ger/eval/power.py) -------------------------------
+# Both have try/except fallbacks; installing them turns degraded=False.
+# NOTE: `import pynvml` stays the same; the legacy `pynvml` PyPI package is
+# deprecated, NVIDIA's official bindings now ship as `nvidia-ml-py`.
+nvidia-ml-py>=12.535
+psutil>=5.9
+
+# ---- Experiment tracking (optional; avsd_ger/wandb_logger.py is a no-op) --
+wandb>=0.16.0

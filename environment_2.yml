@@ -1,0 +1,60 @@
+name: avsdger_2
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
+
+dependencies:
+  # 核心解释器：固定Python3.10+pip24.0，彻底解决fairseq安装报错
+  - python=3.10
+  - pip=24.0
+
+  # 基础数值/IO库：锁定numpy<2.0，兼容所有视觉/语音库
+  - numpy>=1.24,<2.0
+  - scipy>=1.11
+  - pyyaml>=6.0
+  - tqdm>=4.66
+
+  # 系统底层库：解决音视频解码、libtiff/jpeg冲突
+  - libsndfile
+  - ffmpeg
+  - openh264
+  - jpeg
+  - libtiff
+
+
+  # pip专属依赖：全版本同时兼容40系/50系，无冲突
+  - pip:
+      # 核心工具
+      - einops>=0.7.0
+
+      # ASR backbone：锁定兼容torch2.6/2.7的版本
+      - faster-whisper>=1.0.0
+      - transformers>=4.49,<4.55
+      - tokenizers>=0.21,<0.22
+      - huggingface_hub>=0.27,<0.32
+      - accelerate>=0.28.0
+
+      # GER大模型头：40/50系全兼容，支持cu124/cu128
+      - peft>=0.10.0
+      - sentencepiece>=0.2.0
+      - bitsandbytes>=0.45,<0.48
+
+      # 身份编码器（语音+人脸）
+      - speechbrain>=1.0.0
+      - insightface>=0.7.3
+      - onnxruntime>=1.17
+
+      # 音视频IO：固定4.8.0.74，彻底解决libtiff/jpeg符号冲突
+      - librosa>=0.10.1
+      - opencv-python==4.8.0.74
+      - soundfile>=0.12
+      - python_speech_features>=0.6
+
+      # GPU功耗监控
+      - nvidia-ml-py>=12.535
+      - psutil>=5.9
+
+      # 实验日志
+      - wandb>=0.16.0
