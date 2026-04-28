@@ -1,0 +1,16 @@
+name: avsdger_2
+channels:
+  - defaults
+dependencies:
+  - ffmpeg
+  - jpeg
+  - numpy[version='>=1.24,<2.0']
+  - libtiff
+  - openh264
+  - pip=24.0
+  - pyyaml[version='>=6.0']
+  - libsndfile
+  - python=3.10
+  - tqdm[version='>=4.66']
+  - scipy[version='>=1.11']
+prefix: /home/troy/miniconda3/envs/avsdger_2
