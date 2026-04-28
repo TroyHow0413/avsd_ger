@@ -99,7 +99,9 @@ ger:
     Audio hypothesis: {asr_nbest}
     Visual hypothesis: {lip_hyp}
     Aligned feature context: <AV_CTX>
-    Correct the transcript. Preserve the speaker label.
+    Correct the transcript using the audio hypothesis as the main source.
+    Return only the corrected transcript text, with no explanation and no quoted instruction.
+    Do not output the words "speaker label".
     Output:
 
 # ---------- C3: Closed-loop Feedback ----------
@@ -108,6 +110,8 @@ feedback:
   tau_update: 0.55
   confidence_low: 0.35
   confidence_mid: 0.55
+  ger_fallback_min_conf: 0.20  # below this, compare GER text against ASR 1-best
+  ger_fallback_margin: 0.05    # ASR fallback must beat GER by at least this much
   weights:
     asr_rescore: 0.6
     av_consistency: 0.25

@@ -36,9 +36,9 @@ def _load_audio(path: str | None) -> np.ndarray | torch.Tensor:
 
 
 def _load_video_mouth_roi(path: str | None, num_frames: int = 75) -> torch.Tensor:
-    """Return [T, 1, 96, 96] mouth ROI in [0, 1]. Stub if path missing."""
+    """Return [T, 1, 96, 96] mouth ROI in [0, 1]. Zero placeholder if missing."""
     if path is None or not Path(path).exists():
-        return torch.rand(num_frames, 1, 96, 96)
+        return torch.zeros(num_frames, 1, 96, 96)
     # Real preprocessing pipeline lives in av_hubert/avhubert/preparation/align_mouth.py.
     # This caller expects pre-aligned [T, 1, 96, 96] tensors cached on disk.
     arr = np.load(path)
@@ -118,7 +118,9 @@ def main() -> int:
 
         utt = next(u for u in manifest["utterances"] if u["utt_id"] == args.utt)
         audio = _load_audio(utt.get("audio"))
-        video = _load_video_mouth_roi(utt.get("mouth_roi"))
+        audio_len = int(audio.numel() if isinstance(audio, torch.Tensor) else len(audio))
+        num_video_frames = max(1, round(audio_len / 16000 * 25))
+        video = _load_video_mouth_roi(utt.get("mouth_roi"), num_frames=num_video_frames)
 
         out = pipe.run(audio, video)
 

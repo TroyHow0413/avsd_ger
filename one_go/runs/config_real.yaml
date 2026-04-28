@@ -1,0 +1,119 @@
+seed: 1337
+device: cuda
+stub_backbones: false
+asr:
+  model_name: large-v3
+  backend: faster-whisper
+  beam_size: 10
+  n_best: 5
+  compute_type: int8_float16
+  expose_encoder: true
+  word_timestamps: true
+  language: null
+vsr:
+  checkpoint: checkpoints/self_large_vox_433h.pt
+  config: av_hubert/avhubert/conf/finetune/self_large_vox_433h.yaml
+  layer: -1
+  emit_text: true
+identity:
+  voice_encoder: speechbrain/spkrec-ecapa-voxceleb
+  face_encoder: buffalo_l
+  voice_dim: 192
+  face_dim: 512
+  fused_dim: 256
+  top_k: 3
+  min_av_consistency: 0.35
+  dual_gate:
+    tau_a_snr_db: 8.0
+    tau_v_lip_conf: 0.7
+  cold_start:
+    linkage: average
+    distance_threshold: 0.55
+    delta_unknown: 0.65
+  ema_alpha: 0.1
+  tau_update: 0.55
+alignment:
+  d_model: 512
+  n_heads: 8
+  n_layers: 2
+  id_injection: concat_linear
+  align_granularity: token_level
+  low_conf_handling: soft_gating
+  dropout: 0.1
+ger:
+  llm_name: meta-llama/Meta-Llama-3-8B-Instruct
+  max_new_tokens: 64
+  speaker_special_token: '[Speaker: ID_i]'
+  llm_quant: 4bit
+  lora:
+    r: 16
+    alpha: 32
+    dropout: 0.05
+    target_modules:
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+    - gate_proj
+    - up_proj
+    - down_proj
+  prompt_template: '{speaker_tag}
+
+    Audio hypothesis: {asr_nbest}
+
+    Visual hypothesis: {lip_hyp}
+
+    Aligned feature context: <AV_CTX>
+
+    Correct the transcript using the audio hypothesis as the main source.
+
+    Return only the corrected transcript text, with no explanation and no quoted instruction.
+
+    Do not output the words "speaker label".
+
+    Output:
+
+    '
+feedback:
+  max_iters: 3
+  tau_update: 0.55
+  confidence_low: 0.35
+  confidence_mid: 0.55
+  ger_fallback_min_conf: 0.2
+  ger_fallback_margin: 0.05
+  weights:
+    asr_rescore: 0.6
+    av_consistency: 0.25
+    nbest_variance: 0.1
+    llm_entropy: 0.05
+training:
+  stage1:
+    epochs: 20
+    lr: 0.001
+    warmup_steps: 500
+    freeze:
+    - asr_encoder
+    - vsr_encoder
+    objective:
+    - infonce_av
+    - infonce_va
+    - ctc
+    stop_on: av_sid_acc_plateau
+  stage2:
+    epochs: 10
+    lr: 0.0001
+    lr_ratio_to_stage1: 0.1
+    freeze: []
+    objective:
+    - ctc
+    - ger_ce
+    - infonce_av
+    - infonce_va
+  infonce:
+    temperature: 0.07
+    bidirectional: true
+ablation:
+  disable_c1: false
+  disable_c2: false
+  disable_c3: false
+  disable_conf_gate: false

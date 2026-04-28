@@ -74,18 +74,62 @@ class AVHubertVSR(nn.Module):
 
         ckpt = self.cfg["checkpoint"]
 
+        # Some public AV-HuBERT checkpoints keep the original authors'
+        # absolute pretraining label_dir in the serialized fairseq config, e.g.
+        # /checkpoint/bshi/.../dict.km.txt. That dictionary is only needed while
+        # reconstructing HuBERT pretraining heads; C2 consumes encoder features.
+        # If the path is missing, provide a dummy dictionary with the usual
+        # c2000 vocabulary size so model construction can continue.
+        from fairseq.data import Dictionary
+        _orig_dict_load = Dictionary.load
+
+        @classmethod
+        def _load_with_missing_avhubert_dict(cls, f):
+            try:
+                return _orig_dict_load(f)
+            except FileNotFoundError:
+                path = str(f)
+                if "/checkpoint/bshi/" not in path and "\\checkpoint\\bshi\\" not in path:
+                    raise
+                import logging as _log
+                label = "km" if "dict.km.txt" in path else "wrd"
+                n_symbols = 2000 if label == "km" else 1000
+                d = cls()
+                for i in range(n_symbols):
+                    d.add_symbol(f"{label}_{i}")
+                _log.getLogger(__name__).warning(
+                    "VSR: missing AV-HuBERT dictionary %s; using a dummy %s-size "
+                    "dictionary for model reconstruction. Encoder feature extraction "
+                    "is still usable, but lip_hyp text may be unavailable.",
+                    path,
+                    n_symbols,
+                )
+                return d
+
         # PyTorch ≥ 2.6 changed torch.load's default to weights_only=True, which
         # rejects fairseq checkpoints that pickle custom objects (e.g.
         # fairseq.data.dictionary.Dictionary).  Patch torch.load for this call only.
         _orig_load = torch.load
         def _load_legacy(f, *args, **kwargs):
             kwargs.setdefault("weights_only", False)
-            return _orig_load(f, *args, **kwargs)
+            state = _orig_load(f, *args, **kwargs)
+            cfg = state.get("cfg") if isinstance(state, dict) else None
+            model_cfg = getattr(cfg, "model", None)
+            if model_cfg is not None and hasattr(model_cfg, "decoder_embed_dim"):
+                enc_dim = getattr(model_cfg, "encoder_embed_dim", None)
+                if enc_dim in (None, 512):
+                    try:
+                        model_cfg.encoder_embed_dim = model_cfg.decoder_embed_dim
+                    except Exception:
+                        pass
+            return state
         torch.load = _load_legacy
+        Dictionary.load = _load_with_missing_avhubert_dict
         try:
             models, saved_cfg, task = checkpoint_utils.load_model_ensemble_and_task([ckpt])
         finally:
             torch.load = _orig_load  # always restore, even on error
+            Dictionary.load = _orig_dict_load
         self._model = models[0].to(self.device).eval()
         self._task = task
         if self.emit_text:
@@ -152,12 +196,21 @@ class AVHubertVSR(nn.Module):
         AUDIO_FEAT_DIM = 104   # AV-HuBERT pretraining: 26 mel * stack_order=4
         audio_zeros = torch.zeros(1, AUDIO_FEAT_DIM, T_v, device=self.device, dtype=x.dtype)
 
-        feats, _ = self._model.extract_features(
-            source={"video": x, "audio": audio_zeros},
-            padding_mask=None,
-            mask=False,
-            output_layer=self.layer,
-        )
+        source = {"video": x, "audio": audio_zeros}
+        if hasattr(self._model, "encoder") and hasattr(self._model.encoder, "w2v_model"):
+            # Fine-tuned VSR checkpoints are AVHubertSeq2Seq models. Their
+            # top-level extract_features() is the fairseq seq2seq API, so use
+            # the wrapped AV-HuBERT encoder directly for C2 features.
+            enc_out = self._model.encoder(source=source, padding_mask=None)
+            feats = enc_out["encoder_out"].transpose(0, 1)  # [B, T_v, C]
+        else:
+            # Pretraining checkpoints expose AVHubertModel.extract_features().
+            feats, _ = self._model.extract_features(
+                source=source,
+                padding_mask=None,
+                mask=False,
+                output_layer=self.layer,
+            )
         vsr_feats = feats.squeeze(0).detach()  # [T_v, 1024]
 
         lip_hyp = ""

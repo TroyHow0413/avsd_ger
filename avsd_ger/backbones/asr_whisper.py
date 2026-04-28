@@ -103,10 +103,11 @@ class WhisperASR(nn.Module):
                 for w in (seg.words or []):
                     words.append(WordTiming(word=w.word, start=float(w.start), end=float(w.end)))
 
-        # TODO: replace duplicated 1-best padding with real CT2 beam outputs
+        # faster-whisper's streaming segment API gives us the decoded 1-best
+        # here, not a real sentence-level N-best list. Do not pad by repeating
+        # the same string: that makes the GER prompt look like a transcript
+        # that was spoken multiple times and encourages LLM repetition.
         nbest = [ASRHypothesis(text_1best, 0.0)]
-        while len(nbest) < self.n_best:
-            nbest.append(ASRHypothesis(text_1best, -float(len(nbest))))
 
         enc_feats = None
         if self.expose_encoder:
@@ -132,6 +133,9 @@ class WhisperASR(nn.Module):
         Returns a float in (-inf, 0]; callers typically squash to [0,1] before
         comparing to tau_update.
         """
+        if not text.strip():
+            return -20.0
+
         if self.stub:
             # deterministic-ish: longer/stranger text gets a worse score
             base = -0.25 - 0.002 * len(text)

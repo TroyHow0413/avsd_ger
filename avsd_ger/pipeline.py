@@ -63,6 +63,8 @@ class AVSDGERPipeline:
         # C3
         self.scorer = ConfidenceScorer(cfg["feedback"])
         self.loop = ClosedLoopController(cfg["feedback"])
+        self.ger_fallback_min_conf = float(cfg["feedback"].get("ger_fallback_min_conf", 0.20))
+        self.ger_fallback_margin = float(cfg["feedback"].get("ger_fallback_margin", 0.05))
 
         # Ablation flags (spec section 10, Table 2). All False by default
         # = "Full Model". Flip one at a time from config to run rows of
@@ -159,8 +161,52 @@ class AVSDGERPipeline:
                     speaker_id=speaker_id_hint,
                 )
 
+            fallback_applied = False
+            fallback_reason = None
+            asr_top = (asr_out.nbest[0].strip() if asr_out.nbest else "")
+
+            if not self.disable_c2 and asr_top and not ger_out["text"].strip():
+                raw_generation = ger_out.get("raw_text")
+                ger_out = dict(ger_out)
+                ger_out["raw_ger_text"] = ""
+                ger_out["raw_generation"] = raw_generation
+                ger_out["text"] = asr_top
+                ger_out["token_logprobs"] = torch.zeros(0, device=self.device)
+                fallback_applied = True
+                fallback_reason = "GER cleaned to empty text; used ASR 1-best"
+
+            # The GER head is useful only when its corrected text is still
+            # acoustically plausible. In zero-shot or untrained-LoRA smoke
+            # runs, Llama can sometimes emit a prompt fragment such as
+            # "The speaker label."; Whisper rescoring catches that sharply.
+            # Fall back to ASR 1-best instead of accepting an LLM artifact.
             s_acoustic = self.asr.rescore(audio_wav, ger_out["text"])
             s_acoustic_conf = squash_logprob(s_acoustic)
+            if (
+                not self.disable_c2
+                and asr_top
+                and ger_out["text"].strip() != asr_top
+                and s_acoustic_conf < self.ger_fallback_min_conf
+            ):
+                asr_s_acoustic = self.asr.rescore(audio_wav, asr_top)
+                asr_s_acoustic_conf = squash_logprob(asr_s_acoustic)
+                if asr_s_acoustic_conf >= s_acoustic_conf + self.ger_fallback_margin:
+                    raw_ger_text = ger_out["text"]
+                    raw_generation = ger_out.get("raw_text")
+                    raw_ger_conf = s_acoustic_conf
+                    ger_out = dict(ger_out)
+                    ger_out["raw_ger_text"] = raw_ger_text
+                    ger_out["raw_generation"] = raw_generation
+                    ger_out["text"] = asr_top
+                    ger_out["token_logprobs"] = torch.zeros(0, device=self.device)
+                    s_acoustic = asr_s_acoustic
+                    s_acoustic_conf = asr_s_acoustic_conf
+                    fallback_applied = True
+                    fallback_reason = (
+                        "GER acoustic confidence "
+                        f"{raw_ger_conf:.3f} "
+                        f"< {self.ger_fallback_min_conf:.3f}; used ASR 1-best"
+                    )
             rep = self.scorer.score(
                 asr_rescore_logprob=s_acoustic,
                 av_consistency=id_q.av_consistency,
@@ -193,6 +239,10 @@ class AVSDGERPipeline:
                 "decision": decision.action.value,
                 "reason": decision.reason,
                 "text": ger_out["text"],
+                "fallback_applied": fallback_applied,
+                "fallback_reason": fallback_reason,
+                "raw_ger_text": ger_out.get("raw_ger_text") or ger_out.get("raw_text"),
+                "raw_generation": ger_out.get("raw_generation"),
             })
 
             if decision.action == LoopAction.ACCEPT_AND_UPDATE:

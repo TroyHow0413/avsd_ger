@@ -1,0 +1,24 @@
+{
+  "speakers": [
+    {
+      "speaker_id": "ES2004a_B",
+      "enrollment_audio": "one_go/runs/ami_es2004a/ES2004a_B_enroll.wav",
+      "meta": {
+        "meeting": "ES2004a",
+        "speaker": "B",
+        "headset": 1,
+        "enroll_start": 981.049,
+        "enroll_end": 989.552
+      }
+    }
+  ],
+  "utterances": [
+    {
+      "utt_id": "ES2004a_B_utt",
+      "speaker_id": "ES2004a_B",
+      "audio": "one_go/runs/ami_es2004a/ES2004a_B_utt.wav",
+      "mouth_roi": null,
+      "transcript_gold": "Yi yes, um yeah, I presume so. Um"
+    }
+  ]
+}

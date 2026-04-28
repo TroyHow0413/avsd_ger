@@ -1,0 +1,109 @@
+{
+  "results": [
+    {
+      "ablation": "full_model",
+      "flags": {},
+      "metrics": {
+        "sa_wer": 1.0909090909090908,
+        "wer": 1.0606060606060606,
+        "scr": 1.0,
+        "av_sid_acc": 0.5,
+        "der": 0.4629629629629629,
+        "jer": 0.6988993710691824,
+        "n_ref_words": 33,
+        "n_turns": 4
+      },
+      "power": null,
+      "transcript": "[Speaker: spk_02] the quick brown fox jumps over the lazy dog\n[Speaker: spk_02] the quick brown fox jumps over the lazy dog\n[Speaker: spk_02] the quick brown fox jumps over the lazy dog\n[Speaker: spk_03] the quick brown fox jumps over the lazy dog",
+      "speaker_order": [
+        "spk_02",
+        "spk_03"
+      ]
+    },
+    {
+      "ablation": "wo_c1",
+      "flags": {
+        "disable_c1": true
+      },
+      "metrics": {
+        "sa_wer": 1.0909090909090908,
+        "wer": 1.0606060606060606,
+        "scr": 1.0,
+        "av_sid_acc": 0.0,
+        "der": 1.0,
+        "jer": 1.0,
+        "n_ref_words": 33,
+        "n_turns": 4
+      },
+      "power": null,
+      "transcript": "[Speaker: UNKNOWN] the quick brown fox jumps over the lazy dog\n[Speaker: UNKNOWN] the quick brown fox jumps over the lazy dog\n[Speaker: UNKNOWN] the quick brown fox jumps over the lazy dog\n[Speaker: UNKNOWN] the quick brown fox jumps over the lazy dog",
+      "speaker_order": []
+    },
+    {
+      "ablation": "wo_c2",
+      "flags": {
+        "disable_c2": true
+      },
+      "metrics": {
+        "sa_wer": 1.0909090909090908,
+        "wer": 1.0606060606060606,
+        "scr": 1.0,
+        "av_sid_acc": 0.5,
+        "der": 0.4629629629629629,
+        "jer": 0.6988993710691824,
+        "n_ref_words": 33,
+        "n_turns": 4
+      },
+      "power": null,
+      "transcript": "[Speaker: spk_02] the quick brown fox jumps over the lazy dog\n[Speaker: spk_02] the quick brown fox jumps over the lazy dog\n[Speaker: spk_02] the quick brown fox jumps over the lazy dog\n[Speaker: spk_03] the quick brown fox jumps over the lazy dog",
+      "speaker_order": [
+        "spk_02",
+        "spk_03"
+      ]
+    },
+    {
+      "ablation": "wo_c3",
+      "flags": {
+        "disable_c3": true
+      },
+      "metrics": {
+        "sa_wer": 1.0909090909090908,
+        "wer": 1.0606060606060606,
+        "scr": 1.0,
+        "av_sid_acc": 0.5,
+        "der": 0.4629629629629629,
+        "jer": 0.6988993710691824,
+        "n_ref_words": 33,
+        "n_turns": 4
+      },
+      "power": null,
+      "transcript": "[Speaker: spk_02] the quick brown fox jumps over the lazy dog\n[Speaker: spk_02] the quick brown fox jumps over the lazy dog\n[Speaker: spk_02] the quick brown fox jumps over the lazy dog\n[Speaker: spk_03] the quick brown fox jumps over the lazy dog",
+      "speaker_order": [
+        "spk_02",
+        "spk_03"
+      ]
+    },
+    {
+      "ablation": "c3_wo_conf_gate",
+      "flags": {
+        "disable_conf_gate": true
+      },
+      "metrics": {
+        "sa_wer": 1.0909090909090908,
+        "wer": 1.0606060606060606,
+        "scr": 1.0,
+        "av_sid_acc": 0.5,
+        "der": 0.4629629629629629,
+        "jer": 0.6988993710691824,
+        "n_ref_words": 33,
+        "n_turns": 4
+      },
+      "power": null,
+      "transcript": "[Speaker: spk_02] the quick brown fox jumps over the lazy dog\n[Speaker: spk_02] the quick brown fox jumps over the lazy dog\n[Speaker: spk_02] the quick brown fox jumps over the lazy dog\n[Speaker: spk_03] the quick brown fox jumps over the lazy dog",
+      "speaker_order": [
+        "spk_02",
+        "spk_03"
+      ]
+    }
+  ]
+}

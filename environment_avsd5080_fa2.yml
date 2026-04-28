@@ -1,0 +1,80 @@
+name: avsd5080_final
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
+
+dependencies:
+  # ---- Interpreter -------------------------------------------------------
+  - python=3.10
+  - pip=24.0
+
+  # ---- 5080 专用：GCC 11.4（必须，否则 FA2 编译失败）
+  - gcc=11.4
+  - gxx=11.4
+
+  # ---- Numerics / IO ----------------------------------------------------
+  - numpy>=1.24,<2.0
+  - scipy>=1.11
+  - pyyaml>=6.0
+  - tqdm>=4.66
+
+  # ---- System libs needed by audio/video loaders ------------------------
+  - libsndfile
+  - ffmpeg
+  - openh264
+
+  # ---- Pure-pip packages ------------------------------------------------
+  - pip:
+      # Core utilities
+      - einops>=0.7.0
+
+      # ASR backbone
+      - faster-whisper>=1.0.0
+      - transformers>=4.49,<4.55
+      - tokenizers>=0.21,<0.22
+      - huggingface_hub>=0.27,<0.32
+      - accelerate>=0.28.0
+
+      # GER head
+      - peft>=0.10.0
+      - sentencepiece>=0.2.0
+      - bitsandbytes>=0.45,<0.48
+
+      # Identity encoders
+      - speechbrain>=1.0.0
+      - insightface>=0.7.3
+      - onnxruntime>=1.17
+
+      # Audio / video IO
+      - librosa>=0.10.1
+      - opencv-python>=4.9,<4.10   # 关键：不炸 numpy
+      - soundfile>=0.12
+      - python_speech_features>=0.6
+
+      # Monitoring
+      - nvidia-ml-py>=12.535
+      - psutil>=5.9
+      - wandb>=0.16.0
+
+# ---------------------------------------------------------------------------
+# ✅ RTX 5080 专用手动步骤（复制直接跑）
+# ---------------------------------------------------------------------------
+# 1. 创建环境
+#     conda env create -f environment_avsd5080_final.yml
+#     conda activate avsd5080_final
+#
+# 2. 安装 5080 专用 PyTorch CUDA128（唯一支持 sm_120）
+#     pip install "torch>=2.7" "torchaudio>=2.7" "torchvision>=0.22" \
+#         --index-url https://download.pytorch.org/whl/cu128
+#
+# 3. 安装 Flash Attention 2（100% 成功）
+#     pip install flash-attn>=2.6.0 --no-build-isolation
+#
+# 4. 安装 fairseq（项目必需）
+#     pip install "git+https://github.com/facebookresearch/fairseq.git@v0.12.2"
+#
+# 5. 检查是否成功
+#     python check_fa2.py
+# ---------------------------------------------------------------------------

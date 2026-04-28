@@ -17,6 +17,7 @@ adding ID prefix → special token not in vocab').
 from __future__ import annotations
 
 from pydoc import text
+import re
 from typing import Any
 
 import torch
@@ -80,7 +81,7 @@ class GERHead(nn.Module):
         self._spk_token_id: int | None = None
 
         if not stub:
-            self._load_llm()
+            self._load_llm_old()
 
         # Per-speaker ID token is formed as:   id_embed + id_projection(z_id)
         # so the special token carries both a learned prior and per-utterance info.
@@ -183,7 +184,10 @@ class GERHead(nn.Module):
                 device_map=_device_map,
             )
         if num_added:
-            base.resize_token_embeddings(len(self._tok))
+            try:
+                base.resize_token_embeddings(len(self._tok), mean_resizing=False)
+            except TypeError:
+                base.resize_token_embeddings(len(self._tok))
         self._llm_embed_dim = base.config.hidden_size
 
         lora_cfg = LoraConfig(
@@ -193,7 +197,9 @@ class GERHead(nn.Module):
             lora_dropout=float(self.cfg["lora"]["dropout"]),
             target_modules=list(self.cfg["lora"]["target_modules"]),
         )
-        self._llm = get_peft_model(base, lora_cfg).to(self.device)
+        self._llm = get_peft_model(base, lora_cfg)
+        if quant_mode not in ("4bit", "int8"):
+            self._llm = self._llm.to(self.device)
 
     def _load_llm(self) -> None:
         import torch
@@ -307,6 +313,68 @@ class GERHead(nn.Module):
                 pass  # any failure -> fall through to raw user_content
         return user_content
 
+    @staticmethod
+    def _clean_generated_text(text: str) -> str:
+        """Strip common instruction-following wrappers from zero-shot GER output."""
+        s = text.strip()
+        if not s:
+            return s
+
+        # Keep only the part after common answer labels.
+        label_patterns = [
+            r"(?is)^the corrected transcript text is\s*:?\s*",
+            r"(?is)^corrected transcript\s*:?\s*",
+            r"(?is)^transcript\s*:?\s*",
+            r"(?is)^output\s*:?\s*",
+        ]
+        for pat in label_patterns:
+            s = re.sub(pat, "", s).strip()
+
+        # If the model put the transcript in quotes, prefer the quoted span.
+        quoted = re.findall(r'"([^"\n]{1,300})"', s)
+        if quoted:
+            s = quoted[0].strip()
+
+        # Drop explanatory tails that are not transcript text.
+        s = re.split(
+            r"(?i)\b(the audio hypothesis|the visual hypothesis|the speaker|is saying|repeatedly)\b",
+            s,
+            maxsplit=1,
+        )[0].strip()
+
+        # When a duplicated N-best prompt leaks through, collapse pipe-separated
+        # copies to the first unique candidate.
+        if "|" in s:
+            parts = [p.strip(" \t\r\n\"'") for p in s.split("|") if p.strip()]
+            if parts:
+                s = parts[0]
+
+        # Collapse repeated identical sentences: "Yes. Yes." is valid, but
+        # "Yes. Yeah. I presume so. Yes. Yeah. I presume so." is prompt echo.
+        chunks = re.findall(r"[^.!?]+[.!?]?", s)
+        cleaned_chunks: list[str] = []
+        prev = None
+        for chunk in chunks:
+            chunk = chunk.strip()
+            if not chunk:
+                continue
+            key = re.sub(r"\W+", "", chunk).lower()
+            if key and key == prev:
+                continue
+            cleaned_chunks.append(chunk)
+            prev = key
+        if cleaned_chunks:
+            keys = [re.sub(r"\W+", "", chunk).lower() for chunk in cleaned_chunks]
+            for unit in range(1, max(1, len(keys) // 2) + 1):
+                if len(keys) % unit == 0:
+                    pattern = keys[:unit]
+                    if pattern and all(keys[i:i + unit] == pattern for i in range(0, len(keys), unit)):
+                        cleaned_chunks = cleaned_chunks[:unit]
+                        break
+            s = " ".join(cleaned_chunks)
+
+        return re.sub(r"\s+", " ", s).strip(" \t\r\n\"'")
+
     def _inputs_embeds(
         self, z_id: torch.Tensor, f_align: torch.Tensor, text: str
     ) -> torch.Tensor:
@@ -389,7 +457,8 @@ class GERHead(nn.Module):
 
         # `out.sequences` for inputs_embeds-based generate is just the new tokens.
         new_ids = out.sequences[0]
-        text_out = self._tok.decode(new_ids, skip_special_tokens=True).strip()
+        raw_text_out = self._tok.decode(new_ids, skip_special_tokens=True).strip()
+        text_out = self._clean_generated_text(raw_text_out)
 
         # Per-token log-probs for C3 confidence (LLM entropy component).
         token_lp = torch.zeros(0, device=self.device)
@@ -399,4 +468,9 @@ class GERHead(nn.Module):
             chosen = new_ids[: scores.size(0)]
             token_lp = log_probs.gather(-1, chosen.unsqueeze(-1)).squeeze(-1)
 
-        return {"text": text_out, "token_logprobs": token_lp, "prompt": text}
+        return {
+            "text": text_out,
+            "raw_text": raw_text_out,
+            "token_logprobs": token_lp,
+            "prompt": text,
+        }

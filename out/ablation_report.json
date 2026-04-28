@@ -1,0 +1,109 @@
+{
+  "results": [
+    {
+      "ablation": "full_model",
+      "flags": {},
+      "metrics": {
+        "sa_wer": 8.541666666666666,
+        "wer": 8.541666666666666,
+        "scr": 0.0,
+        "av_sid_acc": 0.6666666666666666,
+        "der": 0.3157894736842105,
+        "jer": 0.4807692307692308,
+        "n_ref_words": 24,
+        "n_turns": 3
+      },
+      "power": null,
+      "transcript": "[Speaker: spk_01] Audio hypothesis: Teksting av Nicolai Winther | Teksting av Nicolai Winther | Teksting av Nicolai Winther | Teksting av Nicolai Winther | Teksting av Nicolai Winther\nVisual hypothesis: <none>\nAligned feature context: 0.0\nAudio hypothesis: Teksting av Nicolai Winther | Teksting av Nicolai Winther | Teksting av Nicolai Winther | Teksting av Nicolai Winther | Teksting av Nicolai Winther\nVisual hypothesis: <none>\nAligned feature context: 0.0\nAudio hypothesis\n[Speaker: spk_02] Audio hypothesis: Teksting av Nicolai Winther | Teksting av Nicolai Winther | Teksting av Nicolai Winther | Teksting av Nicolai Winther | Teksting av Nicolai Winther\nVisual hypothesis: <none>\nAligned feature context: Nicolai Winther, speaker, audio, transcript, hypothesis, aligned feature, context, output, correct, preserve, speaker label, output, audio hypothesis, visual hypothesis, aligned feature context, output, correct, preserve, speaker label, output, audio hypothesis, visual hypothesis, aligned feature context, output, correct, preserve, speaker label, output\n[Speaker: spk_02] ```\n```\n\nAudio hypothesis: Teksting av Nicolai Winther | Teksting av Nicolai Winther | Teksting av Nicolai Winther | Teksting av Nicolai Winther | Teksting av Nicolai Winther\nVisual hypothesis: <none>\nAligned feature context: 1. Nicolai Winther's texting | 2. Nicolai Winther's texting | 3. Nicolai Winther's texting | 4. Nicolai Winther's texting | 5. Nicolai Winther's texting\nOutput:\n```\n```\n\nAudio hypothesis: Tekst",
+      "speaker_order": [
+        "spk_01",
+        "spk_02"
+      ]
+    },
+    {
+      "ablation": "wo_c1",
+      "flags": {
+        "disable_c1": true
+      },
+      "metrics": {
+        "sa_wer": 8.375,
+        "wer": 8.375,
+        "scr": 0.0,
+        "av_sid_acc": 0.0,
+        "der": 1.0,
+        "jer": 1.0,
+        "n_ref_words": 24,
+        "n_turns": 3
+      },
+      "power": null,
+      "transcript": "[Speaker: UNKNOWN] Audio hypothesis: Teksting av Nicolai Winther | Teksting av Nicolai Winther | Teksting av Nicolai Winther | Teksting av Nicolai Winther | Teksting av Nicolai Winther\nVisual hypothesis: <none>\nAligned feature context: 0.5 0.5 0.5 0.5 0.5\nAudio hypothesis: Teksting av Nicolai Winther | Teksting av Nicolai Winther | Teksting av Nicolai Winther | Teksting av Nicolai Winther | Teksting av Nicolai Winther\nVisual\n[Speaker: UNKNOWN] Audio hypothesis: Teksting av Nicolai Winther | Teksting av Nicolai Winther | Teksting av Nicolai Winther | Teksting av Nicolai Winther | Teksting av Nicolai Winther\nVisual hypothesis: <none>\nAligned feature context: Nicolai Winther, speaker, audio, hypothesis, text, alignment, feature, context, speaker label, output, transcript, correction, preservation, speaker label, output, transcript, correction, preservation, speaker label, output, transcript, correction, preservation, speaker label, output, transcript, correction, preservation, speaker label, output, transcript,\n[Speaker: UNKNOWN] Audio hypothesis: Teksting av Nicolai Winther | Teksting av Nicolai Winther | Teksting av Nicolai Winther | Teksting av Nicolai Winther | Teksting av Nicolai Winther\nVisual hypothesis: <none>\nAligned feature context: 1.0\nAudio hypothesis: Teksting av Nicolai Winther | Teksting av Nicolai Winther | Teksting av Nicolai Winther | Teksting av Nicolai Winther | Teksting av Nicolai Winther\nVisual hypothesis: <none>\nAligned feature context: 1.0\nAudio hypothesis",
+      "speaker_order": []
+    },
+    {
+      "ablation": "wo_c2",
+      "flags": {
+        "disable_c2": true
+      },
+      "metrics": {
+        "sa_wer": 1.0,
+        "wer": 1.0,
+        "scr": 0.0,
+        "av_sid_acc": 0.6666666666666666,
+        "der": 0.3157894736842105,
+        "jer": 0.4807692307692308,
+        "n_ref_words": 24,
+        "n_turns": 3
+      },
+      "power": null,
+      "transcript": "[Speaker: spk_01] Teksting av Nicolai Winther\n[Speaker: spk_02] Teksting av Nicolai Winther\n[Speaker: spk_02] Teksting av Nicolai Winther",
+      "speaker_order": [
+        "spk_01",
+        "spk_02"
+      ]
+    },
+    {
+      "ablation": "wo_c3",
+      "flags": {
+        "disable_c3": true
+      },
+      "metrics": {
+        "sa_wer": 8.625,
+        "wer": 8.625,
+        "scr": 0.0,
+        "av_sid_acc": 0.6666666666666666,
+        "der": 0.3157894736842105,
+        "jer": 0.4807692307692308,
+        "n_ref_words": 24,
+        "n_turns": 3
+      },
+      "power": null,
+      "transcript": "[Speaker: spk_01] Audio hypothesis: Teksting av Nicolai Winther | Teksting av Nicolai Winther | Teksting av Nicolai Winther | Teksting av Nicolai Winther | Teksting av Nicolai Winther\nVisual hypothesis: <none>\nAligned feature context: 0.0\nAudio hypothesis: Teksting av Nicolai Winther | Teksting av Nicolai Winther | Teksting av Nicolai Winther | Teksting av Nicolai Winther | Teksting av Nicolai Winther\nVisual hypothesis: <none>\nAligned feature context: 0.0\nAudio hypothesis\n[Speaker: spk_02] Audio hypothesis: Teksting av Nicolai Winther | Teksting av Nicolai Winther | Teksting av Nicolai Winther | Teksting av Nicolai Winther | Teksting av Nicolai Winther\nVisual hypothesis: <none>\nAligned feature context: Nicolai Winther, speaker, audio, hypothesis, aligned feature context, transcript, speaker label, output, audio hypothesis, visual hypothesis, aligned feature context, transcript, speaker label, output, audio hypothesis, visual hypothesis, aligned feature context, transcript, speaker label, output, audio hypothesis, visual hypothesis, aligned feature context, transcript, speaker label\n[Speaker: spk_02] Audio hypothesis: Teksting av Nicolai Winther | Teksting av Nicolai Winther | Teksting av Nicolai Winther | Teksting av Nicolai Winther | Teksting av Nicolai Winther\nVisual hypothesis: <none>\nAligned feature context: 1. Nicolai Winther's texting | 2. Nicolai Winther's texting | 3. Nicolai Winther's texting | 4. Nicolai Winther's texting | 5. Nicolai Winther's texting\nOutput: 1. Nicolai Winther's texting | 2",
+      "speaker_order": [
+        "spk_01",
+        "spk_02"
+      ]
+    },
+    {
+      "ablation": "c3_wo_conf_gate",
+      "flags": {
+        "disable_conf_gate": true
+      },
+      "metrics": {
+        "sa_wer": 9.333333333333334,
+        "wer": 9.333333333333334,
+        "scr": 0.0,
+        "av_sid_acc": 0.6666666666666666,
+        "der": 0.3157894736842105,
+        "jer": 0.4807692307692308,
+        "n_ref_words": 24,
+        "n_turns": 3
+      },
+      "power": null,
+      "transcript": "[Speaker: spk_01] Audio hypothesis: Teksting av Nicolai Winther | Teksting av Nicolai Winther | Teksting av Nicolai Winther | Teksting av Nicolai Winther | Teksting av Nicolai Winther\nVisual hypothesis: <none>\nAligned feature context: 0.0\nAudio hypothesis: Teksting av Nicolai Winther | Teksting av Nicolai Winther | Teksting av Nicolai Winther | Teksting av Nicolai Winther | Teksting av Nicolai Winther\nVisual hypothesis: <none>\nAligned feature context: 0.0\nAudio hypothesis\n[Speaker: spk_02] Audio hypothesis: Teksting av Nicolai Winther | Teksting av Nicolai Winther | Teksting av Nicolai Winther | Teksting av Nicolai Winther | Teksting av Nicolai Winther\nVisual hypothesis: <none>\nAligned feature context: Nicolai Winther, speaker, audio, transcript, hypothesis, aligned feature, context, output, correct, preserve, speaker label, output, audio hypothesis, visual hypothesis, aligned feature context, output, correct, preserve, speaker label, output, audio hypothesis, visual hypothesis, aligned feature context, output, correct, preserve, speaker label, output\n[Speaker: spk_02] ```\n```\n\nAudio hypothesis: Teksting av Nicolai Winther | Teksting av Nicolai Winther | Teksting av Nicolai Winther | Teksting av Nicolai Winther | Teksting av Nicolai Winther\nVisual hypothesis: <none>\nAligned feature context: 1. Nicolai Winther is a Danish writer and translator. He has written several books, including novels, plays, and essays. He is known for his unique writing style, which combines elements of poetry and prose. 2. The speaker is Nicolai Winther, and he is speaking about his own writing process.",
+      "speaker_order": [
+        "spk_01",
+        "spk_02"
+      ]
+    }
+  ]
+}
