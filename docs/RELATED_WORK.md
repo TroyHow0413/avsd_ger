@@ -48,9 +48,11 @@ This is what we mean by "**backbone-agnostic**": you can swap Whisper / AV-HuBER
 
 ## Datasets we target
 
-* **LRS2 / LRS3 under CAV2vec corruption** — head-to-head with DualHyp + RelPrompt on the single-speaker AVSR setting (sanity check that we don't regress).
-* **MISP-2025 / MISP-Meeting** — multi-speaker real conversations (Mandarin); the regime DualHyp does not cover. SA-WER and SCR are the headline metrics here.
-* **MuAViC (ES/FR/IT/PT)** — multilingual robustness with the Llama-3-8B GER head.
+* **AMI Meeting Corpus** — primary evaluation target for this codebase: multi-speaker real meetings with stable speaker annotations. SA-WER, SCR, DER, JER, and AV-SID Acc are the headline metrics.
+* **MISP-Meeting / MISP-2025** — secondary real-conversation validation, especially for Mandarin multi-speaker meetings. This is the stronger out-of-domain test once the MISP manifest/annotation adapter is in place.
+* **LRS2** — optional AVSR sanity/smoke setting using the available complete subset and local preprocessing into audio + mouth ROI. It checks that the audio-visual path works, but it is not the main contribution because LRS2 is mostly single-speaker utterance-level data.
+
+LRS3 and MuAViC are not current experimental commitments unless complete data access and preprocessing are available. They can be mentioned as future extensions, but not as target datasets for the present paper/evaluation plan.
 
 ---
 
