@@ -23,15 +23,17 @@ ls -lh checkpoints/avhubert_large_lrs3_iter5.pt
 # expect ~3.7 GB
 
 # 3. fairseq + AV-HuBERT importable
-#    NOTE: AV-HuBERT uses non-relative absolute imports for its sibling
-#    modules (hubert_pretraining, hubert_dataset, noise, ...), so BOTH
-#    av_hubert/ and av_hubert/avhubert/ must be on PYTHONPATH.
+#    The setup script also persists PYTHONPATH and patches older AV-HuBERT
+#    clones whose pretraining config is missing input_modality.
+source scripts/setup_avhubert_env.sh
 python -c "
 import sys, fairseq
 sys.path.insert(0, 'av_hubert')
 sys.path.insert(0, 'av_hubert/avhubert')
 import avhubert
+import avhubert.hubert_pretraining as hp
 print('fairseq', fairseq.__version__, '/ avhubert OK')
+print('input_modality field:', 'input_modality' in hp.AVHubertPretrainingConfig.__dataclass_fields__)
 "
 
 # 4. GPU + driver
@@ -174,6 +176,7 @@ Once you have a real mouth ROI npy, point `data/sample_manifest.json` at it (`"m
 | `RuntimeError: CUDA out of memory` during GER step | 24 GB GPU + Llama-3 fp16 | Switch GER head to 4-bit (`bitsandbytes`) — see GPU memory recipe above |
 | `ModuleNotFoundError: avhubert` | `av_hubert` clone not on PYTHONPATH | `export PYTHONPATH="$PWD/av_hubert:$PWD/av_hubert/avhubert:$PYTHONPATH"` — see next row, both paths are needed |
 | `ModuleNotFoundError: hubert_pretraining` (or `hubert_dataset`, `noise`, ...) | Only outer `av_hubert/` on PYTHONPATH, not inner `av_hubert/avhubert/` | AV-HuBERT's `hubert.py` uses non-relative absolute imports for its siblings (`from hubert_pretraining import ...` without a leading dot), so the inner dir must also be on PYTHONPATH. Persist with a conda activate hook:<br>`mkdir -p $CONDA_PREFIX/etc/conda/activate.d && echo 'export PYTHONPATH="$PWD/av_hubert:$PWD/av_hubert/avhubert:$PYTHONPATH"' > $CONDA_PREFIX/etc/conda/activate.d/avhubert_path.sh` |
+| `ConfigKeyError: Key 'input_modality' not in 'AVHubertPretrainingConfig'` | Checkpoint was saved with a newer AV-HuBERT task config than the clone currently imported on the server | Run `source scripts/setup_avhubert_env.sh`, then `conda deactivate && conda activate avsdger`. Sanity check with `python -c "import avhubert.hubert_pretraining as hp; print(hp.__file__); print('input_modality' in hp.AVHubertPretrainingConfig.__dataclass_fields__)"` |
 | `FileNotFoundError: ...avhubert_large_lrs3_iter5.pt` | Checkpoint path mismatch | Verify `vsr.checkpoint` in `configs/default.yaml` matches your file |
 | Hangs on first call | First-time HF / SpeechBrain download | Wait it out; `htop` will show network / disk I/O. Llama-3 is the slowest. |
 | Whisper transcription is empty / very short | Wav too short or wrong sample rate | Verify `python -c "import soundfile; print(soundfile.info('data/utts/utt_0001.wav'))"` shows 16000 Hz mono |

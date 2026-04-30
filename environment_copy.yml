@@ -1,0 +1,144 @@
+# AVSD-GER conda environment.
+#
+# Tested combination: Python 3.10 + PyTorch 2.1 + CUDA 12.1.
+# Python 3.10 is deliberate — fairseq (needed by AV-HuBERT) is fragile on 3.11+.
+# If your GPU/driver only supports CUDA 11.8, swap `pytorch-cuda=12.1` for
+# `pytorch-cuda=11.8` below; everything else stays the same.
+#
+# Create:
+#     conda env create -f environment.yml
+#     conda activate avsdger
+#
+# Update after editing this file:
+#     conda env update -f environment.yml --prune
+
+name: avsdger
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
+
+dependencies:
+  # ---- Interpreter -------------------------------------------------------
+  - python=3.10
+  - pip=24.0
+
+  # ---- PyTorch stack ----------------------------------------------------
+  # IMPORTANT (Blackwell consumer GPUs / RTX 50-series, sm_120):
+  #   * torch 2.6 + cu124 wheel: max compiled arch is sm_90 (Hopper). Will FAIL
+  #     on RTX 5080 with `no kernel image is available`.
+  #   * torch 2.7+ with cu128 wheel: first release with sm_120 kernels compiled in.
+  # We therefore require torch >= 2.7 and the cu128 wheel set.
+  #
+  # NOTE: conda channels don't ship torch 2.7+cu128 directly. Install via pip
+  # from PyTorch's index URL (see Manual Steps at the bottom). The lines below
+  # are kept only so `conda env create` produces an env where torch is INSTALLED
+  # via pip into the right env.
+  #
+  # If you have a sm_90 (H100) or older GPU instead, you can pin torch=2.6.* +
+  # pytorch-cuda=12.4 here and skip the cu128 install step.
+  # (torch / torchaudio / torchvision are installed via pip from PyTorch's
+  #  cu128 wheel index; see Manual Steps at the bottom of this file.)
+
+  # ---- Numerics / IO ----------------------------------------------------
+  - numpy>=1.24,<2.0      # pin <2.0 — insightface/onnxruntime older releases break on numpy 2.x
+  - scipy>=1.11           # Hungarian assignment in avsd_ger/eval/metrics.py
+  - pyyaml>=6.0
+  - tqdm>=4.66
+
+  # ---- System libs needed by audio/video loaders ------------------------
+  - libsndfile            # soundfile backend
+  - ffmpeg                # librosa / opencv decode path
+  - openh264              # required by ffmpeg at runtime (Windows 11: without this ffmpeg fails to load)
+
+  # ---- Pure-pip packages (no good conda build, or version drifts faster) -
+  - pip:
+      # Core utilities
+      - einops>=0.7.0
+
+      # ASR backbone
+      - faster-whisper>=1.0.0     # CTranslate2 Whisper-large-v3
+      - transformers>=4.49,<4.55   # torch 2.6 satisfies the >=2.4 requirement that 4.49 added; cap <4.55 to avoid bleeding-edge breakage
+      - tokenizers>=0.21,<0.22     # transformers 4.49+ mandates this exact range
+      - huggingface_hub>=0.27,<0.32   # transformers 4.49 compatible
+      - accelerate>=0.28.0
+
+      # GER head (LLM + LoRA)
+      - peft>=0.10.0              # Llama-3-8B LoRA adapters
+      - sentencepiece>=0.2.0
+      - bitsandbytes>=0.45,<0.48  # 0.43+ uses torch.library.impl_abstract (added in torch 2.4); cap <0.48 for stability
+
+      # Identity encoders
+      - speechbrain>=1.0.0        # ECAPA-TDNN (voice)
+      - insightface>=0.7.3        # ArcFace (face)
+      - onnxruntime>=1.17         # InsightFace backend (use onnxruntime-gpu if you want CUDA exec)
+
+      # Audio / video IO
+      - librosa>=0.10.1
+      - opencv-python>=4.9,<4.10   # 4.10+ hard-requires numpy>=2 (ABI), conflicts with insightface needing numpy<2
+      - soundfile>=0.12
+      - python_speech_features>=0.6  # required by AV-HuBERT hubert_dataset.py (logfbank); pip only
+
+      # NVIDIA CUDA runtime libs + sympy + triton are pulled AUTOMATICALLY as
+      # exact-pinned deps of the torch wheel — provided you install torch
+      # *without* `--no-deps`. Do NOT list them explicitly here, because:
+      #   * torch 2.7+cu128 pins different exact versions than torch 2.6+cu124
+      #     (e.g. nvidia-cudnn-cu12 == 9.5.x not 9.1.x, nvidia-cusparselt-cu12
+      #     == 0.7.x not 0.6.2). A stale exact pin here will FORCE pip to break
+      #     torch's resolver.
+      #   * To regenerate the deterministic dep set after a torch upgrade:
+      #         pip show torch | grep Requires
+      # The Manual Steps at the bottom of this file install torch correctly.
+
+      # Power monitor (avsd_ger/eval/power.py) -- both have try/except fallbacks,
+      # but installing them gives real numbers instead of zeros + degraded=True.
+      # NOTE: `import pynvml` stays the same; the legacy `pynvml` PyPI package
+      # is deprecated, NVIDIA's official bindings now ship as `nvidia-ml-py`.
+      - nvidia-ml-py>=12.535
+      - psutil>=5.9
+
+      # Experiment tracking (avsd_ger/wandb_logger.py is a no-op if missing).
+      - wandb>=0.16.0
+
+# ---------------------------------------------------------------------------
+# Manual steps AFTER `conda activate avsdger`:
+#
+# 0. PyTorch with the right CUDA wheel for your GPU. Two paths:
+#
+#    (a) Blackwell consumer GPUs (RTX 5080 / 5090, sm_120) — REQUIRES torch 2.7+ cu128:
+#        pip install \
+#            "torch>=2.7" "torchaudio>=2.7" "torchvision>=0.22" \
+#            --index-url https://download.pytorch.org/whl/cu128
+#
+#    (b) Older GPUs (sm_50..sm_90, e.g. H100/A100/RTX 30/40-series):
+#        pip install \
+#            "torch==2.6.*" "torchaudio==2.6.*" "torchvision==0.21.*" \
+#            --index-url https://download.pytorch.org/whl/cu124
+#
+#    DO NOT pass `--no-deps` to either — torch's exact-pinned cu12 runtime libs
+#    (cublas, cudnn, cufft, ..., nccl, nvtx, plus sympy + triton) must be
+#    installed, otherwise the first GPU op fails with `libXXX.so: cannot open
+#    shared object`. After install, verify with:
+#        python -c "import torch; print(torch.cuda.get_arch_list())"
+#    For RTX 5080 the list MUST contain 'sm_120'.
+#
+# 1. fairseq from source (AV-HuBERT requires fairseq, but PyPI fairseq is stale).
+#    fairseq 0.12.2's omegaconf wheel has invalid PEP 440 metadata that pip 24.1+
+#    rejects, so we pin pip=24.0 in this env to allow the install through:
+#        pip install "git+https://github.com/facebookresearch/fairseq.git@v0.12.2"
+#
+# 2. AV-HuBERT repo on PYTHONPATH. BOTH paths are required because AV-HuBERT's
+#    source uses non-relative absolute imports for sibling modules
+#    (`from hubert_pretraining import ...` without a leading dot):
+#        git clone https://github.com/facebookresearch/av_hubert.git
+#        export PYTHONPATH="$PWD/av_hubert:$PWD/av_hubert/avhubert:$PYTHONPATH"
+#    Persist across new shells via a conda activate hook:
+#        mkdir -p $CONDA_PREFIX/etc/conda/activate.d
+#        echo 'export PYTHONPATH="$PWD/av_hubert:$PWD/av_hubert/avhubert:$PYTHONPATH"' \
+#            > $CONDA_PREFIX/etc/conda/activate.d/avhubert_path.sh
+#
+# 3. (gated) Llama-3-8B-Instruct access:
+#        hf auth login            # legacy `huggingface-cli login` is deprecated
+#        # token must have access to meta-llama/Meta-Llama-3-8B-Instruct
+# ---------------------------------------------------------------------------

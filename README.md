@@ -39,29 +39,31 @@ pip install -r requirements.txt    # the rest (LLM / VSR / identity / IO stacks)
 # fairseq from source — required by AV-HuBERT, PyPI fairseq is too stale
 pip install "git+https://github.com/facebookresearch/fairseq.git@v0.12.2"
 
-# AV-HuBERT repo on PYTHONPATH. Only the outer `av_hubert/` directory is needed —
-# the flat imports inside avhubert/ have been patched to use relative imports,
-# so the inner `av_hubert/avhubert/` path is no longer required.
+# AV-HuBERT repo on PYTHONPATH, plus a checkpoint-config compatibility patch.
 git clone https://github.com/facebookresearch/av_hubert.git
-export PYTHONPATH="$PWD/av_hubert:$PYTHONPATH"
+source scripts/setup_avhubert_env.sh
 
-# To make this stick across new shells (Linux / WSL / macOS):
-mkdir -p $CONDA_PREFIX/etc/conda/activate.d
-cat > $CONDA_PREFIX/etc/conda/activate.d/avhubert_path.sh <<EOF
-export PYTHONPATH="/mnt/d/GitHub/avsd_ger_claude/av_hubert:\$PYTHONPATH"
-EOF
+# Equivalent one-off command if you only want to patch an existing server clone:
+# python - <<'PY'
+# from pathlib import Path
+# p = Path("av_hubert/avhubert/hubert_pretraining.py")
+# s = p.read_text()
+# n = '    fine_tuning: bool = field(default=False, metadata={"help": "set to true if fine-tuning AV-Hubert"})\n'
+# if "input_modality:" not in s:
+#     p.write_text(s.replace(n, n + '    input_modality: Optional[str] = field(default="audiovisual", metadata={"help": "input modality: audio | video | audiovisual"})\n', 1))
+# PY
 
 # ⚠️  Windows 11 (native, not WSL): bash activate hooks don't run.
 # Use one of these alternatives instead:
 #
 # Option A — conda env var (recommended, persists across activations):
-#     conda env config vars set PYTHONPATH="D:\GitHub\avsd_ger_claude\av_hubert"
+#     conda env config vars set PYTHONPATH="D:\GitHub\avsd_ger_claude\av_hubert;D:\GitHub\avsd_ger_claude\av_hubert\avhubert"
 #     conda deactivate && conda activate avsdger   # apply immediately
 #
 # Option B — batch activate hook (PowerShell users: create avhubert_path.bat):
 #     New-Item -Force "$env:CONDA_PREFIX\etc\conda\activate.d\avhubert_path.bat"
 #     Add-Content "$env:CONDA_PREFIX\etc\conda\activate.d\avhubert_path.bat" `
-#         "@set PYTHONPATH=D:\GitHub\avsd_ger_claude\av_hubert;%PYTHONPATH%"
+#         "@set PYTHONPATH=D:\GitHub\avsd_ger_claude\av_hubert;D:\GitHub\avsd_ger_claude\av_hubert\avhubert;%PYTHONPATH%"
 
 # Gated Llama-3-8B-Instruct access (only when stub_backbones=false)
 hf auth login                         # paste a Read-scope token from https://huggingface.co/settings/tokens
