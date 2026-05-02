@@ -60,6 +60,43 @@ python one_go/main.py --mode all
 - `one_go/runs/ablation_report.json`
 - `one_go/runs/config_stub.yaml`
 
+AVSD frontend profile 只记录“turn manifest 是由哪种前端条件产生的”，不会启动 pyannote/Sortformer/ASD 本身。可选值：
+
+- `oracle_turns`
+- `common_pyannote_lightasd`
+- `strong_sortformer_talknet`
+- `degraded_pyannote`
+
+查看这些 profile：
+
+```bash
+python scripts/frontend_profiles.py --format markdown
+```
+
+用 one_go 跑一个目录里的所有 session manifest：
+
+```bash
+python one_go/main.py ^
+  --mode eval ^
+  --session-manifest data/ami_test/manifests ^
+  --pool checkpoints/identity_pool.pt ^
+  --ablation-out out/ami_ablation ^
+  --frontend-profile common_pyannote_lightasd
+```
+
+开启 W&B：
+
+```bash
+python one_go/main.py ^
+  --mode eval ^
+  --session-manifest data/ami_test/manifests ^
+  --pool checkpoints/identity_pool.pt ^
+  --ablation-out out/ami_ablation ^
+  --frontend-profile common_pyannote_lightasd ^
+  --wandb-project avsd-ger ^
+  --wandb-run-name ami-common-frontend
+```
+
 说明：原始 `scripts/enroll_identity.py` 会构建完整 Pipeline，所以注册阶段也会加载 AV-HuBERT 和 Llama。`one_go/c1_enroll.py` 只加载 C1 的 ECAPA、InsightFace 和 IdentityPool，更适合作为真实模型 smoke test 的第一步。
 
 ## 真实模型 smoke test

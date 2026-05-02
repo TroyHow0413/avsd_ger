@@ -41,6 +41,20 @@ vsr:
   layer: -1
   emit_text: true   # auto-disabled at load time if the checkpoint has no decoder/dict
 
+# ---------- Raw-video AVSD frontend ----------
+# The core pipeline consumes turn-level manifests. For raw meeting videos,
+# choose a diarization / active-speaker frontend that produces:
+#   turns[].audio, turns[].mouth_roi, optional turns[].speaker_mask_v.
+# Profiles are documented in docs/AVSD_FRONTENDS.md and exposed by:
+#   python scripts/frontend_profiles.py --format markdown
+frontend:
+  profile: common_pyannote_lightasd
+  diarization: pyannote/speaker-diarization-community-1
+  active_speaker: Light-ASD
+  face_tracking: RetinaFace_or_InsightFace_plus_SORT
+  mouth_roi: av_hubert_align_mouth
+  claim: frontend_agnostic_avsd_ger
+
 # ---------- C1: Identity Pool ----------
 identity:
   # Spec section 8: ECAPA-TDNN (VoxCeleb2) for audio, ArcFace ResNet-100 (MS-Celeb) for face

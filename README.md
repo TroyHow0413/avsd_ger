@@ -4,6 +4,7 @@ Identity-conditioned, closed-loop generative error correction for **multi-speake
 
 > Three contributions on top of the dual-hypothesis GER paradigm: a cross-modal **identity pool (C1)**, **ID-conditioned token-level alignment + speaker-aware GER (C2)**, and a **closed-loop confidence-gated feedback (C3)** that refines the pool online.
 > See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the design and [`docs/RELATED_WORK.md`](docs/RELATED_WORK.md) for the comparison with DualHyp / AVSD / DiarizationLM.
+> Raw meeting-video diarization frontends are tracked separately in [`docs/AVSD_FRONTENDS.md`](docs/AVSD_FRONTENDS.md): oracle turns, common pyannote+ASD, strong Sortformer/Precision-2 style frontends, and degraded robustness profiles.
 
 ---
 

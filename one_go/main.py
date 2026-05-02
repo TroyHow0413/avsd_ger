@@ -34,6 +34,8 @@ def _write_yaml(path: Path, data: dict[str, Any]) -> None:
 
 def make_runtime_config(args: argparse.Namespace) -> Path:
     cfg = _load_yaml(ROOT / "configs" / "default.yaml")
+    if args.frontend_profile:
+        cfg.setdefault("frontend", {})["profile"] = args.frontend_profile
     if not args.real:
         cfg["stub_backbones"] = True
         cfg["device"] = args.device or "cpu"
@@ -78,6 +80,20 @@ def main() -> int:
     p.add_argument("--utt", default="utt_0001")
     p.add_argument("--pool", default=str(RUN_DIR / "identity_pool.pt"))
     p.add_argument("--ablation-out", default=str(RUN_DIR / "ablation_report.json"))
+    p.add_argument(
+        "--frontend-profile",
+        choices=[
+            "oracle_turns",
+            "common_pyannote_lightasd",
+            "strong_sortformer_talknet",
+            "degraded_pyannote",
+        ],
+        default=None,
+        help="Frontend profile metadata for eval reports/W&B.",
+    )
+    p.add_argument("--wandb-project", default=None, help="Forwarded to eval_ablations.py.")
+    p.add_argument("--wandb-run-name", default=None, help="Forwarded to eval_ablations.py.")
+    p.add_argument("--no-wandb", action="store_true", help="Forwarded to eval_ablations.py.")
     p.add_argument("--with-power", action="store_true", help="Enable power monitor during eval.")
     p.add_argument("--dry-run", action="store_true", help="Print commands without executing them.")
     args = p.parse_args()
@@ -136,6 +152,14 @@ def main() -> int:
             "--out",
             args.ablation_out,
         ]
+        if args.frontend_profile:
+            eval_cmd.extend(["--frontend-profile", args.frontend_profile])
+        if args.wandb_project:
+            eval_cmd.extend(["--wandb-project", args.wandb_project])
+        if args.wandb_run_name:
+            eval_cmd.extend(["--wandb-run-name", args.wandb_run_name])
+        if args.no_wandb:
+            eval_cmd.append("--no-wandb")
         if not args.with_power:
             eval_cmd.append("--no-power")
         run_cmd(eval_cmd, dry_run=args.dry_run)

@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import glob
 import json
 import sys
 from dataclasses import asdict
@@ -43,6 +44,7 @@ from avsd_ger.pipeline import AVSDGERPipeline            # noqa: E402
 from avsd_ger.eval.session import SessionRunner, SessionTurn  # noqa: E402
 from avsd_ger.eval.metrics import evaluate_session, MetricsReport  # noqa: E402
 from avsd_ger.eval.power import PowerMonitor             # noqa: E402
+from avsd_ger.frontend import get_frontend_profile, list_frontend_profiles  # noqa: E402
 from avsd_ger.utils import load_config                   # noqa: E402
 from avsd_ger.wandb_logger import WandbLogger, add_wandb_args  # noqa: E402
 
@@ -54,6 +56,59 @@ ABLATION_MATRIX = [
     ("wo_c3",                {"disable_c3": True}),
     ("c3_wo_conf_gate",      {"disable_conf_gate": True}),
 ]
+
+
+def _frontend_choices() -> list[str]:
+    return [p.key for p in list_frontend_profiles()]
+
+
+def _resolve_manifest_paths(spec: str) -> list[Path]:
+    """Resolve one manifest file, a directory of JSON manifests, or a glob."""
+
+    p = Path(spec)
+    if p.is_dir():
+        paths = sorted(p.glob("*.json"))
+    elif any(ch in spec for ch in "*?[]"):
+        paths = sorted(Path(x) for x in glob.glob(spec))
+    else:
+        paths = [p]
+
+    paths = [x for x in paths if x.exists() and x.is_file()]
+    if not paths:
+        raise FileNotFoundError(f"No manifest JSON files matched: {spec}")
+    return paths
+
+
+def _output_path_for_manifest(out_arg: str, manifest_path: Path, multi: bool) -> Path:
+    """Back compatible single-file output; directory-style output for batches."""
+
+    out = Path(out_arg)
+    if not multi:
+        return out
+    out_dir = out.parent / out.stem if out.suffix.lower() == ".json" else out
+    return out_dir / f"{manifest_path.stem}.json"
+
+
+def _apply_frontend_profile(cfg: dict[str, Any], frontend_profile: str | None) -> None:
+    if frontend_profile is not None:
+        cfg.setdefault("frontend", {})["profile"] = frontend_profile
+
+
+def _frontend_meta_from_cfg(cfg: dict[str, Any]) -> dict[str, Any]:
+    frontend_cfg = cfg.get("frontend", {}) or {}
+    frontend_key = str(frontend_cfg.get("profile", "oracle_turns"))
+    try:
+        frontend_profile = get_frontend_profile(frontend_key)
+        return {
+            "profile": frontend_profile.key,
+            "label": frontend_profile.label,
+            "tier": frontend_profile.tier,
+            "diarization": frontend_profile.diarization,
+            "active_speaker": frontend_profile.active_speaker,
+            "claim": frontend_profile.claim,
+        }
+    except KeyError:
+        return {"profile": frontend_key, "label": "custom", "tier": "custom"}
 
 
 def _load_audio(path: str | None) -> np.ndarray | torch.Tensor:
@@ -162,10 +217,12 @@ def _run_one(
         pwr = None
 
     report = evaluate_session(session.turns)
+    frontend_meta = _frontend_meta_from_cfg(cfg_run)
 
     return {
         "ablation": ablation_name,
         "flags": flags,
+        "frontend": frontend_meta,
         "metrics": {
             "sa_wer": report.sa_wer,
             "wer": report.wer,
@@ -192,10 +249,63 @@ def _run_one(
     }
 
 
+def _run_manifest(
+    cfg: dict[str, Any],
+    manifest_path: Path,
+    pool_path: str | None,
+    monitor: PowerMonitor | None,
+    only: list[str] | None,
+    wb: WandbLogger,
+    step_offset: int = 0,
+) -> tuple[list[dict[str, Any]], bool | None]:
+    with open(manifest_path, "r", encoding="utf-8") as f:
+        manifest = json.load(f)
+
+    results: list[dict[str, Any]] = []
+    for i, (name, flags) in enumerate(ABLATION_MATRIX):
+        if only is not None and name not in only:
+            continue
+        print(f"\n=== {manifest_path.name} :: running ablation: {name}  flags={flags} ===")
+        r = _run_one(cfg, name, flags, manifest, pool_path, monitor)
+        print(json.dumps(r["metrics"], indent=2))
+        results.append(r)
+
+        prefix = f"manifest/{manifest_path.stem}/ablation/{name}"
+        wb.log({
+            f"{prefix}/sa_wer":     r["metrics"]["sa_wer"],
+            f"{prefix}/wer":        r["metrics"]["wer"],
+            f"{prefix}/scr":        r["metrics"]["scr"],
+            f"{prefix}/av_sid_acc": r["metrics"]["av_sid_acc"],
+            f"{prefix}/der":        r["metrics"]["der"],
+            f"{prefix}/jer":        r["metrics"]["jer"],
+            f"{prefix}/frontend":   r["frontend"]["profile"],
+            **({f"{prefix}/energy_wh": r["power"]["energy_wh"],
+                f"{prefix}/avg_power_w": r["power"]["avg_power_w"]} if r["power"] else {}),
+        }, step=step_offset + i)
+
+    by_name = {r["ablation"]: r for r in results}
+    spec_check_pass: bool | None = None
+    if "wo_c3" in by_name and "c3_wo_conf_gate" in by_name:
+        a = by_name["wo_c3"]["metrics"]["sa_wer"]
+        b = by_name["c3_wo_conf_gate"]["metrics"]["sa_wer"]
+        spec_check_pass = b >= a
+        print(
+            f"\n[spec check] {manifest_path.name}: C3-w/o-gate SA-WER ({b:.4f}) "
+            f"{'>=' if spec_check_pass else '<'} w/o-C3 SA-WER ({a:.4f}): "
+            f"{'PASS' if spec_check_pass else 'FAIL -- gate-removed variant should degrade'}"
+        )
+
+    return results, spec_check_pass
+
+
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--config", default=str(ROOT / "configs/default.yaml"))
-    p.add_argument("--manifest", required=True)
+    p.add_argument(
+        "--manifest",
+        required=True,
+        help="Manifest JSON file, directory containing *.json manifests, or a glob pattern.",
+    )
     p.add_argument("--pool", default=str(ROOT / "checkpoints/identity_pool.pt"))
     p.add_argument("--out", default=str(ROOT / "out/ablation_report.json"))
     p.add_argument("--no-power", action="store_true", help="skip PowerMonitor")
@@ -212,6 +322,12 @@ def main() -> int:
         help="Override Llama-3 weight precision. auto = pick from GPU VRAM. "
              "Default: read from configs/default.yaml (ger.llm_quant).",
     )
+    p.add_argument(
+        "--frontend-profile",
+        default=None,
+        choices=_frontend_choices(),
+        help="Override cfg.frontend.profile for reporting/experiment grouping.",
+    )
     add_wandb_args(p)
     args = p.parse_args()
 
@@ -220,15 +336,31 @@ def main() -> int:
     if args.llm_quant is not None:
         cfg.setdefault("ger", {})["llm_quant"] = args.llm_quant
         print(f"[eval_ablations] Override llm_quant -> {args.llm_quant}")
-    with open(args.manifest, "r", encoding="utf-8") as f:
-        manifest = json.load(f)
+    _apply_frontend_profile(cfg, args.frontend_profile)
+    manifest_paths = _resolve_manifest_paths(args.manifest)
+    multi = len(manifest_paths) > 1
+    frontend_meta = _frontend_meta_from_cfg(cfg)
+    print(
+        f"[eval_ablations] frontend={frontend_meta['profile']} "
+        f"({frontend_meta.get('tier', 'custom')}); manifests={len(manifest_paths)}"
+    )
 
     wb = WandbLogger.from_args(
         args,
         default_project="avsd-ger",
-        default_run_name=f"ablation-{Path(args.manifest).stem}",
+        default_run_name=(
+            f"ablation-{Path(args.manifest).stem}"
+            if not multi else f"ablation-batch-{Path(args.manifest).stem}"
+        ),
         job_type="eval-ablations",
-        config={"config_path": args.config, "manifest": args.manifest, **cfg},
+        config={
+            "config_path": args.config,
+            "manifest": args.manifest,
+            "n_manifests": len(manifest_paths),
+            "frontend_profile": frontend_meta["profile"],
+            "frontend_tier": frontend_meta.get("tier"),
+            **cfg,
+        },
     )
 
     monitor = None
@@ -236,54 +368,58 @@ def main() -> int:
         monitor = PowerMonitor()
         monitor.calibrate_idle(duration_s=args.idle_calibrate_s)
 
-    results: list[dict[str, Any]] = []
-    for i, (name, flags) in enumerate(ABLATION_MATRIX):
-        if args.only is not None and name not in args.only:
-            continue
-        print(f"\n=== running ablation: {name}  flags={flags} ===")
-        r = _run_one(cfg, name, flags, manifest, args.pool, monitor)
-        print(json.dumps(r["metrics"], indent=2))
-        results.append(r)
-
-        # One W&B "step" per ablation row, namespaced by row name so charts
-        # can show all 5 metrics x 5 rows on the same dashboard.
-        wb.log({
-            f"ablation/{name}/sa_wer":     r["metrics"]["sa_wer"],
-            f"ablation/{name}/wer":        r["metrics"]["wer"],
-            f"ablation/{name}/scr":        r["metrics"]["scr"],
-            f"ablation/{name}/av_sid_acc": r["metrics"]["av_sid_acc"],
-            f"ablation/{name}/der":        r["metrics"]["der"],
-            f"ablation/{name}/jer":        r["metrics"]["jer"],
-            **({f"ablation/{name}/energy_wh": r["power"]["energy_wh"],
-                f"ablation/{name}/avg_power_w": r["power"]["avg_power_w"]} if r["power"] else {}),
-        }, step=i)
-
-    # Spec-mandated sanity: C3 w/o Conf. Gate must be worse than w/o C3.
-    by_name = {r["ablation"]: r for r in results}
-    spec_check_pass: bool | None = None
-    if "wo_c3" in by_name and "c3_wo_conf_gate" in by_name:
-        a = by_name["wo_c3"]["metrics"]["sa_wer"]
-        b = by_name["c3_wo_conf_gate"]["metrics"]["sa_wer"]
-        spec_check_pass = b >= a  # higher SA-WER = worse
-        print(
-            f"\n[spec check] C3-w/o-gate SA-WER ({b:.4f}) "
-            f"{'>=' if spec_check_pass else '<'} w/o-C3 SA-WER ({a:.4f}): "
-            f"{'PASS' if spec_check_pass else 'FAIL -- gate-removed variant should degrade'}"
+    all_runs: list[dict[str, Any]] = []
+    spec_checks: dict[str, bool | None] = {}
+    ablations_per_manifest = len(args.only) if args.only is not None else len(ABLATION_MATRIX)
+    for m_idx, manifest_path in enumerate(manifest_paths):
+        results, spec_check_pass = _run_manifest(
+            cfg,
+            manifest_path,
+            args.pool,
+            monitor,
+            args.only,
+            wb,
+            step_offset=m_idx * max(1, ablations_per_manifest),
         )
+        out_path = _output_path_for_manifest(args.out, manifest_path, multi=multi)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "manifest": str(manifest_path),
+            "frontend": frontend_meta,
+            "results": results,
+        }
+        with open(out_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+        print(f"\n[wrote] {out_path}")
+        all_runs.append(payload)
+        spec_checks[manifest_path.stem] = spec_check_pass
 
-    out_path = Path(args.out)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(out_path, "w", encoding="utf-8") as f:
-        json.dump({"results": results}, f, indent=2)
-    print(f"\n[wrote] {out_path}")
+    if multi:
+        out = Path(args.out)
+        out_dir = out.parent / out.stem if out.suffix.lower() == ".json" else out
+        summary_path = out_dir / "summary.json"
+        summary_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(summary_path, "w", encoding="utf-8") as f:
+            json.dump({
+                "frontend": frontend_meta,
+                "n_manifests": len(manifest_paths),
+                "spec_checks": spec_checks,
+                "runs": all_runs,
+            }, f, indent=2)
+        print(f"\n[wrote] {summary_path}")
 
     # Pin the headline numbers to the run summary so they're sortable in the W&B UI.
     summary: dict[str, Any] = {}
-    for r in results:
-        for k, v in r["metrics"].items():
-            summary[f"summary/{r['ablation']}/{k}"] = v
-    if spec_check_pass is not None:
-        summary["summary/spec_check_c3_gate_pass"] = bool(spec_check_pass)
+    summary["summary/frontend_profile"] = frontend_meta["profile"]
+    summary["summary/frontend_tier"] = frontend_meta.get("tier")
+    for run in all_runs:
+        stem = Path(run["manifest"]).stem
+        for r in run["results"]:
+            for k, v in r["metrics"].items():
+                summary[f"summary/{stem}/{r['ablation']}/{k}"] = v
+    for stem, passed in spec_checks.items():
+        if passed is not None:
+            summary[f"summary/{stem}/spec_check_c3_gate_pass"] = bool(passed)
     wb.summary(summary)
     wb.finish()
     return 0

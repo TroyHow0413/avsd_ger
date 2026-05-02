@@ -15,6 +15,13 @@ vsr:
   config: av_hubert/avhubert/conf/finetune/self_large_vox_433h.yaml
   layer: -1
   emit_text: true
+frontend:
+  profile: common_pyannote_lightasd
+  diarization: pyannote/speaker-diarization-community-1
+  active_speaker: Light-ASD
+  face_tracking: RetinaFace_or_InsightFace_plus_SORT
+  mouth_roi: av_hubert_align_mouth
+  claim: frontend_agnostic_avsd_ger
 identity:
   voice_encoder: speechbrain/spkrec-ecapa-voxceleb
   face_encoder: buffalo_l
@@ -66,7 +73,9 @@ ger:
     Aligned feature context: <AV_CTX>
 
     Correct the transcript using the audio hypothesis as the main source.
+
     Return only the corrected transcript text, with no explanation and no quoted instruction.
+
     Do not output the words "speaker label".
 
     Output:
@@ -77,7 +86,7 @@ feedback:
   tau_update: 0.55
   confidence_low: 0.35
   confidence_mid: 0.55
-  ger_fallback_min_conf: 0.20
+  ger_fallback_min_conf: 0.2
   ger_fallback_margin: 0.05
   weights:
     asr_rescore: 0.6

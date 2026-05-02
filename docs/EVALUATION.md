@@ -132,3 +132,37 @@ Skip the power monitor (e.g. on a CI runner without NVML):
 ```bash
 python scripts/eval_ablations.py --no-power ...
 ```
+
+---
+
+## Raw-Video Frontend Profiles
+
+For raw meeting-video experiments, record which diarization / active-speaker
+frontend produced the turn manifest. The recommended profiles are documented
+in [`AVSD_FRONTENDS.md`](AVSD_FRONTENDS.md), and the canonical registry can be
+printed with:
+
+```bash
+python scripts/frontend_profiles.py --format markdown
+```
+
+Use `oracle_turns` as the upper-bound condition, `common_pyannote_lightasd` as
+the reproducible open-source backbone, `strong_sortformer_talknet` as the
+strong/SOTA-ish frontend reference, and `degraded_pyannote` as the robustness
+side proof.
+
+`scripts/eval_ablations.py` accepts either one manifest, a directory of
+manifests, or a glob pattern:
+
+```powershell
+python scripts\eval_ablations.py `
+  --config configs\default.yaml `
+  --manifest data\ami_test\manifests `
+  --pool checkpoints\identity_pool.pt `
+  --out out\ami_ablation `
+  --frontend-profile common_pyannote_lightasd `
+  --no-power
+```
+
+When multiple manifests are matched, `--out` is treated as an output directory
+and the script writes one report per manifest plus `summary.json`.
