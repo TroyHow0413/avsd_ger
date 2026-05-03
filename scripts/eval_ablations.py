@@ -125,14 +125,24 @@ def _load_audio(path: str | None) -> np.ndarray | torch.Tensor:
         return torch.randn(16000 * 3)
 
 
-def _load_video(path: str | None, num_frames: int = 75) -> torch.Tensor:
+def _load_face(path: str | None) -> np.ndarray | None:
     if path is None or not Path(path).exists():
-        return torch.rand(num_frames, 1, 96, 96)
+        return None
+    try:
+        from PIL import Image
+        return np.array(Image.open(path).convert("RGB"))
+    except Exception:
+        return None
+
+
+def _load_video(path: str | None, num_frames: int = 75) -> tuple[torch.Tensor | None, bool]:
+    if path is None or not Path(path).exists():
+        return None, False
     arr = np.load(path)
     t = torch.from_numpy(arr).float()
     if t.ndim == 3:
         t = t.unsqueeze(1)
-    return t / 255.0 if t.max() > 1.5 else t
+    return (t / 255.0 if t.max() > 1.5 else t), True
 
 
 def _maybe_tensor(x) -> torch.Tensor | None:
@@ -148,12 +158,14 @@ def _maybe_tensor(x) -> torch.Tensor | None:
 def _load_turns(manifest: dict[str, Any]) -> list[SessionTurn]:
     turns: list[SessionTurn] = []
     for i, row in enumerate(manifest.get("turns", manifest.get("utterances", []))):
+        video_frames, has_visual = _load_video(row.get("mouth_roi") or row.get("video"))
         turns.append(SessionTurn(
             turn_id=str(row.get("turn_id", row.get("utt_id", f"t{i:04d}"))),
             start=float(row.get("start", i)),
             end=float(row.get("end", i + 1)),
             audio_wav=_load_audio(row.get("audio")),
-            video_frames=_load_video(row.get("mouth_roi") or row.get("video")),
+            video_frames=video_frames,
+            has_visual=has_visual,
             face_image=None,
             speaker_mask_v=_maybe_tensor(row.get("speaker_mask_v")),
             snr_per_tok=_maybe_tensor(row.get("snr_per_tok")),
@@ -172,10 +184,7 @@ def _enroll_pool_from_manifest(pipe: AVSDGERPipeline, manifest: dict[str, Any]) 
         pipe.enroll(
             spk["speaker_id"],
             _load_audio(spk.get("enrollment_audio")),
-            # enrol_face: stub with random RGB if missing
-            spk.get("enrollment_face")
-            and _load_audio(spk.get("enrollment_face"))
-            or (np.random.rand(224, 224, 3) * 255).astype(np.uint8),
+            _load_face(spk.get("enrollment_face")),
             meta=spk.get("meta"),
         )
 
@@ -198,6 +207,8 @@ def _run_one(
         "disable_conf_gate": False,
     }
     cfg_run["ablation"].update(flags)
+    if cfg_run.get("ger", {}).get("mode") == "visual_only":
+        cfg_run["ablation"]["disable_c2"] = False
 
     pipe = AVSDGERPipeline(cfg_run)
     if pool_path and Path(pool_path).exists():
@@ -323,6 +334,16 @@ def main() -> int:
              "Default: read from configs/default.yaml (ger.llm_quant).",
     )
     p.add_argument(
+        "--ger-mode",
+        default=None,
+        choices=["audio_only", "av", "visual_only"],
+        help=(
+            "Override cfg.ger.mode. audio_only ignores mouth ROI/lip_hyp/<AV_CTX>; "
+            "av uses them only when a real mouth_roi/video path exists; "
+            "visual_only is reserved for future VSR-only GER experiments."
+        ),
+    )
+    p.add_argument(
         "--frontend-profile",
         default=None,
         choices=_frontend_choices(),
@@ -336,6 +357,9 @@ def main() -> int:
     if args.llm_quant is not None:
         cfg.setdefault("ger", {})["llm_quant"] = args.llm_quant
         print(f"[eval_ablations] Override llm_quant -> {args.llm_quant}")
+    if args.ger_mode is not None:
+        cfg.setdefault("ger", {})["mode"] = args.ger_mode
+        print(f"[eval_ablations] Override ger.mode -> {args.ger_mode}")
     _apply_frontend_profile(cfg, args.frontend_profile)
     manifest_paths = _resolve_manifest_paths(args.manifest)
     multi = len(manifest_paths) > 1

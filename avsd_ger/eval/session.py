@@ -38,6 +38,7 @@ class SessionTurn:
         start, end    -- seconds, relative to session start (for ordering/DER)
         audio_wav     -- per-turn mono waveform (torch.Tensor | np.ndarray)
         video_frames  -- per-turn lip ROI video (torch.Tensor, shape per VSR backbone)
+        has_visual    -- True only when video_frames came from a real mouth ROI
 
     Optional (passed through to the pipeline):
         face_image    -- RGB face image for this speaker (falls back to first frame)
@@ -55,7 +56,8 @@ class SessionTurn:
     start: float
     end: float
     audio_wav: torch.Tensor | np.ndarray
-    video_frames: torch.Tensor
+    video_frames: torch.Tensor | None
+    has_visual: bool = True
     face_image: np.ndarray | None = None
     speaker_mask_v: torch.Tensor | None = None
     snr_per_tok: torch.Tensor | None = None
@@ -127,6 +129,7 @@ class SessionRunner:
                 audio_wav=turn.audio_wav,
                 video_frames=turn.video_frames,
                 face_image=turn.face_image,
+                has_visual=turn.has_visual,
                 speaker_mask_v=turn.speaker_mask_v,
                 snr_per_tok=turn.snr_per_tok,
                 lip_conf_v=turn.lip_conf_v,
@@ -179,6 +182,7 @@ class SessionRunner:
                 end=float(row.get("end", i + 1)),
                 audio_wav=row["audio_wav"],
                 video_frames=row["video_frames"],
+                has_visual=bool(row.get("has_visual", True)),
                 face_image=row.get("face_image"),
                 speaker_mask_v=row.get("speaker_mask_v"),
                 snr_per_tok=row.get("snr_per_tok"),

@@ -48,6 +48,7 @@ alignment:
   low_conf_handling: soft_gating
   dropout: 0.1
 ger:
+  mode: audio_only
   llm_name: meta-llama/Meta-Llama-3-8B-Instruct
   max_new_tokens: 64
   speaker_special_token: '[Speaker: ID_i]'

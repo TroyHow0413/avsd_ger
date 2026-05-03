@@ -36,6 +36,7 @@ def make_runtime_config(args: argparse.Namespace) -> Path:
     cfg = _load_yaml(ROOT / "configs" / "default.yaml")
     if args.frontend_profile:
         cfg.setdefault("frontend", {})["profile"] = args.frontend_profile
+    cfg.setdefault("ger", {})["mode"] = args.ger_mode
     if not args.real:
         cfg["stub_backbones"] = True
         cfg["device"] = args.device or "cpu"
@@ -70,6 +71,16 @@ def main() -> int:
     p.add_argument("--real", action="store_true", help="Use real backbones from configs/default.yaml.")
     p.add_argument("--device", default=None, help="Override device, e.g. cpu or cuda.")
     p.add_argument("--llm-quant", choices=["auto", "fp16", "int8", "4bit"], default=None)
+    p.add_argument(
+        "--ger-mode",
+        choices=["audio_only", "av", "visual_only"],
+        default="audio_only",
+        help=(
+            "C2/GER input mode. audio_only ignores lip_hyp/<AV_CTX>; av uses "
+            "real mouth ROI when present and otherwise downgrades per turn; "
+            "visual_only is reserved for future VSR-only GER experiments."
+        ),
+    )
     p.add_argument(
         "--python",
         default=sys.executable,
@@ -126,6 +137,8 @@ def main() -> int:
             args.utt,
             "--pool",
             str(pool),
+            "--ger-mode",
+            args.ger_mode,
         ], dry_run=args.dry_run)
 
     if args.mode in {"eval", "all"}:
@@ -151,6 +164,8 @@ def main() -> int:
             str(pool),
             "--out",
             args.ablation_out,
+            "--ger-mode",
+            args.ger_mode,
         ]
         if args.frontend_profile:
             eval_cmd.extend(["--frontend-profile", args.frontend_profile])

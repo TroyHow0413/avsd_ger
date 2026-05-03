@@ -34,6 +34,7 @@ def _write_yaml(path: Path, data: dict[str, Any]) -> None:
 
 def make_runtime_config(args: argparse.Namespace) -> Path:
     cfg = _load_yaml(ROOT / "configs" / "default.yaml")
+    cfg.setdefault("ger", {})["mode"] = args.ger_mode
     if not args.real:
         cfg["stub_backbones"] = True
         cfg["device"] = args.device or "cpu"
@@ -67,6 +68,12 @@ def main() -> int:
     p.add_argument("--real", action="store_true", help="Use real backbones and a real manifest.")
     p.add_argument("--device", default=None)
     p.add_argument("--llm-quant", choices=["auto", "fp16", "int8", "4bit"], default=None)
+    p.add_argument(
+        "--ger-mode",
+        choices=["audio_only", "av", "visual_only"],
+        default="audio_only",
+        help="Write cfg.ger.mode into the generated one_go training config.",
+    )
     p.add_argument(
         "--python",
         default=sys.executable,

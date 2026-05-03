@@ -36,6 +36,14 @@ C1 身份池注册/查询
 python one_go/main.py --mode smoke
 ```
 
+默认会生成 `ger.mode: audio_only`，所以如果 manifest 里的 `mouth_roi` 是 `null`，不会再用随机 video fallback，也不会把 `Visual hypothesis` / `<AV_CTX>` 交给 GER。
+
+如果以后已经有真实 mouth ROI，可以显式打开 AV-GER：
+
+```bash
+python one_go/main.py --mode smoke --ger-mode av
+```
+
 如果当前 shell 的 Python 不是项目环境，可以指定解释器：
 
 ```bash
@@ -130,12 +138,13 @@ python one_go/main.py \
   --real \
   --device cuda \
   --llm-quant 4bit \
+  --ger-mode audio_only \
   --manifest one_go/runs/ami_es2004a/ES2004a_B_manifest.json \
   --utt ES2004a_B_utt \
   --pool one_go/runs/ami_es2004a/identity_pool.pt
 ```
 
-这个 manifest 使用真实 AMI headset wav，但 `mouth_roi` 仍为 `null`，所以 VSR 会使用随机 video fallback。它适合验证真实音频下 Whisper + C1 + GER + C3 的可行性；要验证真正的 `lip_hyp`，还需要从 AMI video 预处理出 mouth ROI `.npy`。
+这个 manifest 使用真实 AMI headset wav，但 `mouth_roi` 仍为 `null`，所以默认会走 audio-only GER。它适合验证真实音频下 Whisper + C1 + GER + C3 的可行性；要验证真正的 `lip_hyp`，还需要从 AMI video 预处理出 mouth ROI `.npy`，然后用 `--ger-mode av`。
 
 使用自己的 manifest：
 
@@ -251,7 +260,7 @@ python one_go/train.py --stage all --real --device cuda --llm-quant 4bit --manif
 1. 使用 fine-tuned VSR checkpoint，例如 `checkpoints/self_large_vox_433h.pt`，而不是 pretraining-only 的 `avhubert_large_lrs3_iter5.pt`
 2. `configs/default.yaml` 里保持 `vsr.emit_text: true`
 3. checkpoint 能正确加载 seq2seq decoder 和 target dictionary
-4. `mouth_roi` 指向真实的 `[T, 1, 96, 96]` 或 `[T, 96, 96]` mouth ROI `.npy`，不能是缺失路径触发的随机 video fallback
+4. `mouth_roi` 指向真实的 `[T, 1, 96, 96]` 或 `[T, 96, 96]` mouth ROI `.npy`；缺失时会降级为 audio-only，不会再触发随机 video fallback
 5. mouth ROI 必须和 audio 同一段、同一 speaker、约 25 fps
 
-当前 sample manifest 里的 `data/utts/utt_0001_mouth.npy` 如果不存在，代码会用随机 mouth ROI fallback。这种情况下 `<AV_CTX>` 可以跑通形状，但 `lip_hyp` 没有语义，空字符串是正常的。
+当前 sample manifest 里的 `data/utts/utt_0001_mouth.npy` 如果不存在，代码会把该 turn 标记为 `has_visual=false` 并降级到 audio-only GER；如果要测试 `<AV_CTX>` 和 `lip_hyp`，请提供真实 ROI 并使用 `--ger-mode av`。

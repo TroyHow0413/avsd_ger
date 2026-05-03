@@ -111,7 +111,7 @@ Useful for: confirming Whisper, ECAPA, ArcFace, and Llama-3 all load and produce
        "utt_id": "utt_0001",
        "speaker_id": "spk_01",
        "audio": "data/utts/utt_0001.wav",
-       "mouth_roi": null,            ← null → run_sample falls back to random video
+      "mouth_roi": null,            ← null → run_sample uses audio-only GER
        "transcript_gold": "<your reference text>"
      }
    ]

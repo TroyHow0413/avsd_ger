@@ -35,22 +35,22 @@ def _load_audio(path: str | None) -> np.ndarray | torch.Tensor:
     return wav.astype(np.float32)
 
 
-def _load_video_mouth_roi(path: str | None, num_frames: int = 75) -> torch.Tensor:
-    """Return [T, 1, 96, 96] mouth ROI in [0, 1]. Zero placeholder if missing."""
+def _load_video_mouth_roi(path: str | None, num_frames: int = 75) -> tuple[torch.Tensor | None, bool]:
+    """Return a real [T, 1, 96, 96] mouth ROI plus a provenance flag."""
     if path is None or not Path(path).exists():
-        return torch.zeros(num_frames, 1, 96, 96)
+        return None, False
     # Real preprocessing pipeline lives in av_hubert/avhubert/preparation/align_mouth.py.
     # This caller expects pre-aligned [T, 1, 96, 96] tensors cached on disk.
     arr = np.load(path)
     t = torch.from_numpy(arr).float()
     if t.ndim == 3:
         t = t.unsqueeze(1)  # add channel dim
-    return t / 255.0 if t.max() > 1.5 else t
+    return (t / 255.0 if t.max() > 1.5 else t), True
 
 
-def _load_face(path: str | None) -> np.ndarray:
+def _load_face(path: str | None) -> np.ndarray | None:
     if path is None or not Path(path).exists():
-        return (np.random.rand(224, 224, 3) * 255).astype(np.uint8)
+        return None
     import cv2
     img = cv2.imread(path)
     return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
@@ -68,16 +68,26 @@ def main() -> int:
         help="Override Llama-3 weight precision. auto = pick from GPU VRAM. "
              "Default: read from configs/default.yaml (ger.llm_quant).",
     )
+    p.add_argument(
+        "--ger-mode",
+        default=None,
+        choices=["audio_only", "av", "visual_only"],
+        help="Override cfg.ger.mode for this sample run.",
+    )
     add_wandb_args(p)
     args = p.parse_args()
 
     # Apply --llm-quant override before constructing the pipeline.
     # In-memory dict mutation -- matches enroll_identity.py style; avoids the
     # tempfile dance.
-    if args.llm_quant is not None:
+    if args.llm_quant is not None or args.ger_mode is not None:
         cfg = load_config(args.config)
-        cfg.setdefault("ger", {})["llm_quant"] = args.llm_quant
-        print(f"[run_sample] Override llm_quant -> {args.llm_quant}")
+        if args.llm_quant is not None:
+            cfg.setdefault("ger", {})["llm_quant"] = args.llm_quant
+            print(f"[run_sample] Override llm_quant -> {args.llm_quant}")
+        if args.ger_mode is not None:
+            cfg.setdefault("ger", {})["mode"] = args.ger_mode
+            print(f"[run_sample] Override ger.mode -> {args.ger_mode}")
         pipe = AVSDGERPipeline(cfg)
     else:
         pipe = AVSDGERPipeline.from_config(args.config)
@@ -94,6 +104,7 @@ def main() -> int:
             "utt": args.utt,
             "pool": args.pool,
             "llm_quant": args.llm_quant,
+            "ger_mode": args.ger_mode,
         },
     )
 
@@ -120,9 +131,11 @@ def main() -> int:
         audio = _load_audio(utt.get("audio"))
         audio_len = int(audio.numel() if isinstance(audio, torch.Tensor) else len(audio))
         num_video_frames = max(1, round(audio_len / 16000 * 25))
-        video = _load_video_mouth_roi(utt.get("mouth_roi"), num_frames=num_video_frames)
+        video, has_visual = _load_video_mouth_roi(
+            utt.get("mouth_roi"), num_frames=num_video_frames
+        )
 
-        out = pipe.run(audio, video)
+        out = pipe.run(audio, video, has_visual=has_visual)
 
         print("\n=== AVSD-GER output ===")
         print(f"text        : {out['text']}")

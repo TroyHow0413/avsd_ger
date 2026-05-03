@@ -92,6 +92,12 @@ alignment:
   dropout: 0.1
 
 ger:
+  # C2/GER input mode:
+  #   audio_only  -- ASR hypothesis only; do not use lip_hyp or <AV_CTX>.
+  #   av          -- ASR + real mouth ROI features/lip_hyp; auto-downgrades to
+  #                  audio_only per turn when no real mouth_roi is present.
+  #   visual_only -- reserved for future VSR-only GER experiments.
+  mode: audio_only
   # Spec section 5.2 / 6 finalized: Llama-3-8B LoRA
   llm_name: meta-llama/Meta-Llama-3-8B-Instruct
   max_new_tokens: 64        # 64 is plenty for GER on a single utterance (typical sentence < 30 tokens). Halves the KV cache vs. 128 — saves ~0.5 GB on 16 GB GPUs.

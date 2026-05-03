@@ -275,7 +275,12 @@ class GERHead(nn.Module):
         self._llm = get_peft_model(base, lora_cfg).to(self.device, dtype=compute_dtype)
     # --------------------------------------------------------------- prompt
     def _render_text(
-        self, speaker_id: str | None, nbest: list[str], lip_hyp: str
+        self,
+        speaker_id: str | None,
+        nbest: list[str],
+        lip_hyp: str,
+        mode: str = "av",
+        use_av_context: bool = True,
     ) -> str:
         """Render the GER user-message AND wrap it in the LLM's chat template.
 
@@ -293,11 +298,34 @@ class GERHead(nn.Module):
         """
         tag = self.speaker_special_token
         asr_block = " | ".join(h.strip() for h in nbest if h.strip())
-        user_content = self.template.format(
-            speaker_tag=tag,
-            asr_nbest=asr_block or "<none>",
-            lip_hyp=lip_hyp or "<none>",
-        )
+        if mode == "audio_only":
+            user_content = (
+                f"{tag}\n"
+                f"Audio hypothesis: {asr_block or '<none>'}\n"
+                "Correct the transcript using the audio hypothesis as the main source.\n"
+                "Return only the corrected transcript text, with no explanation and no quoted instruction.\n"
+                "Do not output the words \"speaker label\".\n"
+                "Output:\n"
+            )
+        elif mode == "visual_only":
+            user_content = (
+                f"{tag}\n"
+                f"Visual hypothesis: {lip_hyp or '<none>'}\n"
+                "Correct the transcript using the visual hypothesis as the main source.\n"
+                "Return only the corrected transcript text, with no explanation and no quoted instruction.\n"
+                "Do not output the words \"speaker label\".\n"
+                "Output:\n"
+            )
+        else:
+            user_content = self.template.format(
+                speaker_tag=tag,
+                asr_nbest=asr_block or "<none>",
+                lip_hyp=lip_hyp or "<none>",
+            )
+            if not use_av_context:
+                user_content = user_content.replace(
+                    "Aligned feature context: <AV_CTX>\n", ""
+                )
 
         # Apply chat template if the tokenizer supports it (Llama-3-Instruct,
         # Qwen-Chat, Mistral-Instruct, ...). Fall back to raw text for base
@@ -376,7 +404,11 @@ class GERHead(nn.Module):
         return re.sub(r"\s+", " ", s).strip(" \t\r\n\"'")
 
     def _inputs_embeds(
-        self, z_id: torch.Tensor, f_align: torch.Tensor, text: str
+        self,
+        z_id: torch.Tensor,
+        f_align: torch.Tensor,
+        text: str,
+        use_av_context: bool = True,
     ) -> torch.Tensor:
         """
         Build inputs_embeds = [text_part_A, AV_CTX_soft_tokens, text_part_B]
@@ -389,8 +421,11 @@ class GERHead(nn.Module):
             # Deterministic stub: 32-token sequence, fixed dim
             return torch.zeros(1, 32, self._llm_embed_dim, device=self.device)
 
-        assert "<AV_CTX>" in text, "prompt template must contain <AV_CTX> placeholder"
-        pre, post = text.split("<AV_CTX>", 1)
+        if use_av_context:
+            assert "<AV_CTX>" in text, "prompt template must contain <AV_CTX> placeholder"
+            pre, post = text.split("<AV_CTX>", 1)
+        else:
+            pre, post = text, ""
 
         pre_ids = self._tok(
             pre, return_tensors="pt", add_special_tokens=True
@@ -411,9 +446,11 @@ class GERHead(nn.Module):
         self.qformer.to(target_dtype)
         self.id_proj.to(target_dtype)
 
-        # Q-Former projects f_align (variable-length token features) into a
-        # fixed-length soft prefix replacing <AV_CTX>.
-        av_emb = self.qformer(f_align.to(self.device).to(target_dtype))  # [1, n_q, D]
+        av_emb = None
+        if use_av_context:
+            # Q-Former projects f_align (variable-length token features) into a
+            # fixed-length soft prefix replacing <AV_CTX>.
+            av_emb = self.qformer(f_align.to(self.device).to(target_dtype))  # [1, n_q, D]
 
         # Inject identity by additively biasing the [Speaker: ID_i] token
         # embedding with id_proj(z_id). This is what makes the GER head
@@ -425,6 +462,8 @@ class GERHead(nn.Module):
                 pre_emb = pre_emb.clone()
                 pre_emb[0, spk_pos[0]] = pre_emb[0, spk_pos[0]] + id_bias
 
+        if av_emb is None:
+            return torch.cat([pre_emb, post_emb], dim=1)
         return torch.cat([pre_emb, av_emb, post_emb], dim=1)
 
     # --------------------------------------------------------------- inference
@@ -437,14 +476,20 @@ class GERHead(nn.Module):
         nbest_scores: list[float] | None = None,
         lip_hyp: str = "",
         speaker_id: str | None = None,
+        mode: str = "av",
+        use_av_context: bool = True,
     ) -> dict[str, Any]:
         """Run the GER head, return {'text', 'token_logprobs', 'prompt'}."""
         if self.stub or self._llm is None:
             top = nbest[0] if nbest else ""
             return {"text": top, "token_logprobs": torch.zeros(0), "prompt": ""}
 
-        text = self._render_text(speaker_id, nbest, lip_hyp)
-        inputs_embeds = self._inputs_embeds(z_id, f_align, text)
+        text = self._render_text(
+            speaker_id, nbest, lip_hyp, mode=mode, use_av_context=use_av_context
+        )
+        inputs_embeds = self._inputs_embeds(
+            z_id, f_align, text, use_av_context=use_av_context
+        )
 
         out = self._llm.generate(
             inputs_embeds=inputs_embeds,

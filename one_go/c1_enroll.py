@@ -39,12 +39,12 @@ def _load_audio(path: str | None) -> np.ndarray | torch.Tensor:
     return wav.astype(np.float32)
 
 
-def _load_face(path: str | None) -> np.ndarray:
+def _load_face(path: str | None) -> np.ndarray | None:
     if path is None or not Path(path).exists():
-        return (np.random.rand(224, 224, 3) * 255).astype(np.uint8)
+        return None
     img = cv2.imread(path)
     if img is None:
-        return (np.random.rand(224, 224, 3) * 255).astype(np.uint8)
+        return None
     return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
 

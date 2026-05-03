@@ -35,9 +35,20 @@ class AVSDGERPipeline:
         stub = bool(cfg.get("stub_backbones", True))
         self.stub = stub
 
+        self.ger_mode = str(cfg.get("ger", {}).get("mode", "audio_only")).lower()
+        if self.ger_mode not in {"audio_only", "av", "visual_only"}:
+            raise ValueError(
+                f"Unsupported ger.mode={self.ger_mode!r}; "
+                "expected audio_only, av, or visual_only"
+            )
+
         # Backbones
         self.asr = WhisperASR(cfg["asr"], stub=stub, device=self.device)
-        self.vsr = AVHubertVSR(cfg["vsr"], stub=stub, device=self.device)
+        self.vsr = (
+            AVHubertVSR(cfg["vsr"], stub=stub, device=self.device)
+            if self.ger_mode in {"av", "visual_only"}
+            else None
+        )
 
         # C1
         self.voice = VoiceEncoder(cfg["identity"]["voice_encoder"], stub=stub, device=self.device)
@@ -95,14 +106,28 @@ class AVSDGERPipeline:
     def run(
         self,
         audio_wav: torch.Tensor | np.ndarray,
-        video_frames: torch.Tensor,
+        video_frames: torch.Tensor | None = None,
         face_image: np.ndarray | None = None,
+        has_visual: bool = True,
         speaker_mask_v: torch.Tensor | None = None,
         snr_per_tok: torch.Tensor | None = None,
         lip_conf_v: torch.Tensor | None = None,
     ) -> dict[str, Any]:
         asr_out = self.asr.transcribe(audio_wav)
-        vsr_out = self.vsr.extract(video_frames)
+        wants_visual = self.ger_mode in {"av", "visual_only"}
+        use_visual = bool(wants_visual and has_visual and video_frames is not None)
+        if use_visual and self.vsr is not None:
+            vsr_out = self.vsr.extract(video_frames)
+        else:
+            # Explicit audio-only path: no random mouth ROI, no lip_hyp, and no
+            # <AV_CTX>. A single zero frame only keeps tensor shapes available
+            # for code paths that still construct an aligner output.
+            vsr_out = {
+                "vsr_features": torch.zeros(1, AVHubertVSR.FEATURE_DIM, device=self.device),
+                "lip_hyp": "",
+            }
+        effective_ger_mode = self.ger_mode if use_visual else "audio_only"
+        use_av_context = effective_ger_mode in {"av", "visual_only"}
 
         if asr_out.encoder_features is None:
             T_a = 150
@@ -115,8 +140,9 @@ class AVSDGERPipeline:
 
         voice_emb = self.voice.embed(audio_wav)
         if face_image is None:
-            face_image = self._first_frame_as_rgb(video_frames)
-        face_emb = self.face.embed(face_image)
+            face_emb = torch.zeros(FaceEncoder.EMB_DIM, device=self.device)
+        else:
+            face_emb = self.face.embed(face_image)
 
         trace: list[dict[str, Any]] = []
         skip_ids: set[str] = set()
@@ -159,6 +185,8 @@ class AVSDGERPipeline:
                     nbest_scores=asr_out.nbest_scores,
                     lip_hyp=vsr_out.get("lip_hyp", ""),
                     speaker_id=speaker_id_hint,
+                    mode=effective_ger_mode,
+                    use_av_context=use_av_context,
                 )
 
             fallback_applied = False
@@ -243,6 +271,8 @@ class AVSDGERPipeline:
                 "fallback_reason": fallback_reason,
                 "raw_ger_text": ger_out.get("raw_ger_text") or ger_out.get("raw_text"),
                 "raw_generation": ger_out.get("raw_generation"),
+                "ger_mode": effective_ger_mode,
+                "has_visual": use_visual,
             })
 
             if decision.action == LoopAction.ACCEPT_AND_UPDATE:

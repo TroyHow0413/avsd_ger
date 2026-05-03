@@ -32,7 +32,7 @@ class FaceEncoder(nn.Module):
         self._app.prepare(ctx_id=ctx_id, det_size=(640, 640))
 
     @torch.no_grad()
-    def embed(self, image: np.ndarray | torch.Tensor) -> torch.Tensor:
+    def embed(self, image: np.ndarray | torch.Tensor | None) -> torch.Tensor:
         """
         Args:
             image: H x W x 3 uint8 RGB (or a CHW tensor — we convert).
@@ -40,6 +40,9 @@ class FaceEncoder(nn.Module):
             [512] L2-normalised face embedding. If no face found, returns a
             zero vector so downstream cosine sim yields 0.
         """
+        if image is None:
+            return torch.zeros(self.EMB_DIM, device=self.device)
+
         if self.stub:
             v = torch.randn(self.EMB_DIM, device=self.device)
             return v / v.norm()
