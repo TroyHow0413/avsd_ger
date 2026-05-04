@@ -429,10 +429,13 @@ class GERHead(nn.Module):
 
         pre_ids = self._tok(
             pre, return_tensors="pt", add_special_tokens=True
-        ).input_ids.to(self.device)
-        post_ids = self._tok(
-            post, return_tensors="pt", add_special_tokens=False
-        ).input_ids.to(self.device)
+        ).input_ids.to(self.device).long()
+        if post:
+            post_ids = self._tok(
+                post, return_tensors="pt", add_special_tokens=False
+            ).input_ids.to(self.device).long()
+        else:
+            post_ids = torch.empty(1, 0, dtype=torch.long, device=self.device)
 
         embed_layer = self._llm.get_input_embeddings()
         pre_emb = embed_layer(pre_ids)  # [1, T_pre, D]
