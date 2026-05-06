@@ -111,18 +111,52 @@ def _frontend_meta_from_cfg(cfg: dict[str, Any]) -> dict[str, Any]:
         return {"profile": frontend_key, "label": "custom", "tier": "custom"}
 
 
-def _load_audio(path: str | None) -> np.ndarray | torch.Tensor:
-    if path is None or not Path(path).exists():
-        return torch.randn(16000 * 3)
+def _resolve_manifest_path(path: str | None, *, kind: str) -> Path:
+    """Resolve manifest paths, accepting Windows separators on Linux hosts."""
+
+    if not path:
+        raise FileNotFoundError(f"Missing {kind} path in manifest.")
+
+    raw = Path(path)
+    if raw.exists():
+        return raw
+
+    if "\\" in path:
+        normalized = Path(path.replace("\\", "/"))
+        if normalized.exists():
+            return normalized
+
+    raise FileNotFoundError(
+        f"{kind} path does not exist: {path!r}. "
+        "If this manifest was generated on Windows, replace backslashes with '/'."
+    )
+
+
+def _load_audio(
+    path: str | None,
+    *,
+    kind: str = "audio",
+    allow_synthetic_audio: bool = False,
+) -> np.ndarray | torch.Tensor:
+    if allow_synthetic_audio:
+        try:
+            resolved = _resolve_manifest_path(path, kind=kind)
+        except FileNotFoundError:
+            return torch.randn(16000 * 3)
+    else:
+        resolved = _resolve_manifest_path(path, kind=kind)
+
     try:
         import soundfile as sf
-        wav, sr = sf.read(path)
+        wav, sr = sf.read(resolved)
         if sr != 16000:
             import librosa
             wav = librosa.resample(wav.astype(np.float32), orig_sr=sr, target_sr=16000)
         return wav.astype(np.float32)
-    except Exception:
-        return torch.randn(16000 * 3)
+    except Exception as exc:
+        if allow_synthetic_audio:
+            return torch.randn(16000 * 3)
+        raise RuntimeError(f"Failed to read {kind} file {str(resolved)!r}: {exc}") from exc
 
 
 def _load_face(path: str | None) -> np.ndarray | None:
@@ -155,7 +189,7 @@ def _maybe_tensor(x) -> torch.Tensor | None:
     return x
 
 
-def _load_turns(manifest: dict[str, Any]) -> list[SessionTurn]:
+def _load_turns(manifest: dict[str, Any], *, allow_synthetic_audio: bool = False) -> list[SessionTurn]:
     turns: list[SessionTurn] = []
     for i, row in enumerate(manifest.get("turns", manifest.get("utterances", []))):
         video_frames, has_visual = _load_video(row.get("mouth_roi") or row.get("video"))
@@ -163,7 +197,11 @@ def _load_turns(manifest: dict[str, Any]) -> list[SessionTurn]:
             turn_id=str(row.get("turn_id", row.get("utt_id", f"t{i:04d}"))),
             start=float(row.get("start", i)),
             end=float(row.get("end", i + 1)),
-            audio_wav=_load_audio(row.get("audio")),
+            audio_wav=_load_audio(
+                row.get("audio"),
+                kind=f"turn audio for {row.get('turn_id', row.get('utt_id', f't{i:04d}'))}",
+                allow_synthetic_audio=allow_synthetic_audio,
+            ),
             video_frames=video_frames,
             has_visual=has_visual,
             face_image=None,
@@ -176,14 +214,23 @@ def _load_turns(manifest: dict[str, Any]) -> list[SessionTurn]:
     return turns
 
 
-def _enroll_pool_from_manifest(pipe: AVSDGERPipeline, manifest: dict[str, Any]) -> None:
+def _enroll_pool_from_manifest(
+    pipe: AVSDGERPipeline,
+    manifest: dict[str, Any],
+    *,
+    allow_synthetic_audio: bool = False,
+) -> None:
     speakers = manifest.get("speakers", [])
     if not speakers:
         return
     for spk in speakers:
         pipe.enroll(
             spk["speaker_id"],
-            _load_audio(spk.get("enrollment_audio")),
+            _load_audio(
+                spk.get("enrollment_audio"),
+                kind=f"enrollment audio for {spk.get('speaker_id', '<unknown>')}",
+                allow_synthetic_audio=allow_synthetic_audio,
+            ),
             _load_face(spk.get("enrollment_face")),
             meta=spk.get("meta"),
         )
@@ -210,13 +257,18 @@ def _run_one(
     if cfg_run.get("ger", {}).get("mode") == "visual_only":
         cfg_run["ablation"]["disable_c2"] = False
 
+    allow_synthetic_audio = bool(cfg_run.get("stub_backbones", False))
     pipe = AVSDGERPipeline(cfg_run)
     if pool_path and Path(pool_path).exists():
         pipe.load_pool(pool_path)
     else:
-        _enroll_pool_from_manifest(pipe, manifest)
+        _enroll_pool_from_manifest(
+            pipe,
+            manifest,
+            allow_synthetic_audio=allow_synthetic_audio,
+        )
 
-    turns = _load_turns(manifest)
+    turns = _load_turns(manifest, allow_synthetic_audio=allow_synthetic_audio)
     runner = SessionRunner(pipe)
 
     if monitor is not None:
