@@ -12,6 +12,20 @@ import torch
 import yaml
 
 
+def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    out = dict(base)
+    for key, value in override.items():
+        if (
+            key in out
+            and isinstance(out[key], dict)
+            and isinstance(value, dict)
+        ):
+            out[key] = _deep_merge(out[key], value)
+        else:
+            out[key] = value
+    return out
+
+
 @dataclass
 class BackboneOutputs:
     """Container passed between pipeline stages."""
@@ -33,8 +47,26 @@ class BackboneOutputs:
 
 
 def load_config(path: str | Path) -> dict[str, Any]:
+    path = Path(path)
     with open(path, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
+        cfg = yaml.safe_load(f)
+
+    defaults = cfg.pop("defaults", None)
+    if not defaults:
+        return cfg
+
+    merged: dict[str, Any] = {}
+    for item in defaults:
+        if isinstance(item, str):
+            default_path = path.with_name(f"{item}.yaml")
+        elif isinstance(item, dict):
+            # Hydra-style shorthand, e.g. {"base": "foo"} -> foo.yaml.
+            default_name = next(iter(item.values()))
+            default_path = path.with_name(f"{default_name}.yaml")
+        else:
+            raise TypeError(f"Unsupported config default entry: {item!r}")
+        merged = _deep_merge(merged, load_config(default_path))
+    return _deep_merge(merged, cfg)
 
 
 def resolve_device(requested: str) -> torch.device:

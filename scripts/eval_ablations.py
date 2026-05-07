@@ -94,6 +94,42 @@ def _apply_frontend_profile(cfg: dict[str, Any], frontend_profile: str | None) -
         cfg.setdefault("frontend", {})["profile"] = frontend_profile
 
 
+def _apply_safe_core_preset(cfg: dict[str, Any], preset: str | None) -> None:
+    if preset is None:
+        return
+
+    feedback = cfg.setdefault("feedback", {})
+    feedback["enable_pool_update"] = False
+    if preset == "no_ger_gate":
+        feedback["enable_ger_safety_gate"] = False
+    elif preset == "artifact_only":
+        feedback.update({
+            "enable_ger_safety_gate": True,
+            "enable_ger_artifact_gate": True,
+            "enable_ger_length_gate": False,
+            "enable_ger_overlap_gate": False,
+            "enable_ger_acoustic_fallback": False,
+        })
+    elif preset == "text_gates":
+        feedback.update({
+            "enable_ger_safety_gate": True,
+            "enable_ger_artifact_gate": True,
+            "enable_ger_length_gate": True,
+            "enable_ger_overlap_gate": True,
+            "enable_ger_acoustic_fallback": False,
+        })
+    elif preset == "full":
+        feedback.update({
+            "enable_ger_safety_gate": True,
+            "enable_ger_artifact_gate": True,
+            "enable_ger_length_gate": True,
+            "enable_ger_overlap_gate": True,
+            "enable_ger_acoustic_fallback": True,
+        })
+    else:
+        raise ValueError(f"Unknown safe-core preset: {preset}")
+
+
 def _frontend_meta_from_cfg(cfg: dict[str, Any]) -> dict[str, Any]:
     frontend_cfg = cfg.get("frontend", {}) or {}
     frontend_key = str(frontend_cfg.get("profile", "oracle_turns"))
@@ -427,6 +463,15 @@ def main() -> int:
         choices=_frontend_choices(),
         help="Override cfg.frontend.profile for reporting/experiment grouping.",
     )
+    p.add_argument(
+        "--safe-core-preset",
+        default=None,
+        choices=["no_ger_gate", "artifact_only", "text_gates", "full"],
+        help=(
+            "Apply a safe-core feedback preset on top of --config without "
+            "changing backbone/model settings."
+        ),
+    )
     add_wandb_args(p)
     args = p.parse_args()
 
@@ -438,6 +483,9 @@ def main() -> int:
     if args.ger_mode is not None:
         cfg.setdefault("ger", {})["mode"] = args.ger_mode
         print(f"[eval_ablations] Override ger.mode -> {args.ger_mode}")
+    if args.safe_core_preset is not None:
+        _apply_safe_core_preset(cfg, args.safe_core_preset)
+        print(f"[eval_ablations] Apply safe-core preset -> {args.safe_core_preset}")
     _apply_frontend_profile(cfg, args.frontend_profile)
     manifest_paths = _resolve_manifest_paths(args.manifest)
     multi = len(manifest_paths) > 1
@@ -460,6 +508,7 @@ def main() -> int:
             "manifest": args.manifest,
             "n_manifests": len(manifest_paths),
             "fresh_pool": bool(args.fresh_pool),
+            "safe_core_preset": args.safe_core_preset,
             "frontend_profile": frontend_meta["profile"],
             "frontend_tier": frontend_meta.get("tier"),
             **cfg,
