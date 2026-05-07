@@ -39,9 +39,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
@@ -134,6 +136,95 @@ def ffmpeg_enrollment(src: Path, dst: Path, duration_s: float, sr: int = 16000) 
     )
 
 
+def ffmpeg_concat_enrollment(
+    src: Path,
+    dst: Path,
+    segments: list[dict],
+    duration_s: float,
+    sr: int = 16000,
+) -> None:
+    """Concatenate selected source turns into a single enrollment WAV."""
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="ami_enroll_", dir=dst.parent) as tmp:
+        tmp_dir = Path(tmp)
+        list_path = tmp_dir / "concat.txt"
+        part_paths: list[Path] = []
+        for i, seg in enumerate(segments):
+            part = tmp_dir / f"part_{i:03d}.wav"
+            ffmpeg_slice(src, part, float(seg["start"]), float(seg["end"]), sr=sr)
+            part_paths.append(part)
+        with open(list_path, "w", encoding="utf-8") as fh:
+            for part in part_paths:
+                escaped = part.resolve().as_posix().replace("'", "'\\''")
+                fh.write(f"file '{escaped}'\n")
+        subprocess.run(
+            [
+                "ffmpeg", "-y", "-loglevel", "error",
+                "-f", "concat", "-safe", "0",
+                "-i", str(list_path),
+                "-t", f"{duration_s:.3f}",
+                "-ar", str(sr), "-ac", "1",
+                str(dst),
+            ],
+            check=True,
+        )
+
+
+def segment_rms_dbfs(src: Path, start: float, end: float, sr: int = 16000) -> float:
+    """Approximate segment loudness; -inf means unavailable/invalid."""
+    try:
+        import numpy as np
+        raw = subprocess.check_output(
+            [
+                "ffmpeg", "-v", "error",
+                "-ss", f"{start:.6f}", "-to", f"{end:.6f}",
+                "-i", str(src),
+                "-ar", str(sr), "-ac", "1",
+                "-f", "f32le", "-acodec", "pcm_f32le",
+                "-",
+            ]
+        )
+        samples = np.frombuffer(raw, dtype=np.float32)
+        if samples.size == 0:
+            return -math.inf
+        rms = float(np.sqrt(np.mean(np.square(samples), dtype=np.float64)))
+        return 20.0 * math.log10(max(rms, 1.0e-8))
+    except Exception:
+        return -math.inf
+
+
+def select_enrollment_segments(
+    src_wav: Path,
+    segs: list[dict],
+    words: list[dict],
+    target_secs: float,
+    min_secs: float,
+    max_secs: float,
+) -> list[dict]:
+    """Pick high-RMS, text-bearing turns for speaker enrollment."""
+    candidates: list[dict] = []
+    for seg in segs:
+        dur = float(seg["end"]) - float(seg["start"])
+        if dur < min_secs or dur > max_secs:
+            continue
+        if not ref_text_for_segment(words, float(seg["start"]), float(seg["end"])):
+            continue
+        item = dict(seg)
+        item["rms_dbfs"] = segment_rms_dbfs(src_wav, float(seg["start"]), float(seg["end"]))
+        candidates.append(item)
+
+    candidates.sort(key=lambda x: x["rms_dbfs"], reverse=True)
+    selected: list[dict] = []
+    total = 0.0
+    for seg in candidates:
+        selected.append(seg)
+        total += float(seg["end"]) - float(seg["start"])
+        if total >= target_secs:
+            break
+    selected.sort(key=lambda x: x["start"])
+    return selected
+
+
 # ---------------------------------------------------------------------------
 # Per-meeting logic
 # ---------------------------------------------------------------------------
@@ -144,6 +235,9 @@ def process_meeting(
     out_root: Path,
     enroll_secs: float,
     min_turn_secs: float,
+    enrollment_mode: str,
+    enroll_min_turn_secs: float,
+    enroll_max_turn_secs: float,
 ) -> dict:
     """
     Process one AMI meeting and return a session manifest dict.
@@ -171,6 +265,13 @@ def process_meeting(
             f"No complete data (audio + segments + words) for meeting {meeting_id}"
         )
 
+    speaker_data: dict[str, dict] = {}
+    for spk in speakers_present:
+        speaker_data[spk] = {
+            "segs": parse_segments(ann_dir / "segments" / f"{meeting_id}.{spk}.segments.xml"),
+            "words": parse_words(ann_dir / "words" / f"{meeting_id}.{spk}.words.xml"),
+        }
+
     # ------------------------------------------------------------------
     # 2. Build enrollment clips
     # ------------------------------------------------------------------
@@ -179,11 +280,43 @@ def process_meeting(
         ch      = SPK_TO_CHANNEL[spk]
         src_wav = audio_dir / f"{meeting_id}.Headset-{ch}.wav"
         enrol_wav = out_root / "enrollment" / f"{meeting_id}_{spk}.wav"
+        selected = (
+            select_enrollment_segments(
+                src_wav,
+                speaker_data[spk]["segs"],
+                speaker_data[spk]["words"],
+                target_secs=enroll_secs,
+                min_secs=enroll_min_turn_secs,
+                max_secs=enroll_max_turn_secs,
+            )
+            if enrollment_mode == "turn_quality"
+            else []
+        )
         print(f"  [{spk}] enrollment clip → {enrol_wav.name}")
-        ffmpeg_enrollment(src_wav, enrol_wav, duration_s=enroll_secs)
+        if selected:
+            selected_secs = sum(float(s["end"]) - float(s["start"]) for s in selected)
+            print(f"      using {len(selected)} quality turns ({selected_secs:.1f}s)")
+            ffmpeg_concat_enrollment(src_wav, enrol_wav, selected, duration_s=enroll_secs)
+            actual_enrollment_mode = "turn_quality"
+        else:
+            print(f"      using first {enroll_secs:.1f}s fallback")
+            ffmpeg_enrollment(src_wav, enrol_wav, duration_s=enroll_secs)
+            actual_enrollment_mode = "first_seconds_fallback"
         enrol_entries.append({
             "speaker_id":       f"{meeting_id}_{spk}",
             "enrollment_audio": str(enrol_wav),
+            "meta": {
+                "enrollment_mode": actual_enrollment_mode,
+                "enrollment_selected_turns": [
+                    {
+                        "id": s.get("id"),
+                        "start": round(float(s["start"]), 3),
+                        "end": round(float(s["end"]), 3),
+                        "rms_dbfs": round(float(s.get("rms_dbfs", -math.inf)), 2),
+                    }
+                    for s in selected
+                ],
+            },
         })
 
     # ------------------------------------------------------------------
@@ -193,11 +326,9 @@ def process_meeting(
     for spk in speakers_present:
         ch      = SPK_TO_CHANNEL[spk]
         src_wav = audio_dir / f"{meeting_id}.Headset-{ch}.wav"
-        seg_xml = ann_dir / "segments" / f"{meeting_id}.{spk}.segments.xml"
-        wrd_xml = ann_dir / "words"    / f"{meeting_id}.{spk}.words.xml"
 
-        words = parse_words(wrd_xml)
-        segs  = parse_segments(seg_xml)
+        words = speaker_data[spk]["words"]
+        segs  = speaker_data[spk]["segs"]
 
         skipped_short = 0
         skipped_silent = 0
@@ -257,6 +388,13 @@ def main() -> None:
                     help="Meeting IDs to process (default: all found in audio/)")
     ap.add_argument("--enroll-secs",   type=float, default=30.0,
                     help="Enrollment clip duration in seconds (default: 30)")
+    ap.add_argument("--enrollment-mode", choices=["first_seconds", "turn_quality"],
+                    default="first_seconds",
+                    help="How to build enrollment clips (default: first_seconds)")
+    ap.add_argument("--enroll-min-turn-secs", type=float, default=3.0,
+                    help="Minimum duration for turn-quality enrollment segments (default: 3)")
+    ap.add_argument("--enroll-max-turn-secs", type=float, default=8.0,
+                    help="Maximum duration for turn-quality enrollment segments (default: 8)")
     ap.add_argument("--min-turn-secs", type=float, default=1.0,
                     help="Skip turns shorter than this (default: 1.0 s)")
     args = ap.parse_args()
@@ -287,7 +425,10 @@ def main() -> None:
         try:
             manifest  = process_meeting(mid, ami_root, out_root,
                                         enroll_secs=args.enroll_secs,
-                                        min_turn_secs=args.min_turn_secs)
+                                        min_turn_secs=args.min_turn_secs,
+                                        enrollment_mode=args.enrollment_mode,
+                                        enroll_min_turn_secs=args.enroll_min_turn_secs,
+                                        enroll_max_turn_secs=args.enroll_max_turn_secs)
             out_json  = manifests_dir / f"{mid}.json"
             with open(out_json, "w", encoding="utf-8") as fh:
                 json.dump(manifest, fh, indent=2, ensure_ascii=False)

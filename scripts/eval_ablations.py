@@ -214,6 +214,14 @@ def _load_turns(manifest: dict[str, Any], *, allow_synthetic_audio: bool = False
     return turns
 
 
+def _manifest_has_visual_turns(manifest: dict[str, Any]) -> bool:
+    for row in manifest.get("turns", manifest.get("utterances", [])):
+        path = row.get("mouth_roi") or row.get("video")
+        if path and Path(path).exists():
+            return True
+    return False
+
+
 def _enroll_pool_from_manifest(
     pipe: AVSDGERPipeline,
     manifest: dict[str, Any],
@@ -242,6 +250,7 @@ def _run_one(
     flags: dict[str, bool],
     manifest: dict[str, Any],
     pool_path: str | None,
+    fresh_pool: bool,
     monitor: PowerMonitor | None,
 ) -> dict[str, Any]:
     cfg_run = copy.deepcopy(cfg)
@@ -259,9 +268,11 @@ def _run_one(
 
     allow_synthetic_audio = bool(cfg_run.get("stub_backbones", False))
     pipe = AVSDGERPipeline(cfg_run)
-    if pool_path and Path(pool_path).exists():
+    if pool_path and Path(pool_path).exists() and not fresh_pool:
         pipe.load_pool(pool_path)
     else:
+        if fresh_pool:
+            print(f"[pool] fresh-pool enabled; enrolling {ablation_name} from manifest")
         _enroll_pool_from_manifest(
             pipe,
             manifest,
@@ -316,6 +327,7 @@ def _run_manifest(
     cfg: dict[str, Any],
     manifest_path: Path,
     pool_path: str | None,
+    fresh_pool: bool,
     monitor: PowerMonitor | None,
     only: list[str] | None,
     wb: WandbLogger,
@@ -324,12 +336,18 @@ def _run_manifest(
     with open(manifest_path, "r", encoding="utf-8") as f:
         manifest = json.load(f)
 
+    if str(cfg.get("ger", {}).get("mode", "audio_only")).lower() == "av" and not _manifest_has_visual_turns(manifest):
+        print(
+            f"[warning] {manifest_path.name}: no valid mouth_roi/video paths found; "
+            "pipeline will run these turns as audio_only. Do not report this run as AV."
+        )
+
     results: list[dict[str, Any]] = []
     for i, (name, flags) in enumerate(ABLATION_MATRIX):
         if only is not None and name not in only:
             continue
         print(f"\n=== {manifest_path.name} :: running ablation: {name}  flags={flags} ===")
-        r = _run_one(cfg, name, flags, manifest, pool_path, monitor)
+        r = _run_one(cfg, name, flags, manifest, pool_path, fresh_pool, monitor)
         print(json.dumps(r["metrics"], indent=2))
         results.append(r)
 
@@ -370,6 +388,14 @@ def main() -> int:
         help="Manifest JSON file, directory containing *.json manifests, or a glob pattern.",
     )
     p.add_argument("--pool", default=str(ROOT / "checkpoints/identity_pool.pt"))
+    p.add_argument(
+        "--fresh-pool",
+        action="store_true",
+        help=(
+            "Ignore --pool even if it exists and re-enroll a clean identity pool "
+            "from manifest speakers for every ablation run."
+        ),
+    )
     p.add_argument("--out", default=str(ROOT / "out/ablation_report.json"))
     p.add_argument("--no-power", action="store_true", help="skip PowerMonitor")
     p.add_argument("--idle-calibrate-s", type=float, default=1.0)
@@ -433,6 +459,7 @@ def main() -> int:
             "config_path": args.config,
             "manifest": args.manifest,
             "n_manifests": len(manifest_paths),
+            "fresh_pool": bool(args.fresh_pool),
             "frontend_profile": frontend_meta["profile"],
             "frontend_tier": frontend_meta.get("tier"),
             **cfg,
@@ -452,6 +479,7 @@ def main() -> int:
             cfg,
             manifest_path,
             args.pool,
+            args.fresh_pool,
             monitor,
             args.only,
             wb,

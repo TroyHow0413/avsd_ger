@@ -134,6 +134,11 @@ def main() -> int:
         video, has_visual = _load_video_mouth_roi(
             utt.get("mouth_roi"), num_frames=num_video_frames
         )
+        if pipe.ger_mode == "av" and not has_visual:
+            print(
+                "[warning] no valid mouth_roi for this utterance; "
+                "pipeline will run audio_only. Do not report this sample as AV."
+            )
 
         out = pipe.run(audio, video, has_visual=has_visual)
 
