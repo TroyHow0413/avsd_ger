@@ -153,7 +153,19 @@ class WhisperASR(nn.Module):
                 prefix_ids.append(int(tok_id))
         text_ids = tokenizer(text, add_special_tokens=False).input_ids
         eos_id = self._hf_model.config.eos_token_id
-        decoder_input_ids = torch.tensor([prefix_ids + text_ids + [eos_id]], device=self.device)
+        all_ids = prefix_ids + text_ids + [eos_id]
+        vocab_size = int(self._hf_model.config.vocab_size)
+        if any(tok_id is None or int(tok_id) < 0 or int(tok_id) >= vocab_size for tok_id in all_ids):
+            return -20.0
+
+        max_positions = int(getattr(self._hf_model.config, "max_target_positions", 448))
+        if len(all_ids) > max_positions:
+            # Whisper's decoder position embeddings are bounded (448 for large-v3).
+            # Long GER prompt echoes or long ASR turns should be rejected by the
+            # confidence gate, not crash CUDA with an out-of-bounds index.
+            return -20.0
+
+        decoder_input_ids = torch.tensor([all_ids], device=self.device)
 
         out = self._hf_model(**inputs, decoder_input_ids=decoder_input_ids)
         logits = out.logits[0, :-1, :]
