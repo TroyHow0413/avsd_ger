@@ -13,6 +13,7 @@ the session and concatenates outputs (see avsd_ger/eval/session.py).
 from __future__ import annotations
 
 from pathlib import Path
+import re
 from typing import Any
 
 import numpy as np
@@ -74,8 +75,33 @@ class AVSDGERPipeline:
         # C3
         self.scorer = ConfidenceScorer(cfg["feedback"])
         self.loop = ClosedLoopController(cfg["feedback"])
+        self.enable_ger_safety_gate = bool(cfg["feedback"].get("enable_ger_safety_gate", True))
+        self.enable_ger_artifact_gate = bool(cfg["feedback"].get("enable_ger_artifact_gate", True))
+        self.enable_ger_length_gate = bool(cfg["feedback"].get("enable_ger_length_gate", True))
+        self.enable_ger_overlap_gate = bool(cfg["feedback"].get("enable_ger_overlap_gate", True))
+        self.enable_ger_acoustic_fallback = bool(cfg["feedback"].get("enable_ger_acoustic_fallback", True))
         self.ger_fallback_min_conf = float(cfg["feedback"].get("ger_fallback_min_conf", 0.20))
-        self.ger_fallback_margin = float(cfg["feedback"].get("ger_fallback_margin", 0.05))
+        self.ger_fallback_margin = float(cfg["feedback"].get("ger_fallback_margin", 0.0))
+        self.ger_max_len_ratio = float(cfg["feedback"].get("ger_max_len_ratio", 1.8))
+        self.ger_min_token_overlap = float(cfg["feedback"].get("ger_min_token_overlap", 0.50))
+        self.ger_artifact_blacklist = [
+            str(x).lower()
+            for x in cfg["feedback"].get(
+                "ger_artifact_blacklist",
+                [
+                    "Please provide",
+                    "I'm happy to help",
+                    "Here is the corrected transcript",
+                    "Audio hypothesis:",
+                    "Corrected transcript:",
+                    "transcript provided",
+                    "speaker label",
+                ],
+            )
+        ]
+        # Default AMI-safe behavior: C3 may accept/reject/retry, but it does
+        # not self-train the identity pool unless explicitly enabled.
+        self.enable_pool_update = bool(cfg["feedback"].get("enable_pool_update", False))
 
         # Ablation flags (spec section 10, Table 2). All False by default
         # = "Full Model". Flip one at a time from config to run rows of
@@ -85,6 +111,44 @@ class AVSDGERPipeline:
         self.disable_c2 = bool(abl.get("disable_c2", False))                # skip GER; return ASR 1-best
         self.disable_c3 = bool(abl.get("disable_c3", False))                # skip closed-loop
         self.disable_conf_gate = bool(abl.get("disable_conf_gate", False))  # EMA-update unconditionally
+
+    @staticmethod
+    def _gate_tokens(text: str) -> list[str]:
+        return re.findall(r"[A-Za-z0-9']+", text.lower())
+
+    def _ger_safety_reject_reason(self, ger_text: str, asr_text: str) -> str | None:
+        if not self.enable_ger_safety_gate:
+            return None
+
+        ger = ger_text.strip()
+        asr = asr_text.strip()
+        if not ger:
+            return "GER cleaned to empty text"
+
+        ger_lower = ger.lower()
+        if self.enable_ger_artifact_gate:
+            for artifact in self.ger_artifact_blacklist:
+                if artifact and artifact in ger_lower:
+                    return f"GER artifact matched blacklist: {artifact!r}"
+
+        asr_tokens = self._gate_tokens(asr)
+        ger_tokens = self._gate_tokens(ger)
+        if asr_tokens and ger_tokens:
+            if (
+                self.enable_ger_length_gate
+                and len(ger_tokens) > max(len(asr_tokens) + 8, int(len(asr_tokens) * self.ger_max_len_ratio))
+            ):
+                return (
+                    "GER too long "
+                    f"({len(ger_tokens)} vs ASR {len(asr_tokens)} tokens)"
+                )
+            overlap = len(set(asr_tokens) & set(ger_tokens)) / max(1, len(set(asr_tokens)))
+            if self.enable_ger_overlap_gate and overlap < self.ger_min_token_overlap:
+                return (
+                    "GER/ASR token overlap too low "
+                    f"({overlap:.2f} < {self.ger_min_token_overlap:.2f})"
+                )
+        return None
 
     @classmethod
     def from_config(cls, path: str | Path) -> "AVSDGERPipeline":
@@ -193,15 +257,19 @@ class AVSDGERPipeline:
             fallback_reason = None
             asr_top = (asr_out.nbest[0].strip() if asr_out.nbest else "")
 
-            if not self.disable_c2 and asr_top and not ger_out["text"].strip():
+            if not self.disable_c2 and asr_top:
+                fallback_reason = self._ger_safety_reject_reason(ger_out["text"], asr_top)
+
+            if fallback_reason is not None:
                 raw_generation = ger_out.get("raw_text")
+                raw_ger_text = ger_out.get("text", "")
                 ger_out = dict(ger_out)
-                ger_out["raw_ger_text"] = ""
+                ger_out["raw_ger_text"] = raw_ger_text
                 ger_out["raw_generation"] = raw_generation
                 ger_out["text"] = asr_top
                 ger_out["token_logprobs"] = torch.zeros(0, device=self.device)
                 fallback_applied = True
-                fallback_reason = "GER cleaned to empty text; used ASR 1-best"
+                fallback_reason = f"{fallback_reason}; used ASR 1-best"
 
             # The GER head is useful only when its corrected text is still
             # acoustically plausible. In zero-shot or untrained-LoRA smoke
@@ -212,13 +280,16 @@ class AVSDGERPipeline:
             s_acoustic_conf = squash_logprob(s_acoustic)
             if (
                 not self.disable_c2
+                and self.enable_ger_acoustic_fallback
                 and asr_top
                 and ger_out["text"].strip() != asr_top
-                and s_acoustic_conf < self.ger_fallback_min_conf
             ):
                 asr_s_acoustic = self.asr.rescore(audio_wav, asr_top)
                 asr_s_acoustic_conf = squash_logprob(asr_s_acoustic)
-                if asr_s_acoustic_conf >= s_acoustic_conf + self.ger_fallback_margin:
+                if (
+                    s_acoustic_conf < self.ger_fallback_min_conf
+                    or asr_s_acoustic_conf >= s_acoustic_conf + self.ger_fallback_margin
+                ):
                     raw_ger_text = ger_out["text"]
                     raw_generation = ger_out.get("raw_text")
                     raw_ger_conf = s_acoustic_conf
@@ -230,11 +301,18 @@ class AVSDGERPipeline:
                     s_acoustic = asr_s_acoustic
                     s_acoustic_conf = asr_s_acoustic_conf
                     fallback_applied = True
-                    fallback_reason = (
-                        "GER acoustic confidence "
-                        f"{raw_ger_conf:.3f} "
-                        f"< {self.ger_fallback_min_conf:.3f}; used ASR 1-best"
-                    )
+                    if raw_ger_conf < self.ger_fallback_min_conf:
+                        fallback_reason = (
+                            "GER acoustic confidence "
+                            f"{raw_ger_conf:.3f} "
+                            f"< {self.ger_fallback_min_conf:.3f}; used ASR 1-best"
+                        )
+                    else:
+                        fallback_reason = (
+                            "ASR acoustic confidence "
+                            f"{asr_s_acoustic_conf:.3f} >= GER {raw_ger_conf:.3f} "
+                            f"+ margin {self.ger_fallback_margin:.3f}; used ASR 1-best"
+                        )
             rep = self.scorer.score(
                 asr_rescore_logprob=s_acoustic,
                 av_consistency=id_q.av_consistency,
@@ -276,7 +354,15 @@ class AVSDGERPipeline:
             })
 
             if decision.action == LoopAction.ACCEPT_AND_UPDATE:
-                if speaker_id_hint is not None and not self.disable_c3:
+                if not self.enable_pool_update and not self.disable_conf_gate:
+                    decision = LoopDecision(
+                        LoopAction.ACCEPT_NO_UPDATE,
+                        f"{decision.reason}; pool update disabled by feedback.enable_pool_update=false",
+                        decision.iteration,
+                    )
+                    trace[-1]["decision"] = decision.action.value
+                    trace[-1]["reason"] = decision.reason
+                elif speaker_id_hint is not None and not self.disable_c3:
                     self.pool.ema_update(
                         speaker_id_hint,
                         new_voice_emb=voice_emb,
@@ -301,7 +387,9 @@ class AVSDGERPipeline:
             "iterations": len(trace),
             "pool_updated": (
                 decision.action == LoopAction.ACCEPT_AND_UPDATE
-                and not self.disable_c3 if decision else False
+                and not self.disable_c3
+                and (self.enable_pool_update or self.disable_conf_gate)
+                if decision else False
             ),
             "trace": trace,
         }
