@@ -1,0 +1,10 @@
+defaults:
+  - default
+
+feedback:
+  enable_ger_safety_gate: true
+  enable_ger_artifact_gate: true
+  enable_ger_length_gate: true
+  enable_ger_overlap_gate: true
+  enable_ger_acoustic_fallback: false
+  enable_pool_update: false

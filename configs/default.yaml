@@ -128,10 +128,26 @@ ger:
 feedback:
   max_iters: 3
   tau_update: 0.55
+  enable_pool_update: false   # AMI-safe default: C3 gates decisions but does not EMA-update identity pool
   confidence_low: 0.35
   confidence_mid: 0.55
+  enable_ger_safety_gate: true
+  enable_ger_artifact_gate: true
+  enable_ger_length_gate: true
+  enable_ger_overlap_gate: true
+  enable_ger_acoustic_fallback: true
   ger_fallback_min_conf: 0.20  # below this, compare GER text against ASR 1-best
-  ger_fallback_margin: 0.05    # ASR fallback must beat GER by at least this much
+  ger_fallback_margin: 0.0     # conservative reranker: fallback when ASR acoustic confidence is not worse
+  ger_max_len_ratio: 1.8       # reject prompt echoes / run-on GER outputs much longer than ASR
+  ger_min_token_overlap: 0.50  # reject GER outputs that drift too far from the ASR hypothesis
+  ger_artifact_blacklist:
+    - "Please provide"
+    - "I'm happy to help"
+    - "Here is the corrected transcript"
+    - "Audio hypothesis:"
+    - "Corrected transcript:"
+    - "transcript provided"
+    - "speaker label"
   weights:
     asr_rescore: 0.6
     av_consistency: 0.25

@@ -1,0 +1,6 @@
+defaults:
+  - default
+
+feedback:
+  enable_ger_safety_gate: false
+  enable_pool_update: false
