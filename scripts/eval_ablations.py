@@ -30,6 +30,7 @@ import copy
 import glob
 import json
 import sys
+from collections import Counter
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -328,6 +329,7 @@ def _run_one(
 
     report = evaluate_session(session.turns)
     frontend_meta = _frontend_meta_from_cfg(cfg_run)
+    trace_summary = _summarize_traces(session.turns)
 
     return {
         "ablation": ablation_name,
@@ -356,6 +358,57 @@ def _run_one(
         } if pwr is not None else None),
         "transcript": session.transcript,
         "speaker_order": session.speaker_order,
+        "trace_summary": trace_summary,
+    }
+
+
+def _summarize_traces(turns) -> dict[str, Any]:
+    fallback_reasons: Counter[str] = Counter()
+    decisions: Counter[str] = Counter()
+    raw_artifacts: Counter[str] = Counter()
+    fallback_turns = 0
+    pool_updates = 0
+    total_iters = 0
+    total_turns = len(turns)
+    artifact_terms = [
+        "please provide",
+        "i'm happy to help",
+        "here is the corrected transcript",
+        "audio hypothesis:",
+        "corrected transcript:",
+        "transcript provided",
+        "speaker label",
+    ]
+
+    for turn in turns:
+        if turn.pool_updated:
+            pool_updates += 1
+        total_iters += int(turn.iterations or 0)
+        turn_had_fallback = False
+        for item in turn.trace:
+            decision = item.get("decision")
+            if decision:
+                decisions[str(decision)] += 1
+            if item.get("fallback_applied"):
+                turn_had_fallback = True
+                reason = item.get("fallback_reason") or "<unknown>"
+                fallback_reasons[str(reason)] += 1
+            raw = str(item.get("raw_ger_text") or item.get("raw_generation") or "").lower()
+            for term in artifact_terms:
+                if term in raw:
+                    raw_artifacts[term] += 1
+        if turn_had_fallback:
+            fallback_turns += 1
+
+    return {
+        "n_turns": total_turns,
+        "fallback_turns": fallback_turns,
+        "fallback_rate": fallback_turns / max(1, total_turns),
+        "fallback_reasons": dict(fallback_reasons.most_common()),
+        "decisions": dict(decisions.most_common()),
+        "pool_updates": pool_updates,
+        "mean_iterations": total_iters / max(1, total_turns),
+        "raw_artifact_hits": dict(raw_artifacts.most_common()),
     }
 
 
@@ -396,6 +449,9 @@ def _run_manifest(
             f"{prefix}/der":        r["metrics"]["der"],
             f"{prefix}/jer":        r["metrics"]["jer"],
             f"{prefix}/frontend":   r["frontend"]["profile"],
+            f"{prefix}/fallback_rate": r["trace_summary"]["fallback_rate"],
+            f"{prefix}/fallback_turns": r["trace_summary"]["fallback_turns"],
+            f"{prefix}/pool_updates": r["trace_summary"]["pool_updates"],
             **({f"{prefix}/energy_wh": r["power"]["energy_wh"],
                 f"{prefix}/avg_power_w": r["power"]["avg_power_w"]} if r["power"] else {}),
         }, step=step_offset + i)
