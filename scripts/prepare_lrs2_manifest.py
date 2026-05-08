@@ -6,12 +6,12 @@ LRS2 ships per-utterance:
 
 For each chosen utterance this script:
     1. Extracts 16 kHz mono wav  via ffmpeg.
-    2. Extracts a [T, 1, 96, 96] grayscale mouth ROI npy by:
-         - reading frames with opencv,
-         - center-crop to 88x88 (LRS2 is already face-cropped so the mouth
-           sits roughly at the lower-middle; this is good enough for Phase D
-           smoke. For paper-grade results use av_hubert/preparation/align_mouth.py),
-         - converting to gray + resizing to 96x96, normalising to [0, 1].
+    2. Extracts a [T, 1, 96, 96] grayscale mouth ROI npy via MouthROIExtractor:
+         - backend='dlib'  (default): landmark detection + affine alignment,
+           identical to av_hubert/preparation/align_mouth.py. Requires dlib +
+           three model files (see configs/default.yaml mouth_roi section).
+         - backend='haar'  (fallback): fixed center-crop, no model files needed.
+           Use --roi-backend haar if dlib is not installed.
     3. Pairs it with the reference transcript from <utt>.txt.
     4. Writes everything to a manifest JSON ready for run_sample / eval_ablations.
 
@@ -21,12 +21,19 @@ the same speaker; for multi-speaker testing pick utterances from different
 directories.
 
 Usage:
-    # Pick 1 utterance for run_sample.py:
+    # Pick 1 utterance for run_sample.py (dlib, production):
     python scripts/prepare_lrs2_manifest.py \
         --lrs2-root datasets/lrs2/main \
         --out-manifest data/lrs2_smoke_manifest.json \
         --out-utts data/utts/ \
         --max-utts 1
+
+    # Fallback without dlib:
+    python scripts/prepare_lrs2_manifest.py \
+        --lrs2-root datasets/lrs2/main \
+        --out-manifest data/lrs2_smoke_manifest.json \
+        --out-utts data/utts/ \
+        --max-utts 1 --roi-backend haar
 
     # Pick 3 utterances from 2 distinct dirs for a session manifest:
     python scripts/prepare_lrs2_manifest.py \
@@ -46,6 +53,12 @@ from pathlib import Path
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
+
+# Default dlib model paths (relative to project root).
+# Override via --face-predictor / --cnn-detector / --mean-face args.
+_DEFAULT_FACE_PREDICTOR = "checkpoints/shape_predictor_68_face_landmarks.dat"
+_DEFAULT_CNN_DETECTOR   = "checkpoints/mmod_human_face_detector.dat"
+_DEFAULT_MEAN_FACE      = "av_hubert/avhubert/preparation/data/20words_mean_face.npy"
 
 
 def _read_lrs2_text(path: Path) -> str:
@@ -74,61 +87,58 @@ def _extract_wav(mp4_path: Path, out_wav: Path) -> bool:
         return False
 
 
-def _extract_mouth_roi(mp4_path: Path, out_npy: Path) -> bool:
-    """opencv: mp4 frames -> [T, 1, 96, 96] grayscale, normalised to [0,1].
+def _extract_mouth_roi(
+    mp4_path: Path,
+    out_npy: Path,
+    extractor,
+) -> bool:
+    """Use MouthROIExtractor to produce [T, 1, 96, 96] float32 npy.
 
-    LRS2 videos are already face-cropped 160x160 at 25 fps. We do a
-    center-crop to 88x88 (covering mouth + chin region in most frames) then
-    resize to 96x96 grayscale. This is rougher than av_hubert's landmark-based
-    align_mouth.py but lets Phase D smoke run today without setting up dlib.
+    Args:
+        mp4_path:  Input LRS2 160x160 face-cropped video.
+        out_npy:   Destination .npy path.
+        extractor: A MouthROIExtractor instance (dlib or haar backend).
+
+    Returns True on success.
     """
     try:
-        import cv2
-    except ImportError:
-        print("  [cv2] not available; cannot build mouth ROI")
+        result = extractor.extract_from_file(str(mp4_path))
+        # result is torch.Tensor or numpy array [T, 1, 96, 96] float32
+        if hasattr(result, "numpy"):
+            arr = result.numpy()
+        else:
+            arr = result
+        out_npy.parent.mkdir(parents=True, exist_ok=True)
+        np.save(out_npy, arr)
+        return True
+    except Exception as e:
+        print(f"  [mouth_roi] failed on {mp4_path}: {e}")
         return False
 
-    cap = cv2.VideoCapture(str(mp4_path))
-    if not cap.isOpened():
-        print(f"  [cv2] cannot open {mp4_path}")
-        return False
 
-    frames = []
-    while True:
-        ok, frame = cap.read()
-        if not ok:
-            break
-        # frame: [H, W, 3] BGR
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)  # [H, W]
-        h, w = gray.shape
-        # Center-crop to 88x88 around the lower-middle (mouth region).
-        # LRS2 face crops have eyes ~y=60, mouth ~y=110-130 in 160x160.
-        cy = min(h - 1, int(h * 0.7))   # ~70% from top => mouth-ish
-        cx = w // 2
-        half = 44  # 88 / 2
-        y0, y1 = max(0, cy - half), min(h, cy + half)
-        x0, x1 = max(0, cx - half), min(w, cx + half)
-        crop = gray[y0:y1, x0:x1]
-        # Pad to 88x88 if the crop fell off an edge
-        if crop.shape != (88, 88):
-            padded = np.zeros((88, 88), dtype=np.uint8)
-            ph, pw = crop.shape
-            padded[:ph, :pw] = crop
-            crop = padded
-        crop96 = cv2.resize(crop, (96, 96), interpolation=cv2.INTER_AREA)
-        frames.append(crop96)
-    cap.release()
+def _build_extractor(args):
+    """Instantiate MouthROIExtractor based on CLI args."""
+    sys.path.insert(0, str(ROOT))
+    from avsd_ger.frontend.mouth_roi import MouthROIExtractor
 
-    if not frames:
-        print(f"  [cv2] zero frames decoded from {mp4_path}")
-        return False
-
-    arr = np.stack(frames, axis=0)              # [T, 96, 96] uint8
-    arr = arr.astype(np.float32) / 255.0        # [0, 1]
-    arr = arr[:, np.newaxis, :, :]              # [T, 1, 96, 96]
-    out_npy.parent.mkdir(parents=True, exist_ok=True)
-    np.save(out_npy, arr)
-    return True
+    backend = args.roi_backend
+    if backend == "dlib":
+        fp = args.face_predictor or _DEFAULT_FACE_PREDICTOR
+        cd = args.cnn_detector   or _DEFAULT_CNN_DETECTOR
+        mf = args.mean_face      or _DEFAULT_MEAN_FACE
+        print(f"[mouth_roi] backend=dlib")
+        print(f"  face_predictor : {fp}")
+        print(f"  cnn_detector   : {cd}")
+        print(f"  mean_face      : {mf}")
+        return MouthROIExtractor(
+            backend="dlib",
+            face_predictor_path=fp,
+            cnn_detector_path=cd,
+            mean_face_path=mf,
+        )
+    else:
+        print(f"[mouth_roi] backend=haar (fallback)")
+        return MouthROIExtractor(backend="haar")
 
 
 def _iter_lrs2_utts(root: Path):
@@ -154,11 +164,27 @@ def main() -> int:
                    help="Max distinct speaker dirs to draw from (>=2 for multi-speaker test).")
     p.add_argument("--session", action="store_true",
                    help="Emit a `turns`-style session manifest instead of `utterances` style.")
+    # Mouth ROI backend
+    p.add_argument("--roi-backend", default="dlib", choices=["dlib", "haar"],
+                   help="Mouth ROI extraction backend. "
+                        "'dlib' (default): landmark-based, identical to av_hubert pipeline. "
+                        "'haar': fixed center-crop fallback, no model files needed.")
+    p.add_argument("--face-predictor", default=None,
+                   help=f"Path to shape_predictor_68_face_landmarks.dat "
+                        f"(default: {_DEFAULT_FACE_PREDICTOR})")
+    p.add_argument("--cnn-detector", default=None,
+                   help=f"Path to mmod_human_face_detector.dat "
+                        f"(default: {_DEFAULT_CNN_DETECTOR})")
+    p.add_argument("--mean-face", default=None,
+                   help=f"Path to 20words_mean_face.npy "
+                        f"(default: {_DEFAULT_MEAN_FACE})")
     args = p.parse_args()
 
     if not args.lrs2_root.exists():
         print(f"LRS2 root not found: {args.lrs2_root}", file=sys.stderr)
         return 2
+
+    extractor = _build_extractor(args)
 
     speakers: dict[str, list] = {}
     for mp4, txt, spk in _iter_lrs2_utts(args.lrs2_root):
@@ -169,7 +195,7 @@ def main() -> int:
         if n_total >= args.max_utts and len(speakers) >= 1:
             break
 
-    print(f"[LRS2] picked {sum(len(v) for v in speakers.values())} utts "
+    print(f"\n[LRS2] picked {sum(len(v) for v in speakers.values())} utts "
           f"across {len(speakers)} speakers")
 
     speakers_block = []
@@ -180,7 +206,6 @@ def main() -> int:
     for i, (spk, items) in enumerate(speakers.items()):
         speakers_block.append({
             "speaker_id": f"spk_{i+1:02d}",
-            # Use the first clip's wav as the enrolment audio (extracted next).
             "enrollment_audio": str(args.out_utts / spk / f"{items[0][0].stem}.wav"),
             "enrollment_face": None,
             "meta": {"lrs2_dir": spk},
@@ -193,7 +218,7 @@ def main() -> int:
             print(f"     wav: {wav_out}")
             print(f"     roi: {roi_out}")
             ok_wav = _extract_wav(mp4, wav_out)
-            ok_roi = _extract_mouth_roi(mp4, roi_out)
+            ok_roi = _extract_mouth_roi(mp4, roi_out, extractor)
             if not (ok_wav and ok_roi):
                 print(f"     SKIP (extraction failed)")
                 continue
@@ -220,7 +245,7 @@ def main() -> int:
             t_offset += duration + 0.2
 
     if not utterances_block:
-        print("No utterances extracted — check ffmpeg + opencv-python install.")
+        print("No utterances extracted — check dlib install + model files.")
         return 1
 
     manifest = {"speakers": speakers_block}
