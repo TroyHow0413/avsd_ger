@@ -21,6 +21,7 @@ import torch
 
 from .backbones import AVHubertVSR, WhisperASR
 from .c1_identity import FaceEncoder, IdentityPool, VoiceEncoder
+from .frontend.mouth_roi import MouthROIExtractor
 from .c1_identity.identity_pool import IdentityQueryResult
 from .c2_alignment import GERHead, IDConditionedAligner
 from .c3_feedback import ClosedLoopController, ConfidenceScorer
@@ -49,6 +50,23 @@ class AVSDGERPipeline:
             AVHubertVSR(cfg["vsr"], stub=stub, device=self.device)
             if self.ger_mode in {"av", "visual_only"}
             else None
+        )
+
+        # Mouth-ROI extractor (av-hubert preprocessing, ported from align_mouth.py)
+        # backend='dlib'  → production: identical to av-hubert official pipeline.
+        #   Requires: shape_predictor_68_face_landmarks.dat, mmod_human_face_detector.dat,
+        #             20words_mean_face.npy  (see avsd_ger/frontend/mouth_roi.py for links)
+        # backend='haar'  → fallback: no external model files, works out of the box.
+        roi_cfg = cfg.get("mouth_roi", {})
+        roi_backend = str(roi_cfg.get("backend", "haar"))
+        self.mouth_roi_extractor = MouthROIExtractor(
+            backend=roi_backend,
+            crop_height=int(roi_cfg.get("crop_height", 48)),
+            crop_width=int(roi_cfg.get("crop_width", 48)),
+            window_margin=int(roi_cfg.get("window_margin", 12)),
+            face_predictor_path=roi_cfg.get("face_predictor_path"),
+            cnn_detector_path=roi_cfg.get("cnn_detector_path"),
+            mean_face_path=roi_cfg.get("mean_face_path"),
         )
 
         # C1
@@ -171,6 +189,7 @@ class AVSDGERPipeline:
         self,
         audio_wav: torch.Tensor | np.ndarray,
         video_frames: torch.Tensor | None = None,
+        video_path: str | None = None,
         face_image: np.ndarray | None = None,
         has_visual: bool = True,
         speaker_mask_v: torch.Tensor | None = None,
@@ -179,6 +198,20 @@ class AVSDGERPipeline:
     ) -> dict[str, Any]:
         asr_out = self.asr.transcribe(audio_wav)
         wants_visual = self.ger_mode in {"av", "visual_only"}
+
+        # Auto-extract mouth ROI from video_path if video_frames not already provided
+        if video_frames is None and video_path is not None and wants_visual:
+            try:
+                video_frames = self.mouth_roi_extractor.extract_from_file(video_path)
+                video_frames = video_frames.to(self.device)
+            except Exception as _e:
+                import logging as _log
+                _log.getLogger(__name__).warning(
+                    "MouthROIExtractor failed for %r (%s); falling back to audio-only.",
+                    video_path, _e,
+                )
+                video_frames = None
+
         use_visual = bool(wants_visual and has_visual and video_frames is not None)
         if use_visual and self.vsr is not None:
             vsr_out = self.vsr.extract(video_frames)

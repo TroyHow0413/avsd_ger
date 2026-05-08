@@ -12,10 +12,12 @@ from .registry import (
     list_frontend_profiles,
     render_frontend_profiles_markdown,
 )
+from .mouth_roi import MouthROIExtractor
 
 __all__ = [
     "FrontendProfile",
     "get_frontend_profile",
     "list_frontend_profiles",
     "render_frontend_profiles_markdown",
+    "MouthROIExtractor",
 ]

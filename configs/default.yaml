@@ -55,6 +55,38 @@ frontend:
   mouth_roi: av_hubert_align_mouth
   claim: frontend_agnostic_avsd_ger
 
+# ---------- Mouth ROI Extractor ----------
+# Ported from av_hubert/avhubert/preparation/align_mouth.py.
+# Called automatically inside pipeline.run() when video_path is provided
+# instead of a pre-extracted video_frames tensor.
+#
+# backend options:
+#   'dlib'   PRODUCTION — identical output to av-hubert official preprocessing.
+#            Requires three model files (download links below).
+#   'haar'   FALLBACK   — cv2 built-in cascades, no downloads needed.
+#            Less robust for non-frontal faces; fine for LRS2/LRS3-style clips.
+#
+# To switch to dlib (production):
+#   1. Install dlib:  pip install dlib  (needs cmake + C++ toolchain)
+#   2. Download model files:
+#        shape_predictor_68_face_landmarks.dat.bz2
+#          → http://dlib.net/files/shape_predictor_68_face_landmarks.dat.bz2
+#        mmod_human_face_detector.dat.bz2
+#          → http://dlib.net/files/mmod_human_face_detector.dat.bz2
+#        20words_mean_face.npy
+#          → https://github.com/mpc001/Lipreading_using_Temporal_Convolutional_Networks
+#            /blob/master/preprocessing/20words_mean_face.npy
+#   3. Set backend: dlib and fill in the paths below.
+mouth_roi:
+  backend: dlib          # 'dlib' (production) | 'haar' (fallback, no model files needed)
+  crop_height: 48        # half-height → final crop = 96 px
+  crop_width: 48         # half-width  → final crop = 96 px
+  window_margin: 12      # temporal smoothing window (av-hubert default)
+  # dlib-only paths (ignored when backend: haar)
+  face_predictor_path: checkpoints/shape_predictor_68_face_landmarks.dat
+  cnn_detector_path:   checkpoints/mmod_human_face_detector.dat
+  mean_face_path:      av_hubert/avhubert/preparation/data/20words_mean_face.npy
+
 # ---------- C1: Identity Pool ----------
 identity:
   # Spec section 8: ECAPA-TDNN (VoxCeleb2) for audio, ArcFace ResNet-100 (MS-Celeb) for face
@@ -135,48 +167,4 @@ feedback:
   enable_ger_artifact_gate: true
   enable_ger_length_gate: true
   enable_ger_overlap_gate: true
-  enable_ger_acoustic_fallback: true
-  ger_fallback_min_conf: 0.20  # below this, compare GER text against ASR 1-best
-  ger_fallback_margin: 0.0     # conservative reranker: fallback when ASR acoustic confidence is not worse
-  ger_max_len_ratio: 1.8       # reject prompt echoes / run-on GER outputs much longer than ASR
-  ger_min_token_overlap: 0.50  # reject GER outputs that drift too far from the ASR hypothesis
-  ger_artifact_blacklist:
-    - "Please provide"
-    - "I'm happy to help"
-    - "Here is the corrected transcript"
-    - "Audio hypothesis:"
-    - "Corrected transcript:"
-    - "transcript provided"
-    - "speaker label"
-  weights:
-    asr_rescore: 0.6
-    av_consistency: 0.25
-    nbest_variance: 0.1
-    llm_entropy: 0.05
-
-# ---------- Training (Stage 1 / Stage 2 per spec section 7) ----------
-training:
-  stage1:
-    epochs: 20
-    lr: 1.0e-3
-    warmup_steps: 500
-    freeze: [asr_encoder, vsr_encoder]
-    objective: [infonce_av, infonce_va, ctc]
-    stop_on: av_sid_acc_plateau
-  stage2:
-    epochs: 10
-    lr: 1.0e-4                # spec: exactly 0.1 * Stage 1 LR -- non-negotiable
-    lr_ratio_to_stage1: 0.1
-    freeze: []
-    objective: [ctc, ger_ce, infonce_av, infonce_va]
-  infonce:
-    temperature: 0.07
-    bidirectional: true       # L_total = L_{A->V} + L_{V->A}
-
-# ---------- Ablation flags (spec section 10, Table 2) ----------
-# All false = Full Model. Flip one to reproduce a single ablation row.
-ablation:
-  disable_c1: false             # zero z_id -> GER is not ID-aware
-  disable_c2: false             # skip GER -> return ASR 1-best
-  disable_c3: false             # cap loop at 1 iter, freeze pool
-  disable_conf_gate: false      # promote every ACCEPT -> pool update (spec: must degrade)
+  enable_ger_acous
