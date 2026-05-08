@@ -29,6 +29,35 @@ from .c3_feedback.closed_loop import LoopAction, LoopDecision
 from .utils import load_config, pool_encoder_to_tokens, resolve_device, seed_all, squash_logprob
 
 
+def _tensor_debug(x: Any) -> dict[str, Any] | None:
+    if x is None:
+        return None
+    try:
+        if isinstance(x, np.ndarray):
+            t = torch.from_numpy(x)
+        elif isinstance(x, torch.Tensor):
+            t = x.detach().cpu()
+        else:
+            return None
+        out: dict[str, Any] = {
+            "shape": list(t.shape),
+            "dtype": str(t.dtype),
+            "numel": int(t.numel()),
+        }
+        if t.numel() > 0 and t.is_floating_point():
+            tf = t.float()
+            out.update({
+                "min": float(tf.min().item()),
+                "max": float(tf.max().item()),
+                "mean": float(tf.mean().item()),
+                "std": float(tf.std(unbiased=False).item()) if tf.numel() > 1 else 0.0,
+                "norm": float(tf.norm().item()),
+            })
+        return out
+    except Exception as exc:
+        return {"error": f"{type(exc).__name__}: {exc}"}
+
+
 class AVSDGERPipeline:
     def __init__(self, cfg: dict[str, Any]):
         self.cfg = cfg
@@ -168,6 +197,32 @@ class AVSDGERPipeline:
                 )
         return None
 
+    def _ger_safety_features(self, ger_text: str, asr_text: str) -> dict[str, Any]:
+        asr_tokens = self._gate_tokens(asr_text)
+        ger_tokens = self._gate_tokens(ger_text)
+        overlap = None
+        if asr_tokens and ger_tokens:
+            overlap = len(set(asr_tokens) & set(ger_tokens)) / max(1, len(set(asr_tokens)))
+        artifacts = [
+            artifact
+            for artifact in self.ger_artifact_blacklist
+            if artifact and artifact in ger_text.lower()
+        ]
+        return {
+            "asr_token_count": len(asr_tokens),
+            "ger_token_count": len(ger_tokens),
+            "length_ratio": (len(ger_tokens) / max(1, len(asr_tokens))) if asr_tokens else None,
+            "token_overlap": overlap,
+            "artifact_hits": artifacts,
+            "gate_enabled": self.enable_ger_safety_gate,
+            "artifact_gate_enabled": self.enable_ger_artifact_gate,
+            "length_gate_enabled": self.enable_ger_length_gate,
+            "overlap_gate_enabled": self.enable_ger_overlap_gate,
+            "acoustic_fallback_enabled": self.enable_ger_acoustic_fallback,
+            "max_len_ratio": self.ger_max_len_ratio,
+            "min_token_overlap": self.ger_min_token_overlap,
+        }
+
     @classmethod
     def from_config(cls, path: str | Path) -> "AVSDGERPipeline":
         return cls(load_config(path))
@@ -198,6 +253,16 @@ class AVSDGERPipeline:
     ) -> dict[str, Any]:
         asr_out = self.asr.transcribe(audio_wav)
         wants_visual = self.ger_mode in {"av", "visual_only"}
+        input_debug = {
+            "audio": _tensor_debug(audio_wav),
+            "video_frames_input": _tensor_debug(video_frames),
+            "face_image": _tensor_debug(face_image),
+            "has_visual_flag": bool(has_visual),
+            "video_path": video_path,
+            "speaker_mask_v": _tensor_debug(speaker_mask_v),
+            "snr_per_tok": _tensor_debug(snr_per_tok),
+            "lip_conf_v": _tensor_debug(lip_conf_v),
+        }
 
         # Auto-extract mouth ROI from video_path if video_frames not already provided
         if video_frames is None and video_path is not None and wants_visual:
@@ -225,6 +290,17 @@ class AVSDGERPipeline:
             }
         effective_ger_mode = self.ger_mode if use_visual else "audio_only"
         use_av_context = effective_ger_mode in {"av", "visual_only"}
+        visual_debug = {
+            "requested_ger_mode": self.ger_mode,
+            "effective_ger_mode": effective_ger_mode,
+            "wants_visual": wants_visual,
+            "has_visual": use_visual,
+            "use_av_context": use_av_context,
+            "video_frames": _tensor_debug(video_frames),
+            "vsr_features": _tensor_debug(vsr_out.get("vsr_features")),
+            "lip_hyp": vsr_out.get("lip_hyp", ""),
+            "lip_hyp_token_count": len(self._gate_tokens(vsr_out.get("lip_hyp", ""))),
+        }
 
         if asr_out.encoder_features is None:
             T_a = 150
@@ -234,16 +310,46 @@ class AVSDGERPipeline:
         asr_tok_feats = pool_encoder_to_tokens(
             asr_feats, asr_out.words, frame_rate_hz=asr_out.frame_rate_hz
         )
+        asr_debug = {
+            "nbest": list(asr_out.nbest),
+            "nbest_scores": [float(x) for x in asr_out.nbest_scores],
+            "top": asr_out.nbest[0] if asr_out.nbest else "",
+            "frame_rate_hz": float(asr_out.frame_rate_hz),
+            "encoder_features": _tensor_debug(asr_feats),
+            "token_features": _tensor_debug(asr_tok_feats),
+            "words": [
+                {
+                    "word": str(getattr(w, "word", "")),
+                    "start": float(getattr(w, "start", 0.0)),
+                    "end": float(getattr(w, "end", 0.0)),
+                }
+                for w in asr_out.words
+            ],
+        }
 
         voice_emb = self.voice.embed(audio_wav)
         if face_image is None:
             face_emb = torch.zeros(FaceEncoder.EMB_DIM, device=self.device)
         else:
             face_emb = self.face.embed(face_image)
+        embedding_debug = {
+            "voice_emb": _tensor_debug(voice_emb),
+            "face_emb": _tensor_debug(face_emb),
+        }
 
         trace: list[dict[str, Any]] = []
         skip_ids: set[str] = set()
         id_q = self.pool.query(voice_emb, face_emb, skip_ids=skip_ids)
+        c1_initial_debug = {
+            "disable_c1": self.disable_c1,
+            "pool_size": len(self.pool),
+            "pool_speaker_ids": sorted(list(self.pool._speakers.keys())),
+            "top_ids": list(id_q.top_ids),
+            "top_scores": [float(x) for x in id_q.top_scores],
+            "av_consistency_raw": float(id_q.av_consistency),
+            "is_unknown": bool(id_q.is_unknown),
+            "z_id": _tensor_debug(id_q.z_id),
+        }
 
         # Ablation: w/o C1 -> zero out z_id so C2 degenerates to modality-only
         if self.disable_c1:
@@ -251,6 +357,13 @@ class AVSDGERPipeline:
                 top_ids=[], top_scores=[], av_consistency=0.0,
                 z_id=torch.zeros_like(id_q.z_id), is_unknown=True,
             )
+        c1_effective_debug = {
+            "top_ids": list(id_q.top_ids),
+            "top_scores": [float(x) for x in id_q.top_scores],
+            "av_consistency_raw": float(id_q.av_consistency),
+            "is_unknown": bool(id_q.is_unknown),
+            "z_id": _tensor_debug(id_q.z_id),
+        }
 
         ger_out: dict[str, Any] | None = None
         rep = None
@@ -269,6 +382,14 @@ class AVSDGERPipeline:
                 lip_conf_v=lip_conf_v,
             )
             speaker_id_hint = id_q.top_ids[0] if id_q.top_ids and not id_q.is_unknown else None
+            align_debug = {
+                "asr_token_features": _tensor_debug(asr_tok_feats),
+                "vsr_features": _tensor_debug(vsr_out["vsr_features"]),
+                "f_align": _tensor_debug(f_align),
+                "speaker_mask_v_present": speaker_mask_v is not None,
+                "snr_per_tok_present": snr_per_tok is not None,
+                "lip_conf_v_present": lip_conf_v is not None,
+            }
 
             if self.disable_c2:
                 # Ablation: skip GER -> return ASR 1-best as the hypothesis.
@@ -289,6 +410,8 @@ class AVSDGERPipeline:
             fallback_applied = False
             fallback_reason = None
             asr_top = (asr_out.nbest[0].strip() if asr_out.nbest else "")
+            raw_generated_before_gate = ger_out.get("raw_text")
+            cleaned_generated_before_gate = ger_out.get("text", "")
 
             if not self.disable_c2 and asr_top:
                 fallback_reason = self._ger_safety_reject_reason(ger_out["text"], asr_top)
@@ -311,6 +434,9 @@ class AVSDGERPipeline:
             # Fall back to ASR 1-best instead of accepting an LLM artifact.
             s_acoustic = self.asr.rescore(audio_wav, ger_out["text"])
             s_acoustic_conf = squash_logprob(s_acoustic)
+            asr_s_acoustic = None
+            asr_s_acoustic_conf = None
+            raw_ger_conf = None
             if (
                 not self.disable_c2
                 and self.enable_ger_acoustic_fallback
@@ -371,19 +497,36 @@ class AVSDGERPipeline:
             trace.append({
                 "iter": it,
                 "top_ids": list(id_q.top_ids),
+                "top_scores": [float(x) for x in id_q.top_scores],
+                "is_unknown": bool(id_q.is_unknown),
+                "av_consistency_raw": float(id_q.av_consistency),
+                "speaker_id_hint": speaker_id_hint,
                 "total_conf": rep.total,
                 "s_acoustic": s_acoustic,
                 "s_acoustic_conf": s_acoustic_conf,
+                "asr_s_acoustic": asr_s_acoustic,
+                "asr_s_acoustic_conf": asr_s_acoustic_conf,
+                "raw_ger_acoustic_conf": raw_ger_conf,
                 "components": rep.components,
                 "decision": decision.action.value,
                 "reason": decision.reason,
                 "text": ger_out["text"],
+                "asr_top": asr_top,
+                "asr_nbest": list(asr_out.nbest),
+                "asr_nbest_scores": [float(x) for x in asr_out.nbest_scores],
+                "lip_hyp": vsr_out.get("lip_hyp", ""),
+                "prompt": ger_out.get("prompt"),
+                "raw_generation_before_gate": raw_generated_before_gate,
+                "cleaned_ger_text_before_gate": cleaned_generated_before_gate,
+                "safety_features": self._ger_safety_features(cleaned_generated_before_gate, asr_top),
                 "fallback_applied": fallback_applied,
                 "fallback_reason": fallback_reason,
                 "raw_ger_text": ger_out.get("raw_ger_text") or ger_out.get("raw_text"),
                 "raw_generation": ger_out.get("raw_generation"),
                 "ger_mode": effective_ger_mode,
                 "has_visual": use_visual,
+                "use_av_context": use_av_context,
+                "alignment": align_debug,
             })
 
             if decision.action == LoopAction.ACCEPT_AND_UPDATE:
@@ -425,6 +568,40 @@ class AVSDGERPipeline:
                 if decision else False
             ),
             "trace": trace,
+            "debug": {
+                "input": input_debug,
+                "asr": asr_debug,
+                "visual": visual_debug,
+                "embeddings": embedding_debug,
+                "c1_initial": c1_initial_debug,
+                "c1_effective": c1_effective_debug,
+                "c2": {
+                    "disable_c2": self.disable_c2,
+                    "speaker_special_token": self.ger.speaker_special_token,
+                    "use_av_context": use_av_context,
+                    "mode": effective_ger_mode,
+                },
+                "c3": {
+                    "disable_c3": self.disable_c3,
+                    "disable_conf_gate": self.disable_conf_gate,
+                    "max_iters": max_iters,
+                    "enable_pool_update": self.enable_pool_update,
+                    "enable_ger_safety_gate": self.enable_ger_safety_gate,
+                    "enable_ger_acoustic_fallback": self.enable_ger_acoustic_fallback,
+                },
+                "final": {
+                    "text": ger_out["text"] if ger_out else "",
+                    "speaker_id": id_q.top_ids[0] if (id_q.top_ids and not id_q.is_unknown) else None,
+                    "confidence": rep.total if rep else 0.0,
+                    "iterations": len(trace),
+                    "pool_updated": (
+                        decision.action == LoopAction.ACCEPT_AND_UPDATE
+                        and not self.disable_c3
+                        and (self.enable_pool_update or self.disable_conf_gate)
+                        if decision else False
+                    ),
+                },
+            },
         }
 
     @staticmethod

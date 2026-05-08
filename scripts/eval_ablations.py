@@ -247,6 +247,10 @@ def _load_turns(manifest: dict[str, Any], *, allow_synthetic_audio: bool = False
             lip_conf_v=_maybe_tensor(row.get("lip_conf_v")),
             ref_text=row.get("ref_text"),
             ref_speaker=row.get("ref_speaker"),
+            audio_path=row.get("audio"),
+            mouth_roi_path=row.get("mouth_roi"),
+            video_path=row.get("video"),
+            manifest_row=dict(row),
         ))
     return turns
 
@@ -358,8 +362,64 @@ def _run_one(
         } if pwr is not None else None),
         "transcript": session.transcript,
         "speaker_order": session.speaker_order,
+        "turn_debug": _build_turn_debug(session.turns),
         "trace_summary": trace_summary,
     }
+
+
+def _build_turn_debug(turns) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for turn in turns:
+        dbg = dict(turn.debug or {})
+        pipe_dbg = dbg.get("pipeline", {}) or {}
+        final_dbg = pipe_dbg.get("final", {}) or {}
+        asr_dbg = pipe_dbg.get("asr", {}) or {}
+        visual_dbg = pipe_dbg.get("visual", {}) or {}
+        c1_dbg = pipe_dbg.get("c1_effective", {}) or {}
+        last_trace = turn.trace[-1] if turn.trace else {}
+        rows.append({
+            "summary": {
+                "turn_id": turn.turn_id,
+                "start": turn.start,
+                "end": turn.end,
+                "duration": turn.end - turn.start,
+                "ref_speaker": turn.ref_speaker,
+                "hyp_speaker": turn.hyp_speaker,
+                "speaker_correct": (
+                    turn.ref_speaker == turn.hyp_speaker
+                    if turn.ref_speaker is not None and turn.hyp_speaker is not None
+                    else None
+                ),
+                "ref_text": turn.ref_text,
+                "asr_top": asr_dbg.get("top"),
+                "lip_hyp": visual_dbg.get("lip_hyp"),
+                "final_text": turn.hyp_text,
+                "confidence": turn.confidence,
+                "s_acoustic": turn.s_acoustic,
+                "iterations": turn.iterations,
+                "pool_updated": turn.pool_updated,
+                "fallback_applied": bool(last_trace.get("fallback_applied")),
+                "fallback_reason": last_trace.get("fallback_reason"),
+                "ger_mode": last_trace.get("ger_mode") or visual_dbg.get("effective_ger_mode"),
+                "has_visual": last_trace.get("has_visual", visual_dbg.get("has_visual")),
+                "top_ids": c1_dbg.get("top_ids"),
+                "top_scores": c1_dbg.get("top_scores"),
+                "av_consistency_raw": c1_dbg.get("av_consistency_raw"),
+                "is_unknown": c1_dbg.get("is_unknown"),
+            },
+            "turn": dbg.get("turn", {}),
+            "input": pipe_dbg.get("input", {}),
+            "asr": asr_dbg,
+            "visual": visual_dbg,
+            "embeddings": pipe_dbg.get("embeddings", {}),
+            "c1_initial": pipe_dbg.get("c1_initial", {}),
+            "c1_effective": c1_dbg,
+            "c2": pipe_dbg.get("c2", {}),
+            "c3": pipe_dbg.get("c3", {}),
+            "final": final_dbg,
+            "trace": list(turn.trace or []),
+        })
+    return rows
 
 
 def _summarize_traces(turns) -> dict[str, Any]:
@@ -410,6 +470,35 @@ def _summarize_traces(turns) -> dict[str, Any]:
         "mean_iterations": total_iters / max(1, total_turns),
         "raw_artifact_hits": dict(raw_artifacts.most_common()),
     }
+
+
+def _write_debug_sidecars(
+    results: list[dict[str, Any]],
+    out_path: Path,
+    manifest_path: Path,
+) -> list[dict[str, Any]]:
+    debug_dir = out_path.parent / f"{out_path.stem}_debug"
+    compact_results: list[dict[str, Any]] = []
+    for r in results:
+        r_main = dict(r)
+        turn_debug = r_main.pop("turn_debug", [])
+        debug_path = debug_dir / f"{manifest_path.stem}.{r['ablation']}.debug.json"
+        debug_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(debug_path, "w", encoding="utf-8") as f:
+            json.dump({
+                "manifest": str(manifest_path),
+                "ablation": r["ablation"],
+                "flags": r["flags"],
+                "frontend": r["frontend"],
+                "metrics": r["metrics"],
+                "trace_summary": r["trace_summary"],
+                "speaker_order": r["speaker_order"],
+                "turns": turn_debug,
+            }, f, indent=2, ensure_ascii=False)
+        r_main["debug_path"] = str(debug_path)
+        compact_results.append(r_main)
+        print(f"[debug] wrote {debug_path}")
+    return compact_results
 
 
 def _run_manifest(
@@ -592,10 +681,11 @@ def main() -> int:
         )
         out_path = _output_path_for_manifest(args.out, manifest_path, multi=multi)
         out_path.parent.mkdir(parents=True, exist_ok=True)
+        results_for_payload = _write_debug_sidecars(results, out_path, manifest_path)
         payload = {
             "manifest": str(manifest_path),
             "frontend": frontend_meta,
-            "results": results,
+            "results": results_for_payload,
         }
         with open(out_path, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2)

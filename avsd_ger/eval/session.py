@@ -64,6 +64,10 @@ class SessionTurn:
     lip_conf_v: torch.Tensor | None = None
     ref_text: str | None = None
     ref_speaker: str | None = None
+    audio_path: str | None = None
+    mouth_roi_path: str | None = None
+    video_path: str | None = None
+    manifest_row: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -80,6 +84,7 @@ class SessionTurnResult:
     iterations: int
     pool_updated: bool
     trace: list[dict[str, Any]] = field(default_factory=list)
+    debug: dict[str, Any] = field(default_factory=dict)
     # Passthrough ground truth so metrics don't need the original SessionTurn.
     ref_text: str | None = None
     ref_speaker: str | None = None
@@ -147,6 +152,22 @@ class SessionRunner:
                 iterations=int(out.get("iterations", 0) or 0),
                 pool_updated=bool(out.get("pool_updated", False)),
                 trace=list(out.get("trace", []) or []),
+                debug={
+                    "turn": {
+                        "turn_id": turn.turn_id,
+                        "start": turn.start,
+                        "end": turn.end,
+                        "duration": turn.end - turn.start,
+                        "ref_text": turn.ref_text,
+                        "ref_speaker": turn.ref_speaker,
+                        "audio_path": turn.audio_path,
+                        "mouth_roi_path": turn.mouth_roi_path,
+                        "video_path": turn.video_path,
+                        "has_visual_flag": turn.has_visual,
+                        "manifest_row": turn.manifest_row,
+                    },
+                    "pipeline": dict(out.get("debug", {}) or {}),
+                },
                 ref_text=turn.ref_text,
                 ref_speaker=turn.ref_speaker,
             )
@@ -189,5 +210,9 @@ class SessionRunner:
                 lip_conf_v=row.get("lip_conf_v"),
                 ref_text=row.get("ref_text"),
                 ref_speaker=row.get("ref_speaker"),
+                audio_path=row.get("audio"),
+                mouth_roi_path=row.get("mouth_roi"),
+                video_path=row.get("video"),
+                manifest_row=dict(row),
             ))
         return turns
