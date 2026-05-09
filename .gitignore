@@ -5,3 +5,5 @@
 /datasets
 /wandb
 /checkpoints
+/out/wandb_export
+/out
