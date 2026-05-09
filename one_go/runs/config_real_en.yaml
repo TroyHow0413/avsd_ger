@@ -22,6 +22,14 @@ frontend:
   face_tracking: RetinaFace_or_InsightFace_plus_SORT
   mouth_roi: av_hubert_align_mouth
   claim: frontend_agnostic_avsd_ger
+mouth_roi:
+  backend: dlib
+  crop_height: 48
+  crop_width: 48
+  window_margin: 12
+  face_predictor_path: checkpoints/shape_predictor_68_face_landmarks.dat
+  cnn_detector_path: checkpoints/mmod_human_face_detector.dat
+  mean_face_path: av_hubert/avhubert/preparation/data/20words_mean_face.npy
 identity:
   voice_encoder: speechbrain/spkrec-ecapa-voxceleb
   face_encoder: buffalo_l

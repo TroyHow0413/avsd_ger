@@ -300,6 +300,14 @@ class AVSDGERPipeline:
             "vsr_features": _tensor_debug(vsr_out.get("vsr_features")),
             "lip_hyp": vsr_out.get("lip_hyp", ""),
             "lip_hyp_token_count": len(self._gate_tokens(vsr_out.get("lip_hyp", ""))),
+            "vsr_emit_text": bool(getattr(self.vsr, "emit_text", False)) if self.vsr is not None else False,
+            "vsr_generator_built": bool(getattr(self.vsr, "_generator", None)) if self.vsr is not None else False,
+            "vsr_decode_error": getattr(self.vsr, "last_decode_error", None) if self.vsr is not None else None,
+            "vsr_decode_token_count": int(getattr(self.vsr, "last_decode_token_count", 0)) if self.vsr is not None else 0,
+            "vsr_target_dictionary_size": (
+                len(getattr(getattr(self.vsr, "_task", None), "target_dictionary", []) or [])
+                if self.vsr is not None else 0
+            ),
         }
 
         if asr_out.encoder_features is None:

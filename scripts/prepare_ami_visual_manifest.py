@@ -14,6 +14,7 @@ Example:
       --out-dir data/ami_visual_smoke/IS1009c \
       --speaker-closeup A=Closeup1 B=Closeup2 \
       --max-turns 12 \
+      --max-turns-per-speaker 6 \
       --roi-backend dlib
 
 Then smoke-test AV mode:
@@ -137,6 +138,52 @@ def _to_numpy(x) -> np.ndarray:
     return np.asarray(x, dtype=np.float32)
 
 
+def _save_enrollment_frame(video_path: Path, out_path: Path, timestamp_s: float) -> bool:
+    """Save one closeup frame for optional face enrollment.
+
+    The closeup stream is the best available face evidence in this smoke
+    manifest. InsightFace will still reject it later if no face is visible.
+    """
+
+    try:
+        import cv2
+    except ImportError:
+        return False
+
+    cap = cv2.VideoCapture(str(video_path))
+    try:
+        cap.set(cv2.CAP_PROP_POS_MSEC, max(0.0, timestamp_s) * 1000.0)
+        ok, frame = cap.read()
+        if not ok or frame is None:
+            return False
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        return bool(cv2.imwrite(str(out_path), frame))
+    finally:
+        cap.release()
+
+
+def _with_visual_speaker_fields(row: dict[str, Any], arr: np.ndarray) -> dict[str, Any]:
+    row["has_visual"] = True
+    # The clip was sliced from the explicitly mapped closeup stream for this
+    # reference speaker, so every ROI frame belongs to that speaker track.
+    row["speaker_mask_v"] = [True] * int(arr.shape[0])
+    return row
+
+
+def _with_enrollment_faces(
+    speakers: list[dict[str, Any]],
+    face_by_suffix: dict[str, str],
+) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for speaker in speakers:
+        row = dict(speaker)
+        suffix = _speaker_suffix(str(row.get("speaker_id", "")))
+        if not row.get("enrollment_face") and suffix in face_by_suffix:
+            row["enrollment_face"] = face_by_suffix[suffix]
+        out.append(row)
+    return out
+
+
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--manifest", required=True, type=Path)
@@ -150,6 +197,12 @@ def main() -> int:
         help="Explicit AMI mapping, e.g. A=Closeup1 B=Closeup2.",
     )
     p.add_argument("--max-turns", type=int, default=12)
+    p.add_argument(
+        "--max-turns-per-speaker",
+        type=int,
+        default=None,
+        help="Optional cap per mapped speaker suffix, useful for multi-speaker smoke manifests.",
+    )
     p.add_argument("--min-turn-secs", type=float, default=1.0)
     p.add_argument("--max-turn-secs", type=float, default=12.0)
     p.add_argument("--keep-clips", action="store_true")
@@ -157,6 +210,11 @@ def main() -> int:
     p.add_argument("--face-predictor", default=_DEFAULT_FACE_PREDICTOR)
     p.add_argument("--cnn-detector", default=_DEFAULT_CNN_DETECTOR)
     p.add_argument("--mean-face", default=_DEFAULT_MEAN_FACE)
+    p.add_argument(
+        "--no-enrollment-faces",
+        action="store_true",
+        help="Do not save closeup-frame enrollment_face images into the output manifest.",
+    )
     args = p.parse_args()
 
     with open(args.manifest, "r", encoding="utf-8") as f:
@@ -168,14 +226,18 @@ def main() -> int:
 
     out_roi_dir = args.out_dir / "mouth_roi"
     out_clip_dir = args.out_dir / "video_clips"
+    out_face_dir = args.out_dir / "enrollment_faces"
     out_roi_dir.mkdir(parents=True, exist_ok=True)
     out_clip_dir.mkdir(parents=True, exist_ok=True)
 
     turns_out: list[dict[str, Any]] = []
+    face_by_suffix: dict[str, str] = {}
     attempts = 0
     failures = 0
     skipped_unmapped = 0
     skipped_duration = 0
+    skipped_per_speaker_cap = 0
+    turns_by_suffix: dict[str, int] = {}
 
     for turn in manifest.get("turns", []):
         if len(turns_out) >= args.max_turns:
@@ -194,6 +256,12 @@ def main() -> int:
         if dur < args.min_turn_secs or dur > args.max_turn_secs:
             skipped_duration += 1
             continue
+        if (
+            args.max_turns_per_speaker is not None
+            and turns_by_suffix.get(suffix, 0) >= args.max_turns_per_speaker
+        ):
+            skipped_per_speaker_cap += 1
+            continue
 
         src_video = args.ami_video_dir / f"{meeting_id}.{closeup}.avi"
         if not src_video.exists():
@@ -205,6 +273,7 @@ def main() -> int:
         safe_id = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in turn_id)
         clip_path = out_clip_dir / f"{safe_id}_{closeup}.mp4"
         roi_path = out_roi_dir / f"{safe_id}_{closeup}_mouth.npy"
+        face_path = out_face_dir / f"{meeting_id}_{suffix}_{closeup}.jpg"
 
         attempts += 1
         try:
@@ -213,6 +282,12 @@ def main() -> int:
             if arr.ndim != 4 or arr.shape[1:] != (1, 96, 96):
                 raise RuntimeError(f"unexpected ROI shape {arr.shape}")
             np.save(roi_path, arr)
+            if (
+                not args.no_enrollment_faces
+                and suffix not in face_by_suffix
+                and _save_enrollment_frame(src_video, face_path, start + dur / 2.0)
+            ):
+                face_by_suffix[suffix] = str(face_path)
             if not args.keep_clips:
                 try:
                     clip_path.unlink()
@@ -228,8 +303,9 @@ def main() -> int:
         row["video_source"] = str(src_video)
         row["video_closeup"] = closeup
         row["video_speaker_map"] = f"{suffix}={closeup}"
-        row["has_visual"] = True
+        row = _with_visual_speaker_fields(row, arr)
         turns_out.append(row)
+        turns_by_suffix[suffix] = turns_by_suffix.get(suffix, 0) + 1
         print(
             f"[ok] {turn_id} {suffix}->{closeup} "
             f"{dur:.2f}s roi={tuple(arr.shape)} range=({arr.min():.3f},{arr.max():.3f})"
@@ -244,7 +320,7 @@ def main() -> int:
         return 1
 
     out_manifest = {
-        "speakers": manifest.get("speakers", []),
+        "speakers": _with_enrollment_faces(manifest.get("speakers", []), face_by_suffix),
         "turns": turns_out,
         "meta": {
             "source_manifest": str(args.manifest),
@@ -252,10 +328,14 @@ def main() -> int:
             "speaker_closeup": closeup_by_speaker,
             "roi_backend": args.roi_backend,
             "visual_frontend": "ami_closeup_explicit_map_mouth_roi",
+            "enrollment_faces": face_by_suffix,
+            "speaker_mask_v": "all_true_for_each_explicitly_mapped_closeup_turn",
             "attempts": attempts,
             "failures": failures,
             "skipped_unmapped": skipped_unmapped,
             "skipped_duration": skipped_duration,
+            "skipped_per_speaker_cap": skipped_per_speaker_cap,
+            "turns_by_speaker_suffix": turns_by_suffix,
             "note": (
                 "AMI closeup cameras are not filename-bound to speakers; "
                 "interpret AV results only for explicitly verified mappings."

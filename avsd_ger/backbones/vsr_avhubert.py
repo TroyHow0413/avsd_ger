@@ -35,6 +35,8 @@ class AVHubertVSR(nn.Module):
         self._model = None
         self._task = None
         self._generator = None  # for lip-hypothesis decoding
+        self.last_decode_error: str | None = None
+        self.last_decode_token_count: int = 0
 
         if not stub:
             self._load_real()
@@ -214,6 +216,8 @@ class AVHubertVSR(nn.Module):
         vsr_feats = feats.squeeze(0).detach()  # [T_v, 1024]
 
         lip_hyp = ""
+        self.last_decode_error = None
+        self.last_decode_token_count = 0
         if self.emit_text and self._generator is not None:
             lip_hyp = self._decode_lip(x)
 
@@ -232,6 +236,7 @@ class AVHubertVSR(nn.Module):
         an empty string just makes the LLM rely on audio-hyp + AV_CTX.
         """
         if self._generator is None or self._task is None:
+            self.last_decode_error = "VSR generator or task is not available"
             return ""
         try:
             T_v = x.shape[2]
@@ -247,19 +252,29 @@ class AVHubertVSR(nn.Module):
             }
             hypos = self._generator.generate([self._model], sample)
             if not hypos or not hypos[0]:
+                self.last_decode_error = "VSR generator returned no hypotheses"
                 return ""
             tokens = hypos[0][0]["tokens"]
+            self.last_decode_token_count = int(tokens.numel())
+            if self.last_decode_token_count == 0:
+                self.last_decode_error = "VSR generator returned an empty token sequence"
+                return ""
             tgt_dict = getattr(self._task, "target_dictionary", None)
             if tgt_dict is None:
+                self.last_decode_error = "VSR task has no target_dictionary"
                 return ""
             try:
                 text = tgt_dict.string(tokens.int().cpu(), bpe_symbol="subword_nmt")
             except (TypeError, AttributeError):
                 text = tgt_dict.string(tokens.int().cpu())
-            return text.strip()
+            text = text.strip()
+            if not text:
+                self.last_decode_error = "VSR decoded text is empty"
+            return text
         except Exception as _e:
             import logging as _log
-            _log.getLogger(__name__).debug(f"_decode_lip failed: {_e}")
+            self.last_decode_error = f"{type(_e).__name__}: {_e}"
+            _log.getLogger(__name__).warning("VSR lip decode failed: %s", self.last_decode_error)
             return ""
 
     # ------------------------------------------------------------------ stub
