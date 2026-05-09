@@ -14,7 +14,8 @@ vsr:
   checkpoint: checkpoints/self_large_vox_433h.pt
   config: av_hubert/avhubert/conf/finetune/self_large_vox_433h.yaml
   layer: -1
-  emit_text: true
+  emit_text: false
+  disable_text_on_decode_error: true
 frontend:
   profile: common_pyannote_lightasd
   diarization: pyannote/speaker-diarization-community-1

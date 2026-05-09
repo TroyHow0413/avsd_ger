@@ -31,6 +31,7 @@ class AVHubertVSR(nn.Module):
         self.device = torch.device(device)
         self.layer = int(cfg.get("layer", -1))
         self.emit_text = bool(cfg.get("emit_text", True))
+        self.disable_text_on_decode_error = bool(cfg.get("disable_text_on_decode_error", True))
 
         self._model = None
         self._task = None
@@ -274,7 +275,14 @@ class AVHubertVSR(nn.Module):
         except Exception as _e:
             import logging as _log
             self.last_decode_error = f"{type(_e).__name__}: {_e}"
-            _log.getLogger(__name__).warning("VSR lip decode failed: %s", self.last_decode_error)
+            if self.disable_text_on_decode_error:
+                self.emit_text = False
+                _log.getLogger(__name__).warning(
+                    "VSR lip decode failed: %s; disabling lip_hyp text decode for this run.",
+                    self.last_decode_error,
+                )
+            else:
+                _log.getLogger(__name__).warning("VSR lip decode failed: %s", self.last_decode_error)
             return ""
 
     # ------------------------------------------------------------------ stub
