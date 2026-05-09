@@ -530,6 +530,7 @@ def _run_manifest(
         results.append(r)
 
         prefix = f"manifest/{manifest_path.stem}/ablation/{name}"
+        metric_prefix = f"metric/{name}"
         wb.log({
             f"{prefix}/sa_wer":     r["metrics"]["sa_wer"],
             f"{prefix}/wer":        r["metrics"]["wer"],
@@ -541,6 +542,15 @@ def _run_manifest(
             f"{prefix}/fallback_rate": r["trace_summary"]["fallback_rate"],
             f"{prefix}/fallback_turns": r["trace_summary"]["fallback_turns"],
             f"{prefix}/pool_updates": r["trace_summary"]["pool_updates"],
+            f"{metric_prefix}/sa_wer/{manifest_path.stem}": r["metrics"]["sa_wer"],
+            f"{metric_prefix}/wer/{manifest_path.stem}": r["metrics"]["wer"],
+            f"{metric_prefix}/scr/{manifest_path.stem}": r["metrics"]["scr"],
+            f"{metric_prefix}/av_sid_acc/{manifest_path.stem}": r["metrics"]["av_sid_acc"],
+            f"{metric_prefix}/der/{manifest_path.stem}": r["metrics"]["der"],
+            f"{metric_prefix}/jer/{manifest_path.stem}": r["metrics"]["jer"],
+            f"{metric_prefix}/fallback_rate/{manifest_path.stem}": r["trace_summary"]["fallback_rate"],
+            f"{metric_prefix}/fallback_turns/{manifest_path.stem}": r["trace_summary"]["fallback_turns"],
+            f"{metric_prefix}/pool_updates/{manifest_path.stem}": r["trace_summary"]["pool_updates"],
             **({f"{prefix}/energy_wh": r["power"]["energy_wh"],
                 f"{prefix}/avg_power_w": r["power"]["avg_power_w"]} if r["power"] else {}),
         }, step=step_offset + i)
@@ -716,9 +726,16 @@ def main() -> int:
         for r in run["results"]:
             for k, v in r["metrics"].items():
                 summary[f"summary/{stem}/{r['ablation']}/{k}"] = v
+                summary[f"summary_metric/{r['ablation']}/{k}/{stem}"] = v
+            ts = r.get("trace_summary", {}) or {}
+            for k in ("fallback_rate", "fallback_turns", "pool_updates", "mean_iterations"):
+                if k in ts:
+                    summary[f"summary/{stem}/{r['ablation']}/{k}"] = ts[k]
+                    summary[f"summary_metric/{r['ablation']}/{k}/{stem}"] = ts[k]
     for stem, passed in spec_checks.items():
         if passed is not None:
             summary[f"summary/{stem}/spec_check_c3_gate_pass"] = bool(passed)
+            summary[f"summary_metric/spec_check/c3_gate_pass/{stem}"] = bool(passed)
     wb.summary(summary)
     wb.finish()
     return 0
