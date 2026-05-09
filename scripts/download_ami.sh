@@ -139,7 +139,7 @@ IS_TRAIN=(
     IS1002b IS1002c IS1002d
     IS1003a IS1003b IS1003c IS1003d
     IS1004a IS1004b IS1004c IS1004d
-    IS1005a IS1005b IS1005c IS1005d
+    IS1005a IS1005b IS1005c
     IS1006a IS1006b IS1006c IS1006d
     IS1007a IS1007b IS1007c IS1007d
 )
@@ -265,6 +265,10 @@ else
                 echo "${BASE}/${MID}/video/${fname}|${VIDEO_DIR}/${fname}|${OVERWRITE}|${LOG_OK}|${LOG_SKIP}|${LOG_MISS}" \
                     >> "$VIDEO_LIST"
             done
+            # PreferredOverview — used for speaker-count discrimination
+            fname="${MID}.PreferredOverview.avi"
+            echo "${BASE}/${MID}/video/${fname}|${VIDEO_DIR}/${fname}|${OVERWRITE}|${LOG_OK}|${LOG_SKIP}|${LOG_MISS}" \
+                >> "$VIDEO_LIST"
         fi
     done
 fi
