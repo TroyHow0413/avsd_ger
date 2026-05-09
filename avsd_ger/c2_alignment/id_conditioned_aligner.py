@@ -154,13 +154,21 @@ class IDConditionedAligner(nn.Module):
 
         key_pad = None
         if speaker_mask_v is not None:
-            key_pad = ~speaker_mask_v.bool()  # True = mask this frame
+            key_pad = ~speaker_mask_v.to(q.device).bool()  # True = mask this frame
 
         soft_gate = None
         if self.use_soft_gate and (snr_per_tok is not None or lip_conf_v is not None):
             N, M = q.size(0), kv.size(0)
-            s = snr_per_tok if snr_per_tok is not None else torch.ones(N, device=q.device)
-            v = lip_conf_v if lip_conf_v is not None else torch.ones(M, device=kv.device)
+            s = (
+                snr_per_tok.to(q.device)
+                if snr_per_tok is not None
+                else torch.ones(N, device=q.device)
+            )
+            v = (
+                lip_conf_v.to(kv.device)
+                if lip_conf_v is not None
+                else torch.ones(M, device=kv.device)
+            )
             # gate[n,m] = min(SNR(n), lip_conf(m))
             soft_gate = torch.minimum(s.view(N, 1), v.view(1, M))
 

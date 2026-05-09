@@ -376,6 +376,11 @@ class AVSDGERPipeline:
         ger_out: dict[str, Any] | None = None
         rep = None
         decision: LoopDecision | None = None
+        speaker_mask_v_device = (
+            speaker_mask_v.to(self.device) if speaker_mask_v is not None else None
+        )
+        snr_per_tok_device = snr_per_tok.to(self.device) if snr_per_tok is not None else None
+        lip_conf_v_device = lip_conf_v.to(self.device) if lip_conf_v is not None else None
 
         # Ablation: w/o C3 -> cap iterations at 1 and never update pool
         max_iters = 1 if self.disable_c3 else self.loop.max_iters
@@ -385,18 +390,18 @@ class AVSDGERPipeline:
                 asr_tok_feats=asr_tok_feats,
                 vsr_feats=vsr_out["vsr_features"].to(self.device),
                 e_id=id_q.z_id,
-                speaker_mask_v=speaker_mask_v,
-                snr_per_tok=snr_per_tok,
-                lip_conf_v=lip_conf_v,
+                speaker_mask_v=speaker_mask_v_device,
+                snr_per_tok=snr_per_tok_device,
+                lip_conf_v=lip_conf_v_device,
             )
             speaker_id_hint = id_q.top_ids[0] if id_q.top_ids and not id_q.is_unknown else None
             align_debug = {
                 "asr_token_features": _tensor_debug(asr_tok_feats),
                 "vsr_features": _tensor_debug(vsr_out["vsr_features"]),
                 "f_align": _tensor_debug(f_align),
-                "speaker_mask_v_present": speaker_mask_v is not None,
-                "snr_per_tok_present": snr_per_tok is not None,
-                "lip_conf_v_present": lip_conf_v is not None,
+                "speaker_mask_v_present": speaker_mask_v_device is not None,
+                "snr_per_tok_present": snr_per_tok_device is not None,
+                "lip_conf_v_present": lip_conf_v_device is not None,
             }
 
             if self.disable_c2:
