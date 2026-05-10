@@ -285,6 +285,48 @@ def _enroll_pool_from_manifest(
         )
 
 
+def _load_stage2_checkpoints(
+    pipe: AVSDGERPipeline,
+    *,
+    aligner_ckpt: str | None = None,
+    ger_ckpt: str | None = None,
+) -> None:
+    if aligner_ckpt:
+        path = Path(aligner_ckpt)
+        if not path.exists():
+            raise FileNotFoundError(f"Missing aligner checkpoint: {path}")
+        pipe.aligner.load_state_dict(torch.load(path, map_location=pipe.device))
+        print(f"[stage2] loaded aligner checkpoint: {path}")
+
+    if not ger_ckpt:
+        return
+    root = Path(ger_ckpt)
+    if not root.exists():
+        raise FileNotFoundError(f"Missing GER checkpoint path: {root}")
+
+    projectors = root / "ger_projectors.pt" if root.is_dir() else root
+    if projectors.exists() and projectors.is_file():
+        state = torch.load(projectors, map_location=pipe.device)
+        pipe.ger.qformer.load_state_dict(state["qformer"])
+        pipe.ger.id_proj.load_state_dict(state["id_proj"])
+        print(f"[stage2] loaded GER projectors: {projectors}")
+
+    adapter_dir = root / "lora_adapter" if root.is_dir() else None
+    if adapter_dir is not None and adapter_dir.exists() and pipe.ger._llm is not None:
+        if hasattr(pipe.ger._llm, "load_adapter"):
+            adapter_name = "stage2_eval"
+            pipe.ger._llm.load_adapter(
+                str(adapter_dir), adapter_name=adapter_name, is_trainable=False
+            )
+            pipe.ger._llm.set_adapter(adapter_name)
+        else:
+            from peft import PeftModel
+            pipe.ger._llm = PeftModel.from_pretrained(
+                pipe.ger._llm, str(adapter_dir), is_trainable=False
+            )
+        print(f"[stage2] loaded GER LoRA adapter: {adapter_dir}")
+
+
 def _run_one(
     cfg: dict[str, Any],
     ablation_name: str,
@@ -293,6 +335,8 @@ def _run_one(
     pool_path: str | None,
     fresh_pool: bool,
     monitor: PowerMonitor | None,
+    aligner_ckpt: str | None = None,
+    ger_ckpt: str | None = None,
 ) -> dict[str, Any]:
     cfg_run = copy.deepcopy(cfg)
     cfg_run.setdefault("ablation", {})
@@ -309,9 +353,17 @@ def _run_one(
 
     allow_synthetic_audio = bool(cfg_run.get("stub_backbones", False))
     pipe = AVSDGERPipeline(cfg_run)
+    _load_stage2_checkpoints(pipe, aligner_ckpt=aligner_ckpt, ger_ckpt=ger_ckpt)
+    loaded_pool = False
     if pool_path and Path(pool_path).exists() and not fresh_pool:
         pipe.load_pool(pool_path)
-    else:
+        loaded_pool = True
+    elif pool_path and Path(pool_path).exists() and fresh_pool:
+        pipe.load_pool(pool_path)
+        loaded_pool = True
+        print(f"[pool] loaded fuser from {pool_path}; re-enrolling speakers from manifest")
+
+    if fresh_pool or not loaded_pool:
         if fresh_pool:
             print(f"[pool] fresh-pool enabled; enrolling {ablation_name} from manifest")
         _enroll_pool_from_manifest(
@@ -510,6 +562,8 @@ def _run_manifest(
     only: list[str] | None,
     wb: WandbLogger,
     step_offset: int = 0,
+    aligner_ckpt: str | None = None,
+    ger_ckpt: str | None = None,
 ) -> tuple[list[dict[str, Any]], bool | None]:
     with open(manifest_path, "r", encoding="utf-8") as f:
         manifest = json.load(f)
@@ -525,7 +579,17 @@ def _run_manifest(
         if only is not None and name not in only:
             continue
         print(f"\n=== {manifest_path.name} :: running ablation: {name}  flags={flags} ===")
-        r = _run_one(cfg, name, flags, manifest, pool_path, fresh_pool, monitor)
+        r = _run_one(
+            cfg,
+            name,
+            flags,
+            manifest,
+            pool_path,
+            fresh_pool,
+            monitor,
+            aligner_ckpt=aligner_ckpt,
+            ger_ckpt=ger_ckpt,
+        )
         print(json.dumps(r["metrics"], indent=2))
         results.append(r)
 
@@ -580,11 +644,21 @@ def main() -> int:
     )
     p.add_argument("--pool", default=str(ROOT / "checkpoints/identity_pool.pt"))
     p.add_argument(
+        "--aligner-ckpt",
+        default=None,
+        help="Optional Stage-2 aligner checkpoint, e.g. checkpoints/stage2/aligner_stage2.pt.",
+    )
+    p.add_argument(
+        "--ger-ckpt",
+        default=None,
+        help="Optional Stage-2 GER directory containing ger_projectors.pt and lora_adapter/.",
+    )
+    p.add_argument(
         "--fresh-pool",
         action="store_true",
         help=(
-            "Ignore --pool even if it exists and re-enroll a clean identity pool "
-            "from manifest speakers for every ablation run."
+            "Re-enroll manifest speakers for every ablation run. If --pool exists, "
+            "its trained fuser is loaded first, then speakers are enrolled from the manifest."
         ),
     )
     p.add_argument("--out", default=str(ROOT / "out/ablation_report.json"))
@@ -688,6 +762,8 @@ def main() -> int:
             args.only,
             wb,
             step_offset=m_idx * max(1, ablations_per_manifest),
+            aligner_ckpt=args.aligner_ckpt,
+            ger_ckpt=args.ger_ckpt,
         )
         out_path = _output_path_for_manifest(args.out, manifest_path, multi=multi)
         out_path.parent.mkdir(parents=True, exist_ok=True)
