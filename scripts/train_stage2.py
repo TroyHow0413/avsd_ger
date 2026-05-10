@@ -82,6 +82,14 @@ def train(
     voice = VoiceEncoder(cfg["identity"]["voice_encoder"], stub=stub, device=device)
     face = FaceEncoder(cfg["identity"]["face_encoder"], stub=stub, device=device)
     pool = IdentityPool(cfg["identity"], device=device)
+    stage1_pool_path = cfg.get("training", {}).get("stage2", {}).get(
+        "stage1_pool", "checkpoints/stage1/identity_pool_stage1.pt"
+    )
+    if stage1_pool_path and Path(stage1_pool_path).exists():
+        pool.load(stage1_pool_path)
+        print(f"[stage2] loaded Stage-1 identity fuser from {stage1_pool_path}")
+    elif not stub:
+        print(f"[stage2] warning: Stage-1 identity fuser not found: {stage1_pool_path}")
     aligner = IDConditionedAligner(
         cfg["alignment"],
         z_dim=cfg["identity"]["fused_dim"],
@@ -120,6 +128,8 @@ def train(
     w_ctc = 1.0
     w_ger = 1.0
     w_info = 0.5
+    ger_mode = str(cfg.get("ger", {}).get("mode", "audio_only")).lower()
+    use_av_context = ger_mode in {"av", "visual_only"}
 
     n_epochs = int(cfg["training"]["stage2"]["epochs"])
     records = list(iter_manifest(manifest)) if Path(manifest).exists() else [None] * 8
@@ -140,23 +150,41 @@ def train(
             v_emb = voice.embed(batch["audio"])
             f_emb = face.embed(batch["face"])
             id_q = pool.query(v_emb, f_emb)
+            z_id = id_q.z_id
+            if len(pool) == 0:
+                z_id = pool.fuser(v_emb.unsqueeze(0), f_emb.unsqueeze(0)).squeeze(0)
 
             f_align = aligner(
                 asr_tok_feats=asr_tok,
                 vsr_feats=vsr_out["vsr_features"].to(device),
-                e_id=id_q.z_id,
+                e_id=z_id,
             )
 
             # ---- losses --------------------------------------------------
             l_ctc = ctc(f_align, targets=[batch["target"]]).loss
             l_ger = ger_ce(
-                z_id=id_q.z_id, f_align=f_align,
+                z_id=z_id, f_align=f_align,
                 nbest=asr_out.nbest, lip_hyp=vsr_out.get("lip_hyp", ""),
                 target=batch["target"],
+                speaker_id=batch.get("speaker_id"),
+                mode=ger_mode,
+                use_av_context=use_av_context,
             ).loss
             # Bidirectional InfoNCE on a micro-batch of 2 pairs (self + swap)
-            a = pool.fuser.voice_proj(torch.stack([v_emb, batch["voice_pair"].to(device)]))
-            v = pool.fuser.face_proj(torch.stack([f_emb, batch["face_pair"].to(device)]))
+            neg_audio = batch.get("neg_audio")
+            neg_face = batch.get("neg_face")
+            voice_pair = (
+                voice.embed(neg_audio)
+                if neg_audio is not None
+                else batch["voice_pair"].to(device)
+            )
+            face_pair = (
+                face.embed(neg_face)
+                if neg_face is not None
+                else batch["face_pair"].to(device)
+            )
+            a = pool.fuser.voice_proj(torch.stack([v_emb, voice_pair]))
+            v = pool.fuser.face_proj(torch.stack([f_emb, face_pair]))
             l_info = info(a, v).loss
 
             loss = w_ctc * l_ctc + w_ger * l_ger + w_info * l_info
@@ -195,11 +223,87 @@ def train(
     pool.save(out / "identity_pool_stage2.pt")
     torch.save(aligner.state_dict(), out / "aligner_stage2.pt")
     torch.save(ctc.state_dict(), out / "ctc_head_stage2.pt")
+    ger_dir = out / "ger"
+    ger_dir.mkdir(parents=True, exist_ok=True)
+    torch.save(
+        {
+            "qformer": ger.qformer.state_dict(),
+            "id_proj": ger.id_proj.state_dict(),
+        },
+        ger_dir / "ger_projectors.pt",
+    )
+    if not stub and ger._llm is not None:
+        ger._llm.save_pretrained(ger_dir / "lora_adapter")
+        if ger._tok is not None:
+            ger._tok.save_pretrained(ger_dir / "tokenizer")
     print(f"[done] saved Stage-2 checkpoints to {out}")
 
 
 def _load_record(rec: dict[str, Any]) -> dict[str, Any]:
-    raise NotImplementedError("Real data loader is project-specific; see AMI/AISHELL-4 adapters.")
+    audio = _load_wav_path(rec.get("wav_path") or rec.get("audio"))
+    video = _load_video_path(rec.get("video_path") or rec.get("mouth_roi") or rec.get("video"))
+    face = _load_face_path(rec.get("face_path") or rec.get("enrollment_face"))
+    target = str(rec.get("target") or rec.get("ref_text") or "")
+    if not target:
+        raise ValueError(f"Missing target/ref_text for record {rec.get('utt_id', '<unknown>')}")
+
+    out: dict[str, Any] = {
+        "audio": audio,
+        "video": video,
+        "face": face,
+        "target": target,
+        "speaker_id": rec.get("speaker_id") or rec.get("ref_speaker"),
+        "voice_pair": torch.zeros(192),
+        "face_pair": torch.zeros(512),
+    }
+    if rec.get("neg_wav_path"):
+        out["neg_audio"] = _load_wav_path(rec["neg_wav_path"])
+    if rec.get("neg_face_path"):
+        out["neg_face"] = _load_face_path(rec["neg_face_path"])
+    return out
+
+
+def _resolve_record_path(path: str | None, *, kind: str) -> Path:
+    if not path:
+        raise FileNotFoundError(f"Missing {kind} path in Stage-2 record.")
+    raw = Path(path)
+    candidates = [raw]
+    if "\\" in path:
+        candidates.append(Path(path.replace("\\", "/")))
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    raise FileNotFoundError(f"{kind} path does not exist: {path!r}")
+
+
+def _load_wav_path(path: str | None) -> torch.Tensor:
+    import soundfile as sf
+
+    p = _resolve_record_path(path, kind="audio")
+    wav, sr = sf.read(p)
+    wav = np.asarray(wav, dtype=np.float32)
+    if wav.ndim > 1:
+        wav = wav.mean(axis=1)
+    if sr != 16000:
+        import librosa
+        wav = librosa.resample(wav, orig_sr=sr, target_sr=16000)
+    return torch.from_numpy(np.asarray(wav, dtype=np.float32))
+
+
+def _load_video_path(path: str | None) -> torch.Tensor:
+    p = _resolve_record_path(path, kind="video/mouth_roi")
+    arr = np.load(p)
+    video = torch.from_numpy(np.asarray(arr, dtype=np.float32))
+    if video.ndim == 3:
+        video = video.unsqueeze(1)
+    return video / 255.0 if video.numel() and float(video.max()) > 1.5 else video
+
+
+def _load_face_path(path: str | None) -> np.ndarray:
+    from PIL import Image
+
+    p = _resolve_record_path(path, kind="face")
+    return np.array(Image.open(p).convert("RGB"))
 
 
 def main() -> None:
@@ -207,6 +311,17 @@ def main() -> None:
     ap.add_argument("--config", default="configs/default.yaml")
     ap.add_argument("--manifest", default="")
     ap.add_argument("--out", default="checkpoints/stage2/")
+    ap.add_argument(
+        "--stage1-pool",
+        default=None,
+        help="Stage-1 identity_pool checkpoint to initialize the Stage-2 fuser.",
+    )
+    ap.add_argument(
+        "--ger-mode",
+        default=None,
+        choices=["audio_only", "av", "visual_only"],
+        help="Override cfg.ger.mode for Stage-2 training.",
+    )
     ap.add_argument(
         "--llm-quant", default=None,
         choices=["auto", "fp16", "int8", "4bit"],
@@ -216,6 +331,12 @@ def main() -> None:
     add_wandb_args(ap)
     args = ap.parse_args()
     cfg = load_config(args.config)
+    if args.stage1_pool is not None:
+        cfg.setdefault("training", {}).setdefault("stage2", {})["stage1_pool"] = args.stage1_pool
+        print(f"[train_stage2] Override stage1_pool -> {args.stage1_pool}")
+    if args.ger_mode is not None:
+        cfg.setdefault("ger", {})["mode"] = args.ger_mode
+        print(f"[train_stage2] Override ger.mode -> {args.ger_mode}")
     if args.llm_quant is not None:
         cfg.setdefault("ger", {})["llm_quant"] = args.llm_quant
         print(f"[train_stage2] Override llm_quant -> {args.llm_quant}")
