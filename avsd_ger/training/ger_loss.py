@@ -53,6 +53,8 @@ class GERCrossEntropy(nn.Module):
         lip_hyp: str,
         target: str,
         speaker_id: str | None = None,
+        mode: str = "av",
+        use_av_context: bool = True,
     ) -> GERLossReport:
         if self.ger.stub:
             # Stub mode: fabricate a deterministic loss for wiring tests.
@@ -60,8 +62,12 @@ class GERCrossEntropy(nn.Module):
             return GERLossReport(loss=fake, mean_token_lp=-0.5, n_target_tokens=max(1, len(target.split())))
 
         tok = self.ger._tok
-        text = self.ger._render_text(speaker_id, nbest, lip_hyp)
-        prompt_embeds = self.ger._inputs_embeds(z_id, f_align, text)   # [1, P, H]
+        text = self.ger._render_text(
+            speaker_id, nbest, lip_hyp, mode=mode, use_av_context=use_av_context
+        )
+        prompt_embeds = self.ger._inputs_embeds(
+            z_id, f_align, text, use_av_context=use_av_context
+        )   # [1, P, H]
 
         # Tokenise target and build target embeddings + labels.
         tgt_ids = tok(target, return_tensors="pt", add_special_tokens=False).input_ids.to(prompt_embeds.device)
