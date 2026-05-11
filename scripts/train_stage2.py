@@ -69,6 +69,8 @@ def train(
     manifest: str | Path,
     out_dir: str | Path,
     wb: "WandbLogger | None" = None,
+    debug_loss_every: int = 0,
+    fail_on_nonfinite: bool = True,
 ) -> None:
     if wb is None:
         wb = WandbLogger(None)
@@ -161,15 +163,17 @@ def train(
             )
 
             # ---- losses --------------------------------------------------
-            l_ctc = ctc(f_align, targets=[batch["target"]]).loss
-            l_ger = ger_ce(
+            ctc_report = ctc(f_align, targets=[batch["target"]])
+            l_ctc = ctc_report.loss
+            ger_report = ger_ce(
                 z_id=z_id, f_align=f_align,
                 nbest=asr_out.nbest, lip_hyp=vsr_out.get("lip_hyp", ""),
                 target=batch["target"],
                 speaker_id=batch.get("speaker_id"),
                 mode=ger_mode,
                 use_av_context=use_av_context,
-            ).loss
+            )
+            l_ger = ger_report.loss
             # Bidirectional InfoNCE on a micro-batch of 2 pairs (self + swap)
             neg_audio = batch.get("neg_audio")
             neg_face = batch.get("neg_face")
@@ -188,8 +192,47 @@ def train(
             l_info = info(a, v).loss
 
             loss = w_ctc * l_ctc + w_ger * l_ger + w_info * l_info
+            loss_parts = {
+                "ctc": l_ctc,
+                "ger": l_ger,
+                "info": l_info,
+                "total": loss,
+            }
+            finite_parts = {name: bool(torch.isfinite(val.detach()).item()) for name, val in loss_parts.items()}
+            target_chars = len(ctc.vocab.encode(batch["target"]))
+            ctc_input_len = int(ctc_report.log_probs.shape[1])
+            should_debug = debug_loss_every > 0 and (step == 0 or (step + 1) % debug_loss_every == 0)
+            if should_debug:
+                loss_text = " ".join(
+                    f"{name}={float(val.detach().item()):.6g}/finite={finite_parts[name]}"
+                    for name, val in loss_parts.items()
+                )
+                print(
+                    f"[stage2-debug] step={step + 1} epoch={epoch + 1} "
+                    f"ctc_input_len={ctc_input_len} ctc_target_chars={target_chars} "
+                    f"ger_target_tokens={ger_report.n_target_tokens} "
+                    f"{loss_text}"
+                )
+            if fail_on_nonfinite and not all(finite_parts.values()):
+                raise FloatingPointError(
+                    f"Non-finite Stage-2 loss at step={step + 1}: "
+                    + ", ".join(f"{name}={float(val.detach().item())}" for name, val in loss_parts.items())
+                )
             optim.zero_grad()
             loss.backward()
+            if should_debug:
+                grad_rows = []
+                grad_sources = [("pool.fuser", pool.fuser), ("aligner", aligner), ("ctc", ctc), ("ger.qformer", ger.qformer), ("ger.id_proj", ger.id_proj)]
+                if not stub and ger._llm is not None:
+                    grad_sources.append(("ger.lora", ger._llm))
+                for prefix, module in grad_sources:
+                    norms = [
+                        float(p.grad.detach().norm().item())
+                        for p in module.parameters()
+                        if p.requires_grad and p.grad is not None
+                    ]
+                    grad_rows.append(f"{prefix}:n={len(norms)},mean={sum(norms) / max(1, len(norms)):.3g}")
+                print("[stage2-debug] grad " + " | ".join(grad_rows))
             optim.step()
             step += 1
 
@@ -328,6 +371,17 @@ def main() -> None:
         help="Override Llama-3 weight precision. auto = pick from GPU VRAM. "
              "Default: read from configs/default.yaml (ger.llm_quant).",
     )
+    ap.add_argument(
+        "--debug-loss-every",
+        type=int,
+        default=0,
+        help="Print Stage-2 loss, CTC length, GER token, and gradient diagnostics every N steps.",
+    )
+    ap.add_argument(
+        "--no-fail-on-nonfinite",
+        action="store_true",
+        help="Do not raise immediately when any Stage-2 loss becomes NaN or Inf.",
+    )
     add_wandb_args(ap)
     args = ap.parse_args()
     cfg = load_config(args.config)
@@ -348,7 +402,14 @@ def main() -> None:
         config={"stage": "stage2", "config_path": args.config, "manifest": args.manifest, **cfg},
     )
     try:
-        train(cfg, args.manifest, args.out, wb=wb)
+        train(
+            cfg,
+            args.manifest,
+            args.out,
+            wb=wb,
+            debug_loss_every=args.debug_loss_every,
+            fail_on_nonfinite=not args.no_fail_on_nonfinite,
+        )
     finally:
         wb.finish()
 
