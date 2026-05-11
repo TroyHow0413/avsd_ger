@@ -57,6 +57,8 @@ class WhisperASR(nn.Module):
         self.word_timestamps = bool(cfg.get("word_timestamps", True))
 
         self._ct2 = None
+        self._ow_model = None
+        self._ow_tokenizer = None
         self._hf_model = None
         self._hf_processor = None
         if not stub:
@@ -64,19 +66,51 @@ class WhisperASR(nn.Module):
 
     # --------------------------------------------------------------- loader
     def _load_real(self) -> None:
-        if self.cfg.get("backend", "faster-whisper") == "faster-whisper":
+        backend = self.cfg.get("backend", "faster-whisper")
+        if backend == "faster-whisper":
             from faster_whisper import WhisperModel
             self._ct2 = WhisperModel(
                 self.cfg.get("model_name", "large-v3"),
                 device="cuda" if self.device.type == "cuda" else "cpu",
                 compute_type=self.cfg.get("compute_type", "float16"),
             )
-        # HF model is needed for (a) encoder hidden states and (b) rescoring.
-        from transformers import WhisperForConditionalGeneration, WhisperProcessor
-        hf_id = f"openai/whisper-{self.cfg.get('model_name', 'large-v3')}"
-        self._hf_processor = WhisperProcessor.from_pretrained(hf_id)
-        self._hf_model = WhisperForConditionalGeneration.from_pretrained(hf_id).to(self.device)
-        self._hf_model.eval()
+            # HF model is needed for (a) encoder hidden states and (b) rescoring.
+            from transformers import WhisperForConditionalGeneration, WhisperProcessor
+            hf_id = f"openai/whisper-{self.cfg.get('model_name', 'large-v3')}"
+            self._hf_processor = WhisperProcessor.from_pretrained(hf_id)
+            self._hf_model = WhisperForConditionalGeneration.from_pretrained(hf_id).to(self.device)
+            self._hf_model.eval()
+        elif backend == "transformers":
+            from transformers import WhisperForConditionalGeneration, WhisperProcessor
+            hf_id = f"openai/whisper-{self.cfg.get('model_name', 'large-v3')}"
+            self._hf_processor = WhisperProcessor.from_pretrained(hf_id)
+            self._hf_model = WhisperForConditionalGeneration.from_pretrained(hf_id).to(self.device)
+            self._hf_model.eval()
+        elif backend == "openai-whisper":
+            try:
+                import whisper
+                from whisper.tokenizer import get_tokenizer
+            except ImportError as e:
+                raise RuntimeError(
+                    "openai-whisper backend requires the `openai-whisper` package. "
+                    "Install it with: pip install openai-whisper"
+                ) from e
+            self._ow_model = whisper.load_model(
+                self.cfg.get("model_name", "large-v3"),
+                device=str(self.device),
+            )
+            self._ow_model.eval()
+            language = self.cfg.get("language", None)
+            self._ow_tokenizer = get_tokenizer(
+                multilingual=getattr(self._ow_model, "is_multilingual", True),
+                language=language,
+                task="transcribe",
+            )
+        else:
+            raise ValueError(
+                f"Unsupported asr.backend={backend!r}; expected "
+                "faster-whisper, transformers, or openai-whisper."
+            )
 
     # --------------------------------------------------------------- inference
     @torch.no_grad()
@@ -86,6 +120,15 @@ class WhisperASR(nn.Module):
 
         wav_np = wav.detach().cpu().numpy().astype(np.float32) if isinstance(wav, torch.Tensor) else np.asarray(wav, dtype=np.float32)
 
+        backend = self.cfg.get("backend", "faster-whisper")
+        if backend == "openai-whisper":
+            return self._openai_transcribe(wav_np, sr=sr)
+        if backend == "transformers":
+            return self._hf_transcribe(wav_np, sr=sr)
+        return self._faster_transcribe(wav_np, sr=sr)
+
+    @torch.no_grad()
+    def _faster_transcribe(self, wav_np: np.ndarray, sr: int = 16000) -> ASROutputs:
         # N-best + word timestamps from faster-whisper
         segments, _info = self._ct2.transcribe(
             wav_np,
@@ -123,6 +166,78 @@ class WhisperASR(nn.Module):
             words=words,
         )
 
+    @torch.no_grad()
+    def _hf_transcribe(self, wav_np: np.ndarray, sr: int = 16000) -> ASROutputs:
+        inputs = self._hf_processor(wav_np, sampling_rate=sr, return_tensors="pt")
+        inputs = {k: v.to(self.device) for k, v in inputs.items()}
+        gen = self._hf_model.generate(
+            **inputs,
+            num_beams=self.beam,
+            max_new_tokens=128,
+        )
+        text = self._hf_processor.batch_decode(gen, skip_special_tokens=True)[0].strip()
+        enc_feats = None
+        if self.expose_encoder:
+            enc_out = self._hf_model.model.encoder(input_features=inputs["input_features"])
+            enc_feats = enc_out.last_hidden_state.squeeze(0).detach()
+        words = self._uniform_words(text, duration_s=len(wav_np) / float(sr))
+        return ASROutputs(
+            nbest=[text],
+            nbest_scores=[0.0],
+            encoder_features=enc_feats,
+            words=words,
+        )
+
+    @torch.no_grad()
+    def _openai_transcribe(self, wav_np: np.ndarray, sr: int = 16000) -> ASROutputs:
+        # openai-whisper expects 16 kHz audio. The training loader already
+        # resamples records, but keep a defensive fallback for direct callers.
+        if sr != 16000:
+            try:
+                import librosa
+                wav_np = librosa.resample(wav_np, orig_sr=sr, target_sr=16000)
+                sr = 16000
+            except Exception:
+                pass
+
+        result = self._ow_model.transcribe(
+            wav_np,
+            beam_size=self.beam,
+            best_of=self.beam,
+            temperature=0.0,
+            word_timestamps=self.word_timestamps,
+            language=self.cfg.get("language", None),
+            fp16=self.device.type == "cuda",
+            verbose=False,
+        )
+        text_1best = str(result.get("text", "")).strip()
+        words: list[WordTiming] = []
+        if self.word_timestamps:
+            for seg in result.get("segments", []) or []:
+                for w in seg.get("words", []) or []:
+                    word = str(w.get("word", "")).strip()
+                    if word:
+                        words.append(
+                            WordTiming(
+                                word=word,
+                                start=float(w.get("start", 0.0)),
+                                end=float(w.get("end", 0.0)),
+                            )
+                        )
+        if not words:
+            words = self._uniform_words(text_1best, duration_s=len(wav_np) / float(sr))
+
+        enc_feats = None
+        if self.expose_encoder:
+            enc_feats = self._openai_encoder_features(wav_np)
+
+        return ASROutputs(
+            nbest=[text_1best],
+            nbest_scores=[0.0],
+            encoder_features=enc_feats,
+            words=words,
+        )
+
     # --------------------------------------------------------------- rescore
     @torch.no_grad()
     def rescore(self, wav: torch.Tensor | np.ndarray, text: str, sr: int = 16000) -> float:
@@ -142,6 +257,10 @@ class WhisperASR(nn.Module):
             return float(base)
 
         wav_np = wav.detach().cpu().numpy().astype(np.float32) if isinstance(wav, torch.Tensor) else np.asarray(wav, dtype=np.float32)
+        backend = self.cfg.get("backend", "faster-whisper")
+        if backend == "openai-whisper":
+            return self._openai_rescore(wav_np, text, sr=sr)
+
         inputs = self._hf_processor(wav_np, sampling_rate=sr, return_tensors="pt")
         inputs = {k: v.to(self.device) for k, v in inputs.items()}
 
@@ -176,6 +295,68 @@ class WhisperASR(nn.Module):
         if tok_lp.numel() == 0:
             return 0.0
         return float(tok_lp.mean().item())
+
+    @torch.no_grad()
+    def _openai_encoder_features(self, wav_np: np.ndarray) -> torch.Tensor:
+        import whisper
+
+        audio = torch.from_numpy(np.asarray(wav_np, dtype=np.float32)).to(self.device)
+        audio = whisper.pad_or_trim(audio)
+        mel = whisper.log_mel_spectrogram(
+            audio,
+            n_mels=getattr(self._ow_model.dims, "n_mels", 80),
+        ).to(self.device)
+        if self.device.type == "cuda":
+            mel = mel.to(next(self._ow_model.parameters()).dtype)
+        return self._ow_model.encoder(mel.unsqueeze(0)).squeeze(0).detach()
+
+    @torch.no_grad()
+    def _openai_rescore(self, wav_np: np.ndarray, text: str, sr: int = 16000) -> float:
+        if self._ow_tokenizer is None:
+            return -20.0
+        if sr != 16000:
+            try:
+                import librosa
+                wav_np = librosa.resample(wav_np, orig_sr=sr, target_sr=16000)
+            except Exception:
+                return -20.0
+
+        enc_feats = self._openai_encoder_features(wav_np).unsqueeze(0)
+        sot = list(getattr(self._ow_tokenizer, "sot_sequence", ()))
+        text_ids = list(self._ow_tokenizer.encode(text))
+        eot = int(self._ow_tokenizer.eot)
+        all_ids = sot + text_ids + [eot]
+        if len(all_ids) < 2:
+            return -20.0
+
+        max_positions = int(getattr(self._ow_model.dims, "n_text_ctx", 448))
+        if len(all_ids) > max_positions:
+            return -20.0
+
+        tokens = torch.tensor([all_ids], dtype=torch.long, device=self.device)
+        logits = self._ow_model.decoder(tokens[:, :-1], enc_feats)
+        targets = tokens[:, 1:]
+        logp = torch.log_softmax(logits, dim=-1)
+        prefix_len = max(1, len(sot))
+        target_start = max(0, prefix_len - 1)
+        tok_lp = logp[:, target_start:, :].gather(
+            -1,
+            targets[:, target_start:].unsqueeze(-1),
+        ).squeeze(-1)
+        if tok_lp.numel() == 0:
+            return 0.0
+        return float(tok_lp.mean().item())
+
+    @staticmethod
+    def _uniform_words(text: str, duration_s: float) -> list[WordTiming]:
+        toks = text.split()
+        if not toks:
+            return []
+        dur = max(float(duration_s), 0.01) / max(1, len(toks))
+        return [
+            WordTiming(word=t, start=i * dur, end=(i + 1) * dur)
+            for i, t in enumerate(toks)
+        ]
 
     # --------------------------------------------------------------- stub
     def _stub_transcribe(self) -> ASROutputs:

@@ -374,6 +374,15 @@ def main() -> None:
         help="Override cfg.ger.mode for Stage-2 training.",
     )
     ap.add_argument(
+        "--asr-backend",
+        default=None,
+        choices=["faster-whisper", "openai-whisper"],
+        help=(
+            "Override cfg.asr.backend. Use openai-whisper to keep ASR text, "
+            "encoder features, and rescoring on the same Whisper implementation."
+        ),
+    )
+    ap.add_argument(
         "--llm-quant", default=None,
         choices=["auto", "fp16", "bf16", "int8", "4bit"],
         help="Override Llama-3 weight precision. auto = pick from GPU VRAM. "
@@ -405,6 +414,9 @@ def main() -> None:
     if args.ger_mode is not None:
         cfg.setdefault("ger", {})["mode"] = args.ger_mode
         print(f"[train_stage2] Override ger.mode -> {args.ger_mode}")
+    if args.asr_backend is not None:
+        cfg.setdefault("asr", {})["backend"] = args.asr_backend
+        print(f"[train_stage2] Override asr.backend -> {args.asr_backend}")
     if args.llm_quant is not None:
         cfg.setdefault("ger", {})["llm_quant"] = args.llm_quant
         print(f"[train_stage2] Override llm_quant -> {args.llm_quant}")
