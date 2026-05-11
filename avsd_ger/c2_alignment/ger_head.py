@@ -113,7 +113,7 @@ class GERHead(nn.Module):
         dtype = torch.float16 if self.device.type == "cuda" else torch.float32
 
         # ---- LLM quantization mode ------------------------------------------
-        # cfg.ger.llm_quant: "auto" | "fp16" | "int8" | "4bit"
+        # cfg.ger.llm_quant: "auto" | "fp16" | "bf16" | "int8" | "4bit"
         # auto rules (based on total GPU VRAM):
         #     >= 40 GB           -> fp16  (~16 GB weights + KV cache)
         #     >= 16 GB and <40   -> int8  (~9 GB)
@@ -175,6 +175,12 @@ class GERHead(nn.Module):
             base = AutoModelForCausalLM.from_pretrained(
                 llm_id,
                 torch_dtype=torch.float16,
+                device_map=_device_map,
+            )
+        elif quant_mode == "bf16":
+            base = AutoModelForCausalLM.from_pretrained(
+                llm_id,
+                torch_dtype=torch.bfloat16,
                 device_map=_device_map,
             )
         else:  # fp32 (CPU fallback)

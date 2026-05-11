@@ -367,7 +367,7 @@ def main() -> None:
     )
     ap.add_argument(
         "--llm-quant", default=None,
-        choices=["auto", "fp16", "int8", "4bit"],
+        choices=["auto", "fp16", "bf16", "int8", "4bit"],
         help="Override Llama-3 weight precision. auto = pick from GPU VRAM. "
              "Default: read from configs/default.yaml (ger.llm_quant).",
     )
