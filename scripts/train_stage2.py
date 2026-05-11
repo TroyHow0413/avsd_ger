@@ -71,6 +71,7 @@ def train(
     wb: "WandbLogger | None" = None,
     debug_loss_every: int = 0,
     fail_on_nonfinite: bool = True,
+    grad_clip_norm: float = 1.0,
 ) -> None:
     if wb is None:
         wb = WandbLogger(None)
@@ -233,6 +234,13 @@ def train(
                     ]
                     grad_rows.append(f"{prefix}:n={len(norms)},mean={sum(norms) / max(1, len(norms)):.3g}")
                 print("[stage2-debug] grad " + " | ".join(grad_rows))
+            if grad_clip_norm > 0:
+                total_grad_norm = torch.nn.utils.clip_grad_norm_(params, grad_clip_norm)
+                if should_debug:
+                    print(
+                        f"[stage2-debug] grad_clip total_norm={float(total_grad_norm):.6g} "
+                        f"max_norm={grad_clip_norm:.6g}"
+                    )
             optim.step()
             step += 1
 
@@ -382,6 +390,12 @@ def main() -> None:
         action="store_true",
         help="Do not raise immediately when any Stage-2 loss becomes NaN or Inf.",
     )
+    ap.add_argument(
+        "--grad-clip",
+        type=float,
+        default=1.0,
+        help="Global gradient norm clipping before optimizer.step(); set <=0 to disable.",
+    )
     add_wandb_args(ap)
     args = ap.parse_args()
     cfg = load_config(args.config)
@@ -409,6 +423,7 @@ def main() -> None:
             wb=wb,
             debug_loss_every=args.debug_loss_every,
             fail_on_nonfinite=not args.no_fail_on_nonfinite,
+            grad_clip_norm=args.grad_clip,
         )
     finally:
         wb.finish()
