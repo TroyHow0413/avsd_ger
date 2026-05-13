@@ -30,6 +30,7 @@ class AVHubertVSR(nn.Module):
         self.stub = stub
         self.device = torch.device(device)
         self.layer = int(cfg.get("layer", -1))
+        self.n_best = int(cfg.get("n_best", 5))
         self.emit_text = bool(cfg.get("emit_text", True))
         self.disable_text_on_decode_error = bool(cfg.get("disable_text_on_decode_error", True))
 
@@ -147,6 +148,13 @@ class AVHubertVSR(nn.Module):
             # Continuous-feature path (`<AV_CTX>` soft prefix to GER) is
             # unaffected either way.
             try:
+                gen_cfg = getattr(saved_cfg, "generation", None)
+                if gen_cfg is not None:
+                    for key, value in (("beam", max(self.n_best, 1)), ("nbest", max(self.n_best, 1))):
+                        try:
+                            setattr(gen_cfg, key, value)
+                        except Exception:
+                            pass
                 self._generator = task.build_generator([self._model], saved_cfg)
                 import logging as _log
                 _log.getLogger(__name__).info(
@@ -172,7 +180,8 @@ class AVHubertVSR(nn.Module):
             video_frames: [T, 1, 96, 96] grayscale mouth ROI, float in [0, 1],
                           25 fps. Caller runs the face/lip preprocessing.
         Returns:
-            dict with keys: vsr_features ([T_v, 1024]), lip_hyp (str).
+            dict with keys: vsr_features ([T_v, 1024]), lip_hyp (str),
+            lip_nbest (list[str]).
         """
         if self.stub:
             return self._stub_extract(video_frames)
@@ -216,13 +225,14 @@ class AVHubertVSR(nn.Module):
             )
         vsr_feats = feats.squeeze(0).detach()  # [T_v, 1024]
 
-        lip_hyp = ""
+        lip_nbest: list[str] = []
         self.last_decode_error = None
         self.last_decode_token_count = 0
         if self.emit_text and self._generator is not None:
-            lip_hyp = self._decode_lip(x)
+            lip_nbest = self._decode_lip_nbest(x)
+        lip_hyp = lip_nbest[0] if lip_nbest else ""
 
-        return {"vsr_features": vsr_feats, "lip_hyp": lip_hyp}
+        return {"vsr_features": vsr_feats, "lip_hyp": lip_hyp, "lip_nbest": lip_nbest}
 
     def _decode_lip(self, x: torch.Tensor) -> str:
         """Decode video frames into a lip-hypothesis text string.
@@ -236,42 +246,55 @@ class AVHubertVSR(nn.Module):
         pipeline -- lip_hyp is an auxiliary text channel for the GER prompt;
         an empty string just makes the LLM rely on audio-hyp + AV_CTX.
         """
+        hyps = self._decode_lip_nbest(x)
+        return hyps[0] if hyps else ""
+
+    def _decode_lip_nbest(self, x: torch.Tensor) -> list[str]:
         if self._generator is None or self._task is None:
             self.last_decode_error = "VSR generator or task is not available"
-            return ""
+            return []
         try:
             T_v = x.shape[2]
             AUDIO_FEAT_DIM = 104
             audio_zeros = torch.zeros(
                 1, AUDIO_FEAT_DIM, T_v, device=self.device, dtype=x.dtype
             )
+            padding_mask = torch.zeros(1, T_v, device=self.device, dtype=torch.bool)
             sample = {
                 "net_input": {
                     "source": {"video": x, "audio": audio_zeros},
-                    "padding_mask": None,
+                    "padding_mask": padding_mask,
                 }
             }
             hypos = self._generator.generate([self._model], sample)
             if not hypos or not hypos[0]:
                 self.last_decode_error = "VSR generator returned no hypotheses"
-                return ""
-            tokens = hypos[0][0]["tokens"]
-            self.last_decode_token_count = int(tokens.numel())
-            if self.last_decode_token_count == 0:
-                self.last_decode_error = "VSR generator returned an empty token sequence"
-                return ""
+                return []
             tgt_dict = getattr(self._task, "target_dictionary", None)
             if tgt_dict is None:
                 self.last_decode_error = "VSR task has no target_dictionary"
-                return ""
-            try:
-                text = tgt_dict.string(tokens.int().cpu(), bpe_symbol="subword_nmt")
-            except (TypeError, AttributeError):
-                text = tgt_dict.string(tokens.int().cpu())
-            text = text.strip()
-            if not text:
+                return []
+            out: list[str] = []
+            seen: set[str] = set()
+            for hypo in hypos[0][: self.n_best]:
+                tokens = hypo.get("tokens")
+                if tokens is None:
+                    continue
+                self.last_decode_token_count = max(self.last_decode_token_count, int(tokens.numel()))
+                if int(tokens.numel()) == 0:
+                    continue
+                try:
+                    text = tgt_dict.string(tokens.int().cpu(), bpe_symbol="subword_nmt")
+                except (TypeError, AttributeError):
+                    text = tgt_dict.string(tokens.int().cpu())
+                text = " ".join(text.strip().split())
+                key = text.lower()
+                if text and key not in seen:
+                    seen.add(key)
+                    out.append(text)
+            if not out:
                 self.last_decode_error = "VSR decoded text is empty"
-            return text
+            return out
         except Exception as _e:
             import logging as _log
             self.last_decode_error = f"{type(_e).__name__}: {_e}"
@@ -283,11 +306,15 @@ class AVHubertVSR(nn.Module):
                 )
             else:
                 _log.getLogger(__name__).warning("VSR lip decode failed: %s", self.last_decode_error)
-            return ""
+            return []
 
     # ------------------------------------------------------------------ stub
     def _stub_extract(self, video_frames) -> dict[str, Any]:
         T_v = 75  # ~3 s at 25 fps
         feats = torch.randn(T_v, self.FEATURE_DIM, device=self.device)
-        lip_hyp = "the quick brown fox jumps over the lazy dog"  # dummy
-        return {"vsr_features": feats, "lip_hyp": lip_hyp}
+        lip_nbest = [
+            "the quick brown fox jumps over the lazy dog",
+            "the quick brown fox jump over the lazy dog",
+            "the quick brown fox jumps over the lazy dock",
+        ][: self.n_best]
+        return {"vsr_features": feats, "lip_hyp": lip_nbest[0], "lip_nbest": lip_nbest}

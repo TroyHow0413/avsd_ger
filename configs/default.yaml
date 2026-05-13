@@ -10,9 +10,13 @@ stub_backbones: false        # set true to run on synthetic tensors without down
 # ---------- Backbones ----------
 asr:
   model_name: large-v3
-  backend: faster-whisper    # faster-whisper | transformers
+  backend: faster-whisper    # faster-whisper | transformers | openai-whisper
   beam_size: 10
   n_best: 5
+  # Used by openai-whisper text n-best mode. openai-whisper's `best_of`
+  # returns only the internally selected best sample, so the wrapper collects
+  # unique candidates over these temperatures.
+  temperatures: [0.0, 0.2, 0.4, 0.6, 0.8]
   # Memory-optimised default for 16 GB GPUs (RTX 3090/4090/5080):
   #   int8_float16 keeps activations in fp16 but stores weights in int8,
   #   cutting Whisper-large-v3's GPU footprint from ~3 GB to ~1.5 GB.
@@ -39,6 +43,7 @@ vsr:
   # config: av_hubert/avhubert/conf/pretrain/large_lrs3_iter5.yaml
   config: av_hubert/avhubert/conf/finetune/self_large_vox_433h.yaml   # NOTE: filename may differ — check `find av_hubert/avhubert/conf -name "*433h*"`
   layer: -1
+  n_best: 5
   emit_text: true   # auto-disabled at load time if the checkpoint has no decoder/dict
 
 # ---------- Raw-video AVSD frontend ----------

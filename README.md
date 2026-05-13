@@ -10,29 +10,100 @@ Identity-conditioned, closed-loop generative error correction for **multi-speake
 
 ## Install (conda)
 
+The project is tested with Python 3.10. Keep `pip==24.0` because
+`fairseq==0.12.2` depends on older metadata that newer pip versions reject.
+
+### Fast path: `conda env create`
+
 ```bash
 git clone <this-repo> avsd_ger_claude && cd avsd_ger_claude
 
-# Create the env from environment.yml (Python 3.10 + PyTorch 2.1 + CUDA 12.1).
 conda env create -f environment.yml
 conda activate avsdger
 ```
 
-If you'd rather build the env step-by-step:
+Then force-install the correct PyTorch CUDA wheel for your GPU. This step is
+intentional: several pip packages in the environment depend on torch, so a plain
+`conda env create` may let pip choose a generic torch wheel before you pin the
+right CUDA build.
+
+```bash
+# RTX 50-series / Blackwell, e.g. RTX 5080 or 5090, sm_120:
+pip install --upgrade --force-reinstall \
+    "torch>=2.7" "torchaudio>=2.7" "torchvision>=0.22" \
+    --index-url https://download.pytorch.org/whl/cu128
+
+# Older GPUs, e.g. A100/H100/RTX 30/40-series:
+# pip install --upgrade --force-reinstall \
+#     "torch==2.6.*" "torchaudio==2.6.*" "torchvision==0.21.*" \
+#     --index-url https://download.pytorch.org/whl/cu124
+```
+
+Do not add `--no-deps` to the torch command. The torch wheel must pull its exact
+CUDA runtime packages, including cublas, cudnn, cufft, cusparse, nccl, nvtx,
+triton, and sympy.
+
+### Clean deterministic path
+
+This avoids the temporary "wrong torch first, correct torch second" behavior of
+the fast path:
 
 ```bash
 conda create -n avsdger python=3.10 pip=24.0 -y
 conda activate avsdger
-conda install -c pytorch -c nvidia \
-    pytorch=2.1.* torchaudio=2.1.* torchvision=0.16.* pytorch-cuda=12.1 -y
-conda install -c conda-forge \
-    "numpy>=1.24,<2.0" "scipy>=1.11" pyyaml tqdm libsndfile ffmpeg openh264 -y
-pip install -r requirements.txt    # the rest (LLM / VSR / identity / IO stacks)
+
+conda install -c conda-forge -y \
+    "numpy>=1.24,<2.0" "scipy>=1.11" "pyyaml>=6.0" "tqdm>=4.66" \
+    libsndfile ffmpeg openh264
+
+# Choose ONE torch line:
+pip install \
+    "torch>=2.7" "torchaudio>=2.7" "torchvision>=0.22" \
+    --index-url https://download.pytorch.org/whl/cu128
+
+# pip install \
+#     "torch==2.6.*" "torchaudio==2.6.*" "torchvision==0.21.*" \
+#     --index-url https://download.pytorch.org/whl/cu124
+
+pip install -r requirements.txt
 ```
 
-> **Windows 11:** add `openh264` to the `conda install` line above (already shown). Without it, `ffmpeg` fails at runtime with `libopenh264.so.5: cannot open shared object file`.
+Dependency notes:
 
-> Driver only supports CUDA 11.8? Swap `pytorch-cuda=12.1` → `pytorch-cuda=11.8` (in both `environment.yml` and the manual command above). Everything else is unchanged.
+| Dependency group | Packages | Why |
+|---|---|---|
+| Interpreter | `python=3.10`, `pip=24.0` | Python 3.11+ is fragile with AV-HuBERT/fairseq; pip 24.1+ rejects fairseq's old metadata. |
+| Numeric / IO | `numpy>=1.24,<2.0`, `scipy`, `pyyaml`, `tqdm` | `numpy<2` keeps InsightFace/ONNX/OpenCV ABI compatibility. |
+| System media libs | `libsndfile`, `ffmpeg`, `openh264` | Required by `soundfile`, `librosa`, and video/audio decode paths. |
+| PyTorch | `torch`, `torchaudio`, `torchvision` from the PyTorch CUDA wheel index | RTX 50-series needs cu128 wheels with `sm_120`; older GPUs can use cu124. |
+| ASR / text backbone | `faster-whisper`, `transformers`, `tokenizers`, `huggingface_hub`, `accelerate` | Whisper and transformer model loading. |
+| GER head | `peft`, `sentencepiece`, `bitsandbytes` | Llama-3 LoRA and optional quantized loading. |
+| Identity encoders | `speechbrain`, `insightface`, `onnxruntime` | ECAPA-TDNN voice embeddings and ArcFace face embeddings. |
+| Audio / video Python IO | `librosa`, `opencv-python`, `soundfile`, `python_speech_features` | Feature extraction and AV-HuBERT logfbank support. |
+| Monitoring / logging | `nvidia-ml-py`, `psutil`, `wandb` | Power logging and experiment tracking. |
+
+### Verify the environment
+
+```bash
+python -c "import torch; print(torch.__version__); print(torch.cuda.is_available()); print(torch.cuda.get_arch_list())"
+python -c "import numpy, scipy, cv2, soundfile, librosa; print('core io ok')"
+python -c "import transformers, faster_whisper, peft, speechbrain, insightface, onnxruntime; print('model deps ok')"
+```
+
+For RTX 5080/5090, `torch.cuda.get_arch_list()` must contain `sm_120`.
+
+### Conda troubleshooting
+
+On some Windows Anaconda installs, `conda env create` can fail before dependency
+solving because the `conda-anaconda-tos` plugin cannot read its cache. Use:
+
+```bash
+conda --no-plugins env create -f environment.yml --solver classic
+```
+
+If this hangs during solving, use the clean deterministic path above.
+
+> **Windows 11:** keep `openh264` installed. Without it, `ffmpeg` may fail at runtime with `libopenh264.so.5: cannot open shared object file`.
 
 ### Manual steps after `conda activate avsdger`
 

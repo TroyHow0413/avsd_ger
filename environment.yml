@@ -1,9 +1,10 @@
 # AVSD-GER conda environment.
 #
-# Tested combination: Python 3.10 + PyTorch 2.1 + CUDA 12.1.
+# Tested combination: Python 3.10 + PyTorch 2.7+ cu128 for RTX 50-series
+# (or PyTorch 2.6 cu124 for older CUDA GPUs).
 # Python 3.10 is deliberate — fairseq (needed by AV-HuBERT) is fragile on 3.11+.
-# If your GPU/driver only supports CUDA 11.8, swap `pytorch-cuda=12.1` for
-# `pytorch-cuda=11.8` below; everything else stays the same.
+# PyTorch itself is installed after env creation from the CUDA-specific PyTorch
+# wheel index; see Manual Steps at the bottom of this file.
 #
 # Create:
 #     conda env create -f environment.yml

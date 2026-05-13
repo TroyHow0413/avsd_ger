@@ -200,20 +200,47 @@ class WhisperASR(nn.Module):
             except Exception:
                 pass
 
-        result = self._ow_model.transcribe(
-            wav_np,
-            beam_size=self.beam,
-            best_of=self.beam,
-            temperature=0.0,
-            word_timestamps=self.word_timestamps,
-            language=self.cfg.get("language", None),
-            fp16=self.device.type == "cuda",
-            verbose=False,
-        )
-        text_1best = str(result.get("text", "")).strip()
+        temperatures = self.cfg.get("temperatures", [0.0, 0.2, 0.4, 0.6, 0.8])
+        if not isinstance(temperatures, (list, tuple)):
+            temperatures = [temperatures]
+        temperatures = [float(t) for t in temperatures]
+        if not temperatures:
+            temperatures = [0.0]
+
+        results: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for temp in temperatures:
+            kwargs: dict[str, Any] = {
+                "temperature": temp,
+                "word_timestamps": self.word_timestamps and not results,
+                "language": self.cfg.get("language", None),
+                "fp16": self.device.type == "cuda",
+                "verbose": False,
+                "condition_on_previous_text": False,
+            }
+            if temp == 0.0:
+                kwargs["beam_size"] = self.beam
+            else:
+                # openai-whisper's best_of chooses the best sample internally;
+                # repeating over temperatures exposes a practical sentence-level
+                # n-best list without touching private decoder APIs.
+                kwargs["best_of"] = max(self.beam, self.n_best)
+            result = self._ow_model.transcribe(wav_np, **kwargs)
+            text = str(result.get("text", "")).strip()
+            key = " ".join(text.lower().split())
+            if text and key not in seen:
+                seen.add(key)
+                results.append(result)
+            if len(results) >= self.n_best:
+                break
+
+        if not results:
+            results = [{"text": ""}]
+
+        text_1best = str(results[0].get("text", "")).strip()
         words: list[WordTiming] = []
         if self.word_timestamps:
-            for seg in result.get("segments", []) or []:
+            for seg in results[0].get("segments", []) or []:
                 for w in seg.get("words", []) or []:
                     word = str(w.get("word", "")).strip()
                     if word:
@@ -231,12 +258,27 @@ class WhisperASR(nn.Module):
         if self.expose_encoder:
             enc_feats = self._openai_encoder_features(wav_np)
 
+        nbest = [str(r.get("text", "")).strip() for r in results if str(r.get("text", "")).strip()]
+        scores = [self._openai_result_score(r) for r in results[: len(nbest)]]
+
         return ASROutputs(
-            nbest=[text_1best],
-            nbest_scores=[0.0],
+            nbest=nbest[: self.n_best] or [text_1best],
+            nbest_scores=scores[: self.n_best] or [0.0],
             encoder_features=enc_feats,
             words=words,
         )
+
+    @staticmethod
+    def _openai_result_score(result: dict[str, Any]) -> float:
+        segs = result.get("segments", []) or []
+        vals = [
+            float(seg.get("avg_logprob"))
+            for seg in segs
+            if seg.get("avg_logprob") is not None
+        ]
+        if not vals:
+            return 0.0
+        return float(sum(vals) / len(vals))
 
     # --------------------------------------------------------------- rescore
     @torch.no_grad()

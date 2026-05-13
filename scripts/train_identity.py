@@ -217,16 +217,68 @@ def _load_face(rec: dict[str, Any], stub: bool) -> np.ndarray:
     return np.array(Image.open(rec["face_path"]).convert("RGB"))
 
 
+def _resolve_manifest_arg(manifest: str | None, manifest_dir: str | None) -> str:
+    if manifest_dir:
+        directory = Path(manifest_dir)
+        sibling_jsonl = directory.with_suffix(".jsonl")
+        if sibling_jsonl.exists():
+            print(f"[train_identity] Resolved --manifest-dir {directory} -> {sibling_jsonl}")
+            return str(sibling_jsonl)
+        raise FileNotFoundError(
+            f"--manifest-dir was provided, but converted JSONL was not found: {sibling_jsonl}. "
+            "Create it with scripts/ami_visual_to_jsonl.py --manifest-dir <dir> --out <dir>.jsonl"
+        )
+    if not manifest:
+        raise ValueError("Either --manifest or --manifest-dir is required.")
+    return manifest
+
+
 # ---------------------------------------------------------------- CLI
 def main() -> None:
     ap = argparse.ArgumentParser(description="Stage-1 C1 identity training (spec section 7).")
     ap.add_argument("--config", default="configs/default.yaml")
-    ap.add_argument("--manifest", required=True, help="JSONL manifest: one utterance per line.")
+    ap.add_argument("--manifest", default=None, help="JSONL manifest: one utterance per line.")
+    ap.add_argument(
+        "--manifest-dir",
+        default=None,
+        help=(
+            "Directory of AMI visual per-meeting manifests. The trainer expects "
+            "a JSONL file, so this resolves <dir>.jsonl when present."
+        ),
+    )
     ap.add_argument("--out", default="checkpoints/stage1/")
+    ap.add_argument(
+        "--epochs",
+        type=int,
+        default=None,
+        help="Override training.stage1.epochs without editing the YAML config.",
+    )
+    ap.add_argument(
+        "--lr",
+        type=float,
+        default=None,
+        help="Override training.stage1.lr without editing the YAML config.",
+    )
+    ap.add_argument(
+        "--warmup-steps",
+        type=int,
+        default=None,
+        help="Override training.stage1.warmup_steps without editing the YAML config.",
+    )
     add_wandb_args(ap)
     args = ap.parse_args()
 
     cfg = load_config(args.config)
+    args.manifest = _resolve_manifest_arg(args.manifest, args.manifest_dir)
+    if args.epochs is not None:
+        cfg.setdefault("training", {}).setdefault("stage1", {})["epochs"] = args.epochs
+        print(f"[train_identity] Override stage1.epochs -> {args.epochs}")
+    if args.lr is not None:
+        cfg.setdefault("training", {}).setdefault("stage1", {})["lr"] = args.lr
+        print(f"[train_identity] Override stage1.lr -> {args.lr}")
+    if args.warmup_steps is not None:
+        cfg.setdefault("training", {}).setdefault("stage1", {})["warmup_steps"] = args.warmup_steps
+        print(f"[train_identity] Override stage1.warmup_steps -> {args.warmup_steps}")
     wb = WandbLogger.from_args(
         args,
         default_project="avsd-ger",

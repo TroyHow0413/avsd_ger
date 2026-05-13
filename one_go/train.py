@@ -80,11 +80,22 @@ def main() -> int:
         help="Python executable to run repo scripts with. Use the avsdger env python if needed.",
     )
     p.add_argument("--manifest", default=str(ROOT / "data" / "train_manifest.jsonl"))
+    p.add_argument(
+        "--manifest-dir",
+        default=None,
+        help="Forwarded to training scripts; resolves <dir>.jsonl when present.",
+    )
     p.add_argument("--stage1-out", default=str(RUN_DIR / "stage1"))
     p.add_argument("--stage2-out", default=str(RUN_DIR / "stage2"))
     p.add_argument("--stub-epochs", type=int, default=1)
     p.add_argument("--stage1-epochs", type=int, default=None)
     p.add_argument("--stage2-epochs", type=int, default=None)
+    p.add_argument(
+        "--stage2-warmup",
+        choices=["joint", "align_ctc", "ger_lora", "ger_qformer"],
+        default="joint",
+        help="Forwarded to scripts/train_stage2.py --warmup.",
+    )
     p.add_argument("--dry-run", action="store_true")
     args = p.parse_args()
 
@@ -93,28 +104,36 @@ def main() -> int:
     py = args.python
 
     if args.stage in {"stage1", "all"}:
-        run_cmd([
+        cmd = [
             py,
             "scripts/train_identity.py",
             "--config",
             str(config),
-            "--manifest",
-            args.manifest,
             "--out",
             args.stage1_out,
-        ], dry_run=args.dry_run)
+        ]
+        if args.manifest_dir:
+            cmd += ["--manifest-dir", args.manifest_dir]
+        else:
+            cmd += ["--manifest", args.manifest]
+        run_cmd(cmd, dry_run=args.dry_run)
 
     if args.stage in {"stage2", "all"}:
-        run_cmd([
+        cmd = [
             py,
             "scripts/train_stage2.py",
             "--config",
             str(config),
-            "--manifest",
-            args.manifest,
             "--out",
             args.stage2_out,
-        ], dry_run=args.dry_run)
+            "--warmup",
+            args.stage2_warmup,
+        ]
+        if args.manifest_dir:
+            cmd += ["--manifest-dir", args.manifest_dir]
+        else:
+            cmd += ["--manifest", args.manifest]
+        run_cmd(cmd, dry_run=args.dry_run)
 
     print("\n[one_go/train] done")
     return 0
