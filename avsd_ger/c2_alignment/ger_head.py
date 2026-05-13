@@ -95,11 +95,47 @@ class GERHead(nn.Module):
         )
 
     # --------------------------------------------------------------- load LLM
+    @staticmethod
+    def _resolve_llm_path(llm_name: str) -> str:
+        """Return a local path to the LLM weights, downloading if necessary.
+
+        Priority:
+          1. If llm_name is already a local path that exists, use it as-is.
+          2. If checkpoints/<model_dir_name>/ exists, use that.
+          3. Otherwise download from HF into checkpoints/<model_dir_name>/
+             and return that path.
+
+        This keeps all weights under checkpoints/ so the project is
+        self-contained and HF_HOME / ~/.cache are not required on the server.
+        """
+        from pathlib import Path
+        from huggingface_hub import snapshot_download
+
+        # Already a local path?
+        if Path(llm_name).exists():
+            return llm_name
+
+        # Derive a stable local dir name from the HF repo id.
+        # "meta-llama/Meta-Llama-3-8B-Instruct" -> "checkpoints/Meta-Llama-3-8B-Instruct"
+        model_dir_name = llm_name.split("/")[-1]
+        local_path = Path("checkpoints") / model_dir_name
+
+        if local_path.exists() and any(local_path.iterdir()):
+            print(f"[GERHead] Loading LLM from local cache: {local_path}")
+            return str(local_path)
+
+        print(f"[GERHead] '{local_path}' not found — downloading '{llm_name}' ...")
+        print(f"[GERHead] Target: {local_path.resolve()}")
+        local_path.mkdir(parents=True, exist_ok=True)
+        snapshot_download(repo_id=llm_name, local_dir=str(local_path))
+        print(f"[GERHead] Download complete: {local_path}")
+        return str(local_path)
+
     def _load_llm_old(self) -> None:
         from transformers import AutoModelForCausalLM, AutoTokenizer
         from peft import LoraConfig, TaskType, get_peft_model
 
-        llm_id = self.cfg["llm_name"]
+        llm_id = self._resolve_llm_path(self.cfg["llm_name"])
         self._tok = AutoTokenizer.from_pretrained(llm_id, use_fast=True)
         # Register the speaker special token so we have a dedicated embedding
         # rather than BPE-fragmented pieces like '['/'Speaker'/':'/…
