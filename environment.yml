@@ -55,6 +55,11 @@ dependencies:
 
   # ---- Pure-pip packages (no good conda build, or version drifts faster) -
   - pip:
+      # Repeat the NumPy/OpenCV ABI pins here because transitive pip deps
+      # (notably albumentations -> opencv-python-headless) can otherwise
+      # upgrade NumPy after conda has solved the environment.
+      - numpy>=1.24,<2.0
+
       # Core utilities
       - einops>=0.7.0
 
@@ -62,7 +67,7 @@ dependencies:
       - faster-whisper>=1.0.0     # CTranslate2 Whisper-large-v3
       - transformers>=4.49,<4.55   # torch 2.6 satisfies the >=2.4 requirement that 4.49 added; cap <4.55 to avoid bleeding-edge breakage
       - tokenizers>=0.21,<0.22     # transformers 4.49+ mandates this exact range
-      - huggingface_hub>=0.27,<0.32   # transformers 4.49 compatible
+      - huggingface_hub>=0.34,<1.0    # 0.34+ provides the `hf` CLI; keep <1.0 for transformers compatibility
       - accelerate>=0.28.0
 
       # GER head (LLM + LoRA)
@@ -78,6 +83,7 @@ dependencies:
       # Audio / video IO
       - librosa>=0.10.1
       - opencv-python>=4.9,<4.10   # 4.10+ hard-requires numpy>=2 (ABI), conflicts with insightface needing numpy<2
+      - opencv-python-headless>=4.9,<4.10  # pulled transitively by albumentations/insightface; keep ABI aligned
       - soundfile>=0.12
       - python_speech_features>=0.6  # required by AV-HuBERT hubert_dataset.py (logfbank); pip only
 
@@ -140,6 +146,6 @@ dependencies:
 #            > $CONDA_PREFIX/etc/conda/activate.d/avhubert_path.sh
 #
 # 3. (gated) Llama-3-8B-Instruct access:
-#        hf auth login            # legacy `huggingface-cli login` is deprecated
+#        hf auth login            # requires huggingface_hub>=0.34; older envs may only have `huggingface-cli login`
 #        # token must have access to meta-llama/Meta-Llama-3-8B-Instruct
 # ---------------------------------------------------------------------------

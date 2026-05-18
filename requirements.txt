@@ -34,7 +34,7 @@ faster-whisper>=1.0.0   # CTranslate2 Whisper-large-v3
 openai-whisper>=20231117 # optional unified Whisper backend: decode + encoder + rescore
 transformers>=4.49,<4.55    # torch 2.6 satisfies >=2.4 requirement; cap <4.55 for stability
 tokenizers>=0.21,<0.22      # transformers 4.49+ mandates this exact range
-huggingface_hub>=0.27,<0.32 # transformers 4.49 compatible
+huggingface_hub>=0.34,<1.0  # 0.34+ provides the `hf` CLI; keep <1.0 for transformers compatibility
 accelerate>=0.28.0
 
 # ---- VSR backbone ---------------------------------------------------------
@@ -57,6 +57,7 @@ bitsandbytes>=0.45,<0.48 # 0.43+ uses torch.library.impl_abstract (added in torc
 # ---- Audio / video IO -----------------------------------------------------
 librosa>=0.10.1
 opencv-python>=4.9,<4.10   # 4.10+ hard-requires numpy>=2 (ABI); conflicts with insightface needing numpy<2
+opencv-python-headless>=4.9,<4.10  # transitive via albumentations/insightface; keep NumPy ABI aligned
 soundfile>=0.12
 python_speech_features>=0.6  # required by AV-HuBERT hubert_dataset.py (logfbank); not on conda-forge, pip only
 

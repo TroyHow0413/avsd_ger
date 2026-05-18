@@ -16,7 +16,8 @@ The project is tested with Python 3.10. Keep `pip==24.0` because
 ### Fast path: `conda env create`
 
 ```bash
-git clone <this-repo> avsd_ger_claude && cd avsd_ger_claude
+git clone https://github.com/TroyHow0413/avsd_ger.git
+cd avsd_ger
 
 conda env create -f environment.yml
 conda activate avsdger
@@ -73,13 +74,13 @@ Dependency notes:
 | Dependency group | Packages | Why |
 |---|---|---|
 | Interpreter | `python=3.10`, `pip=24.0` | Python 3.11+ is fragile with AV-HuBERT/fairseq; pip 24.1+ rejects fairseq's old metadata. |
-| Numeric / IO | `numpy>=1.24,<2.0`, `scipy`, `pyyaml`, `tqdm` | `numpy<2` keeps InsightFace/ONNX/OpenCV ABI compatibility. |
+| Numeric / IO | `numpy>=1.24,<2.0`, `scipy`, `pyyaml`, `tqdm` | `numpy<2` keeps InsightFace/ONNX/OpenCV ABI compatibility. The pip block repeats the NumPy pin because transitive pip deps can otherwise upgrade it after conda solves the env. |
 | System media libs | `libsndfile`, `ffmpeg`, `openh264` | Required by `soundfile`, `librosa`, and video/audio decode paths. |
 | PyTorch | `torch`, `torchaudio`, `torchvision` from the PyTorch CUDA wheel index | RTX 50-series needs cu128 wheels with `sm_120`; older GPUs can use cu124. |
-| ASR / text backbone | `faster-whisper`, `transformers`, `tokenizers`, `huggingface_hub`, `accelerate` | Whisper and transformer model loading. |
+| ASR / text backbone | `faster-whisper`, `transformers`, `tokenizers`, `huggingface_hub>=0.34,<1.0`, `accelerate` | Whisper and transformer model loading. `huggingface_hub>=0.34` provides the `hf` CLI used below. |
 | GER head | `peft`, `sentencepiece`, `bitsandbytes` | Llama-3 LoRA and optional quantized loading. |
 | Identity encoders | `speechbrain`, `insightface`, `onnxruntime` | ECAPA-TDNN voice embeddings and ArcFace face embeddings. |
-| Audio / video Python IO | `librosa`, `opencv-python`, `soundfile`, `python_speech_features` | Feature extraction and AV-HuBERT logfbank support. |
+| Audio / video Python IO | `librosa`, `opencv-python`, `opencv-python-headless`, `soundfile`, `python_speech_features` | Feature extraction and AV-HuBERT logfbank support. Both OpenCV wheels are pinned `<4.10` so `albumentations`/`insightface` cannot pull an OpenCV build that forces NumPy 2.x. |
 | Monitoring / logging | `nvidia-ml-py`, `psutil`, `wandb` | Power logging and experiment tracking. |
 
 ### Verify the environment
@@ -104,6 +105,20 @@ conda --no-plugins env create -f environment.yml --solver classic
 If this hangs during solving, use the clean deterministic path above.
 
 > **Windows 11:** keep `openh264` installed. Without it, `ffmpeg` may fail at runtime with `libopenh264.so.5: cannot open shared object file`.
+
+If an already-created server env prints an error like `A module that was compiled
+using NumPy 1.x cannot be run in NumPy 2.2.6`, pip upgraded NumPy after conda
+created the env. This usually comes from a transitive `opencv-python-headless`
+install. Repair it in-place with:
+
+```bash
+conda activate avsdger
+python -m pip uninstall -y numpy opencv-python opencv-python-headless
+python -m pip install "numpy>=1.24,<2.0" "opencv-python>=4.9,<4.10" "opencv-python-headless>=4.9,<4.10"
+python -c "import numpy, cv2; print(numpy.__version__, cv2.__version__)"
+```
+
+Expected: NumPy `1.26.x` and OpenCV `4.9.x`.
 
 ### Manual steps after `conda activate avsdger`
 
@@ -137,9 +152,13 @@ source scripts/setup_avhubert_env.sh
 #     Add-Content "$env:CONDA_PREFIX\etc\conda\activate.d\avhubert_path.bat" `
 #         "@set PYTHONPATH=D:\GitHub\avsd_ger_claude\av_hubert;D:\GitHub\avsd_ger_claude\av_hubert\avhubert;%PYTHONPATH%"
 
-# Gated Llama-3-8B-Instruct access (only when stub_backbones=false)
+# Gated Llama-3-8B-Instruct access (only when stub_backbones=false).
+# The `hf` CLI requires huggingface_hub>=0.34. If `hf` is missing, upgrade
+# the package inside the active env first:
+python -m pip install --upgrade "huggingface_hub>=0.34,<1.0"
 hf auth login                         # paste a Read-scope token from https://huggingface.co/settings/tokens
 hf auth whoami                        # sanity check
+# On older environments that you cannot upgrade yet, use: huggingface-cli login
 # then request access at https://huggingface.co/meta-llama/Meta-Llama-3-8B-Instruct
 ```
 
@@ -158,7 +177,7 @@ hf auth whoami                        # sanity check
 * **AV-HuBERT Large** — drop the `.pt` at `checkpoints/avhubert_large_lrs3_iter5.pt` (path in `configs/default.yaml`).
 * **ECAPA-TDNN** — auto from SpeechBrain.
 * **InsightFace `buffalo_l`** — auto on first use.
-* **Llama-3-8B-Instruct** — pulled by the GER head once `hf auth login` is done (the legacy `huggingface-cli login` is deprecated; the new unified CLI ships as `hf`).
+* **Llama-3-8B-Instruct** — pulled by the GER head once `hf auth login` is done. The `hf` CLI ships with `huggingface_hub>=0.34`; older envs may only have the legacy `huggingface-cli login`.
 
 The repo defaults to `stub_backbones: true` in `configs/default.yaml`, so you can verify wiring without any of the above.
 
@@ -241,8 +260,10 @@ python scripts/eval_ablations.py \
 **Payoff:** unlocks the GER head — without this you can't load Llama-3-8B-Instruct, so Stage-2 training and any non-stub `run_sample.py` will fail at the GER step. **Submit early; approval is async.**
 
 ```bash
+python -m pip install --upgrade "huggingface_hub>=0.34,<1.0"  # only needed if `hf` is not found
 hf auth login                  # paste a Read-scope token from https://huggingface.co/settings/tokens
 hf auth whoami                 # confirms the token
+# Fallback for old pinned envs: huggingface-cli login
 ```
 
 Then in a browser, visit [https://huggingface.co/meta-llama/Meta-Llama-3-8B-Instruct](https://huggingface.co/meta-llama/Meta-Llama-3-8B-Instruct) → click **Request access** → fill the form. Approval is typically a few hours to a day.
@@ -261,7 +282,7 @@ You can finish Phase A and start Phase C while waiting.
 | AV-HuBERT Large | Manual: download `large_lrs3_iter5.pt` from the AV-HuBERT repo's Model Zoo, drop at `checkpoints/avhubert_large_lrs3_iter5.pt` | Path comes from `configs/default.yaml → vsr.checkpoint` |
 | ECAPA-TDNN | Auto from `speechbrain/spkrec-ecapa-voxceleb` on first call | ~80 MB |
 | InsightFace `buffalo_l` | Auto on first call to `face_encoder.embed()` | ~280 MB |
-| Llama-3-8B-Instruct | Auto-pulled once Phase B is approved | ~16 GB; `hf auth login` already done |
+| Llama-3-8B-Instruct | Auto-pulled once Phase B is approved | ~16 GB; `hf auth login` already done (`huggingface_hub>=0.34` required for the `hf` command) |
 
 Verify after:
 ```bash
