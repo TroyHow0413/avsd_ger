@@ -687,6 +687,12 @@ def main() -> int:
         ),
     )
     p.add_argument(
+        "--asr-backend",
+        default=None,
+        choices=["faster-whisper", "openai-whisper", "transformers"],
+        help="Override cfg.asr.backend for eval without editing the YAML config.",
+    )
+    p.add_argument(
         "--frontend-profile",
         default=None,
         choices=_frontend_choices(),
@@ -712,6 +718,9 @@ def main() -> int:
     if args.ger_mode is not None:
         cfg.setdefault("ger", {})["mode"] = args.ger_mode
         print(f"[eval_ablations] Override ger.mode -> {args.ger_mode}")
+    if args.asr_backend is not None:
+        cfg.setdefault("asr", {})["backend"] = args.asr_backend
+        print(f"[eval_ablations] Override asr.backend -> {args.asr_backend}")
     if args.safe_core_preset is not None:
         _apply_safe_core_preset(cfg, args.safe_core_preset)
         print(f"[eval_ablations] Apply safe-core preset -> {args.safe_core_preset}")

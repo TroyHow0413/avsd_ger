@@ -571,6 +571,21 @@ def main() -> None:
         ),
     )
     ap.add_argument(
+        "--asr-beam-size",
+        type=int,
+        default=None,
+        help=(
+            "Override cfg.asr.beam_size. Use 1 for no best-of/beam search; "
+            "use N such as 10 for Whisper-style best_of=N."
+        ),
+    )
+    ap.add_argument(
+        "--asr-n-best",
+        type=int,
+        default=None,
+        help="Override cfg.asr.n_best without editing the YAML config.",
+    )
+    ap.add_argument(
         "--no-encoder-context",
         action="store_true",
         help=(
@@ -622,6 +637,12 @@ def main() -> None:
     if args.asr_backend is not None:
         cfg.setdefault("asr", {})["backend"] = args.asr_backend
         print(f"[train_stage2] Override asr.backend -> {args.asr_backend}")
+    if args.asr_beam_size is not None:
+        cfg.setdefault("asr", {})["beam_size"] = args.asr_beam_size
+        print(f"[train_stage2] Override asr.beam_size -> {args.asr_beam_size}")
+    if args.asr_n_best is not None:
+        cfg.setdefault("asr", {})["n_best"] = args.asr_n_best
+        print(f"[train_stage2] Override asr.n_best -> {args.asr_n_best}")
     if args.no_encoder_context:
         cfg.setdefault("asr", {})["expose_encoder"] = False
         print("[train_stage2] no_encoder_context -> ASR/VSR text n-best only; no encoder soft context")
