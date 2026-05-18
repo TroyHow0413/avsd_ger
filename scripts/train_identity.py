@@ -47,6 +47,23 @@ from avsd_ger.wandb_logger import WandbLogger, add_wandb_args
 
 
 # ---------------------------------------------------------------- dataset iface
+def _resolve_data_path(path: str | None, *, kind: str) -> Path:
+    if not path:
+        raise FileNotFoundError(f"Missing {kind} path in manifest record.")
+    raw = Path(path)
+    candidates = [raw]
+    parts = raw.parts
+    if "data" in parts:
+        data_idx = parts.index("data")
+        candidates.append(_ROOT / Path(*parts[data_idx:]))
+    if not raw.is_absolute():
+        candidates.append(_ROOT / raw)
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    raise FileNotFoundError(f"{kind} path does not exist: {path!r}")
+
+
 def iter_manifest(path: str | Path) -> Iterable[dict[str, Any]]:
     """Yield one manifest record per line.
 
@@ -206,7 +223,7 @@ def _load_wav(rec: dict[str, Any], stub: bool) -> torch.Tensor:
     if stub or not rec.get("wav_path"):
         return torch.randn(16000 * 3)
     import soundfile as sf
-    data, _ = sf.read(rec["wav_path"])
+    data, _ = sf.read(_resolve_data_path(rec["wav_path"], kind="audio"))
     return torch.from_numpy(np.asarray(data, dtype=np.float32))
 
 
@@ -214,7 +231,7 @@ def _load_face(rec: dict[str, Any], stub: bool) -> np.ndarray:
     if stub or not rec.get("face_path"):
         return (np.random.rand(112, 112, 3) * 255).astype(np.uint8)
     from PIL import Image
-    return np.array(Image.open(rec["face_path"]).convert("RGB"))
+    return np.array(Image.open(_resolve_data_path(rec["face_path"], kind="face")).convert("RGB"))
 
 
 def _resolve_manifest_arg(manifest: str | None, manifest_dir: str | None) -> str:

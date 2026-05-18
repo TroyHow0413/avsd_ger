@@ -447,6 +447,12 @@ def _resolve_record_path(path: str | None, *, kind: str) -> Path:
         raise FileNotFoundError(f"Missing {kind} path in Stage-2 record.")
     raw = Path(path)
     candidates = [raw]
+    parts = raw.parts
+    if "data" in parts:
+        data_idx = parts.index("data")
+        candidates.append(_ROOT / Path(*parts[data_idx:]))
+    if not raw.is_absolute():
+        candidates.append(_ROOT / raw)
     if "\\" in path:
         candidates.append(Path(path.replace("\\", "/")))
     for candidate in candidates:
