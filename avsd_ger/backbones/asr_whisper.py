@@ -14,11 +14,15 @@ Frozen backbone -- no gradient updates here.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 import torch
 import torch.nn as nn
+
+
+_ROOT = Path(__file__).resolve().parents[2]
 
 
 @dataclass
@@ -65,24 +69,79 @@ class WhisperASR(nn.Module):
             self._load_real()
 
     # --------------------------------------------------------------- loader
+    def _checkpoint_root(self) -> Path:
+        root = self.cfg.get("checkpoint_dir", "checkpoints/whisper")
+        p = Path(root)
+        if not p.is_absolute():
+            p = _ROOT / p
+        return p
+
+    @staticmethod
+    def _safe_repo_name(repo_id: str) -> str:
+        return repo_id.replace("/", "-")
+
+    def _materialize_hf_repo(self, repo_id: str, *, local_name: str | None = None) -> str:
+        raw = Path(repo_id)
+        if raw.exists():
+            return str(raw)
+
+        target = self._checkpoint_root() / (local_name or self._safe_repo_name(repo_id))
+        if target.exists() and any(target.iterdir()):
+            print(f"[asr] using local checkpoint: {target}", flush=True)
+            return str(target)
+
+        print(f"[asr] downloading {repo_id} -> {target}", flush=True)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        from huggingface_hub import snapshot_download
+        snapshot_download(
+            repo_id=repo_id,
+            local_dir=str(target),
+        )
+        return str(target)
+
+    def _openai_repo_id(self) -> str:
+        model_name = str(self.cfg.get("model_name", "large-v3"))
+        if "/" in model_name or Path(model_name).exists():
+            return model_name
+        return f"openai/whisper-{model_name}"
+
+    def _faster_repo_id(self) -> str:
+        model_name = str(self.cfg.get("model_name", "large-v3"))
+        if "/" in model_name or Path(model_name).exists():
+            return model_name
+        return f"Systran/faster-whisper-{model_name}"
+
     def _load_real(self) -> None:
         backend = self.cfg.get("backend", "faster-whisper")
         if backend == "faster-whisper":
             from faster_whisper import WhisperModel
+            ct2_repo = self._faster_repo_id()
+            ct2_path = self._materialize_hf_repo(
+                ct2_repo,
+                local_name=self._safe_repo_name(ct2_repo),
+            )
             self._ct2 = WhisperModel(
-                self.cfg.get("model_name", "large-v3"),
+                ct2_path,
                 device="cuda" if self.device.type == "cuda" else "cpu",
                 compute_type=self.cfg.get("compute_type", "float16"),
             )
             # HF model is needed for (a) encoder hidden states and (b) rescoring.
             from transformers import WhisperForConditionalGeneration, WhisperProcessor
-            hf_id = f"openai/whisper-{self.cfg.get('model_name', 'large-v3')}"
+            hf_repo = self._openai_repo_id()
+            hf_id = self._materialize_hf_repo(
+                hf_repo,
+                local_name=self._safe_repo_name(hf_repo),
+            )
             self._hf_processor = WhisperProcessor.from_pretrained(hf_id)
             self._hf_model = WhisperForConditionalGeneration.from_pretrained(hf_id).to(self.device)
             self._hf_model.eval()
         elif backend == "transformers":
             from transformers import WhisperForConditionalGeneration, WhisperProcessor
-            hf_id = f"openai/whisper-{self.cfg.get('model_name', 'large-v3')}"
+            hf_repo = self._openai_repo_id()
+            hf_id = self._materialize_hf_repo(
+                hf_repo,
+                local_name=self._safe_repo_name(hf_repo),
+            )
             self._hf_processor = WhisperProcessor.from_pretrained(hf_id)
             self._hf_model = WhisperForConditionalGeneration.from_pretrained(hf_id).to(self.device)
             self._hf_model.eval()

@@ -173,7 +173,7 @@ hf auth whoami                        # sanity check
 
 ### Backbone weights (only when running real models)
 
-* **Whisper-large-v3** — auto-downloaded by `faster-whisper` and `transformers` on first use.
+* **Whisper-large-v3** — auto-downloaded into `checkpoints/whisper/` on first use (`faster-whisper` CT2 weights plus the Hugging Face encoder/rescore weights). This directory is portable; upload it with `checkpoints/` to avoid slow server downloads.
 * **AV-HuBERT Large** — drop the `.pt` at `checkpoints/avhubert_large_lrs3_iter5.pt` (path in `configs/default.yaml`).
 * **ECAPA-TDNN** — auto from SpeechBrain.
 * **InsightFace `buffalo_l`** — auto on first use.
@@ -272,13 +272,40 @@ You can finish Phase A and start Phase C while waiting.
 
 ---
 
+### Optional — pre-download Whisper into `checkpoints/`
+
+If the training server has a slow Hugging Face/Xet connection, pre-download the
+Whisper weights on a faster machine, then upload the whole `checkpoints/`
+directory. The ASR wrapper first checks these local directories and only
+downloads when they are missing:
+
+```bash
+python - <<'PY'
+from huggingface_hub import snapshot_download
+snapshot_download("Systran/faster-whisper-large-v3", local_dir="checkpoints/whisper/Systran-faster-whisper-large-v3")
+snapshot_download("openai/whisper-large-v3", local_dir="checkpoints/whisper/openai-whisper-large-v3")
+PY
+```
+
+Expected local layout:
+
+```text
+checkpoints/whisper/Systran-faster-whisper-large-v3/
+checkpoints/whisper/openai-whisper-large-v3/
+```
+
+On the server, no extra flag is needed as long as `configs/default.yaml` keeps
+`asr.checkpoint_dir: checkpoints/whisper`.
+
+---
+
 ### Phase C — Download backbone weights
 
 **Payoff:** all 5 backbones can load real weights when you flip `stub_backbones: false`.
 
 | Backbone | How to get the weights | Notes |
 |---|---|---|
-| Whisper-large-v3 | Auto-pulled by `faster-whisper` + `transformers` on first call | ~3 GB, cached under `~/.cache/huggingface/` |
+| Whisper-large-v3 | Auto-pulled by `faster-whisper` + `transformers` on first call | Cached under `checkpoints/whisper/` so it can be packed and uploaded with the project |
 | AV-HuBERT Large | Manual: download `large_lrs3_iter5.pt` from the AV-HuBERT repo's Model Zoo, drop at `checkpoints/avhubert_large_lrs3_iter5.pt` | Path comes from `configs/default.yaml → vsr.checkpoint` |
 | ECAPA-TDNN | Auto from `speechbrain/spkrec-ecapa-voxceleb` on first call | ~80 MB |
 | InsightFace `buffalo_l` | Auto on first call to `face_encoder.embed()` | ~280 MB |

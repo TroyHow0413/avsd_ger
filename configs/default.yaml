@@ -10,6 +10,7 @@ stub_backbones: false        # set true to run on synthetic tensors without down
 # ---------- Backbones ----------
 asr:
   model_name: large-v3
+  checkpoint_dir: checkpoints/whisper  # local portable cache; missing models are downloaded here
   backend: faster-whisper    # faster-whisper | transformers | openai-whisper
   beam_size: 10
   n_best: 5
