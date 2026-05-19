@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from collections import defaultdict
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -126,6 +127,7 @@ def train(
     fused_list: list[torch.Tensor] = []
     voice_list: list[torch.Tensor] = []
     face_list: list[torch.Tensor] = []
+    speaker_ids: list[str | None] = []
     face_cache: dict[str, torch.Tensor] = {}
     face_cache_hits = 0
     face_cache_misses = 0
@@ -160,6 +162,7 @@ def train(
             fused_list.append(z.detach().cpu())
             voice_list.append(voice_emb.detach().cpu())
             face_list.append(face_emb.detach().cpu())
+            speaker_ids.append(rec.get("speaker_id") or rec.get("ref_speaker"))
 
     if not fused_list:
         raise RuntimeError("No utterances survived the dual gate — check thresholds.")
@@ -170,8 +173,11 @@ def train(
         )
 
     # --- Cold-start: data-driven K with unknown bucket ------------------
-    fused = torch.stack(fused_list, dim=0).numpy()
-    cs = cold.fit(fused)
+    # Cold-start should run in a speaker-discriminative space. The fuser is
+    # still random at this point, while ECAPA voice embeddings already carry
+    # speaker structure, so use voice space for pseudo-label discovery.
+    cold_input = torch.stack(voice_list, dim=0).numpy()
+    cs = cold.fit(cold_input)
     print(f"[cold_start] K={cs.centroids.shape[0]}  unknown={cs.n_unknown}/{len(records)}")
     wb.log({
         "stage1/cold_start/K": int(cs.centroids.shape[0]),
@@ -228,6 +234,39 @@ def train(
             "stage1/epoch_end/acc_av": float(rep.acc_av),
             "stage1/epoch_end/acc_va": float(rep.acc_va),
         }, step=step)
+
+    # Persist an actual identity pool, not only the fuser weights. AMI JSONL
+    # records include speaker_id, so prefer supervised prototypes when present;
+    # otherwise fall back to cold-start cluster labels.
+    grouped: dict[str, list[int]] = defaultdict(list)
+    labelled = 0
+    for i, sid in enumerate(speaker_ids):
+        if sid:
+            grouped[str(sid)].append(i)
+            labelled += 1
+    source = "manifest_speaker_id"
+    if not grouped:
+        source = "cold_start_cluster"
+        for i, label in enumerate(cs.labels):
+            if int(label) >= 0:
+                grouped[f"cluster_{int(label):04d}"].append(i)
+
+    for sid, idxs in sorted(grouped.items()):
+        v_proto = torch.stack([voice_list[i] for i in idxs], dim=0).mean(dim=0)
+        f_proto = torch.stack([face_list[i] for i in idxs], dim=0).mean(dim=0)
+        v_proto = v_proto / (v_proto.norm() + 1e-8)
+        f_proto = f_proto / (f_proto.norm() + 1e-8)
+        pool.enroll(
+            speaker_id=sid,
+            voice_emb=v_proto,
+            face_emb=f_proto,
+            meta={"n_utterances": len(idxs), "source": source},
+        )
+    print(f"[pool] enrolled={len(pool)} source={source} labelled_records={labelled}/{len(speaker_ids)}")
+    wb.log({
+        "stage1/pool/enrolled": len(pool),
+        "stage1/pool/labelled_records": labelled,
+    }, step=step)
 
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
