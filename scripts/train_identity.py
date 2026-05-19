@@ -32,6 +32,7 @@ from typing import Any, Iterable
 
 import numpy as np
 import torch
+from tqdm import tqdm
 
 import sys
 _ROOT = Path(__file__).resolve().parents[1]
@@ -125,9 +126,12 @@ def train(
     fused_list: list[torch.Tensor] = []
     voice_list: list[torch.Tensor] = []
     face_list: list[torch.Tensor] = []
+    face_cache: dict[str, torch.Tensor] = {}
+    face_cache_hits = 0
+    face_cache_misses = 0
 
     with torch.no_grad():
-        for rec in records:
+        for rec in tqdm(records, desc="[stage1] embedding first pass", unit="utt"):
             # --- load + dual-gate (stubbed here; real loader decodes audio/video) ---
             wav = _load_wav(rec, stub=stub)
             lip_conf = np.asarray(rec.get("lip_conf", []), dtype=np.float32)
@@ -143,7 +147,15 @@ def train(
                 continue   # everything filtered out — skip utterance
 
             voice_emb = voice.embed(wav)
-            face_emb = face.embed(_load_face(rec, stub=stub))
+            face_key = str(rec.get("face_path") or rec.get("utt_id") or len(face_cache))
+            if (not stub) and face_key in face_cache:
+                face_emb = face_cache[face_key].to(device)
+                face_cache_hits += 1
+            else:
+                face_emb = face.embed(_load_face(rec, stub=stub))
+                if not stub:
+                    face_cache[face_key] = face_emb.detach().cpu()
+                    face_cache_misses += 1
             z = pool.fuser(voice_emb.unsqueeze(0), face_emb.unsqueeze(0)).squeeze(0)
             fused_list.append(z.detach().cpu())
             voice_list.append(voice_emb.detach().cpu())
@@ -151,6 +163,11 @@ def train(
 
     if not fused_list:
         raise RuntimeError("No utterances survived the dual gate — check thresholds.")
+    if not stub:
+        print(
+            f"[face_cache] unique={len(face_cache)} hits={face_cache_hits} "
+            f"misses={face_cache_misses}"
+        )
 
     # --- Cold-start: data-driven K with unknown bucket ------------------
     fused = torch.stack(fused_list, dim=0).numpy()
