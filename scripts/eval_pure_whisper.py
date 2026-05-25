@@ -35,6 +35,9 @@ from typing import Any, Iterable
 
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+from avsd_ger.wandb_logger import WandbLogger, add_wandb_args  # noqa: E402
 
 
 def _resolve_paths(spec: str) -> list[Path]:
@@ -161,9 +164,18 @@ class UtteranceResult:
 
 
 class PureWhisper:
-    def __init__(self, backend: str, model: str, device: str, compute_type: str, language: str | None):
+    def __init__(
+        self,
+        backend: str,
+        model: str,
+        device: str,
+        compute_type: str,
+        language: str | None,
+        openai_fp16: bool,
+    ):
         self.backend = backend
         self.language = language
+        self.openai_fp16 = openai_fp16
         if backend == "faster-whisper":
             from faster_whisper import WhisperModel
 
@@ -190,7 +202,7 @@ class PureWhisper:
             "beam_size": beam_size,
             "temperature": 0.0,
             "language": self.language,
-            "fp16": False,
+            "fp16": self.openai_fp16,
             "verbose": False,
             "condition_on_previous_text": False,
         }
@@ -205,19 +217,50 @@ def main() -> int:
     p.add_argument("--model", default="large-v3", help="Model name or local model path.")
     p.add_argument("--device", default="cuda", help="cuda, cpu, or backend-supported device.")
     p.add_argument("--compute-type", default="int8_float16", help="faster-whisper compute type.")
+    p.add_argument(
+        "--openai-fp16",
+        action="store_true",
+        help="Use fp16=True for openai-whisper. Ignored by faster-whisper.",
+    )
     p.add_argument("--beam-size", type=int, default=5)
     p.add_argument("--language", default=None)
     p.add_argument("--limit", type=int, default=None, help="Optional quick smoke-test limit.")
     p.add_argument("--out", default=str(ROOT / "out/pure_whisper_eval.json"))
+    add_wandb_args(p)
     args = p.parse_args()
 
     manifests = _resolve_paths(args.manifest)
+    wb = WandbLogger.from_args(
+        args,
+        default_project="avsd-ger",
+        default_run_name=f"pure-whisper-{args.backend}-{Path(args.manifest).stem}",
+        job_type="eval-pure-whisper",
+        config={
+            "baseline": "pure_whisper",
+            "pipeline": "none",
+            "uses_c1": False,
+            "uses_c2": False,
+            "uses_c3": False,
+            "backend": args.backend,
+            "model": args.model,
+            "device": args.device,
+            "compute_type": args.compute_type if args.backend == "faster-whisper" else None,
+            "openai_fp16": bool(args.openai_fp16) if args.backend == "openai-whisper" else None,
+            "beam_size": args.beam_size,
+            "language": args.language,
+            "manifest": args.manifest,
+            "n_manifests": len(manifests),
+            "limit": args.limit,
+            "out": args.out,
+        },
+    )
     runner = PureWhisper(
         backend=args.backend,
         model=args.model,
         device=args.device,
         compute_type=args.compute_type,
         language=args.language,
+        openai_fp16=bool(args.openai_fp16),
     )
 
     results: list[UtteranceResult] = []
@@ -255,6 +298,15 @@ def main() -> int:
             if seen % 25 == 0:
                 cur_wer = (total_sub + total_del + total_ins) / max(1, total_ref)
                 print(f"[pure-whisper] {seen} utterances, WER={cur_wer:.4f}", flush=True)
+                wb.log({
+                    "running/wer": cur_wer,
+                    "running/word_accuracy": 1.0 - cur_wer,
+                    "running/n_utterances": seen,
+                    "running/n_ref_words": total_ref,
+                    "running/n_sub": total_sub,
+                    "running/n_del": total_del,
+                    "running/n_ins": total_ins,
+                }, step=seen)
         if args.limit is not None and seen >= args.limit:
             break
 
@@ -265,6 +317,7 @@ def main() -> int:
         "model": args.model,
         "device": args.device,
         "compute_type": args.compute_type if args.backend == "faster-whisper" else None,
+        "openai_fp16": bool(args.openai_fp16) if args.backend == "openai-whisper" else None,
         "beam_size": args.beam_size,
         "language": args.language,
         "manifest": args.manifest,
@@ -286,6 +339,23 @@ def main() -> int:
     out.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
     print(json.dumps(payload["metrics"], indent=2), flush=True)
     print(f"[wrote] {out}", flush=True)
+    wb.summary({
+        "summary/wer": wer,
+        "summary/word_accuracy": 1.0 - wer,
+        "summary/n_ref_words": total_ref,
+        "summary/n_utterances": len(results),
+        "summary/n_sub": total_sub,
+        "summary/n_del": total_del,
+        "summary/n_ins": total_ins,
+        "summary/out": str(out),
+    })
+    wb.log({
+        "final/wer": wer,
+        "final/word_accuracy": 1.0 - wer,
+        "final/n_ref_words": total_ref,
+        "final/n_utterances": len(results),
+    }, step=seen)
+    wb.finish()
     return 0
 
 
