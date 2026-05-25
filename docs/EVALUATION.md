@@ -97,6 +97,36 @@ python scripts/eval_ablations.py \
     --out out/ablation_report.json
 ```
 
+After Stage-2 training, do not point eval directly at `checkpoints/stage2/identity_pool_stage2.pt` without either `--fresh-pool` or a separately enrolled pool. That file contains the trained fuser state, but it does not automatically contain enrolled evaluation speakers.
+
+Recommended for per-meeting AMI eval: use `--fresh-pool`. The script loads the trained fuser from `--pool`, then enrolls the `speakers` block from each session manifest before running the ablation row:
+
+```bash
+python scripts/eval_ablations.py \
+    --config configs/default.yaml \
+    --manifest data/your_real_test_session_manifest.json \
+    --pool checkpoints/stage2/identity_pool_stage2.pt \
+    --fresh-pool \
+    --out out/ablation_report_real.json
+```
+
+Alternative for debugging or a fixed deployment-style enrollment: pre-enroll once, then evaluate without `--fresh-pool`:
+
+```bash
+python scripts/enroll_identity.py \
+    --manifest data/your_real_test_speakers.json \
+    --in-pool checkpoints/stage2/identity_pool_stage2.pt \
+    --out-pool checkpoints/stage2/identity_pool_stage2_enrolled.pt
+
+python scripts/eval_ablations.py \
+    --config configs/default.yaml \
+    --manifest data/your_real_test_session_manifest.json \
+    --pool checkpoints/stage2/identity_pool_stage2_enrolled.pt \
+    --out out/ablation_report_real.json
+```
+
+At startup, verify the pool/enrollment log shows a non-zero speaker count. If the pool has `0` speakers, AV-SID/DER/JER will collapse because every turn is effectively unknown.
+
 Rows (controlled via `cfg.ablation` overrides):
 
 | Row | Flag flipped | What it isolates |

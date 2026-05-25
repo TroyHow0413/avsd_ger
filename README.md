@@ -183,288 +183,137 @@ The repo defaults to `stub_backbones: true` in `configs/default.yaml`, so you ca
 
 ---
 
-## Roadmap: from stub mode to real models
+## Current Workflow
 
-Follow the phases in order. Each phase says what you **get** from finishing it (the payoff), what it **needs** (prereqs), and exactly what to run. W&B flags are uniform across all training/eval scripts — see [W&B flags](#wb-flags) below.
+The old **Phase 0 / A / B / C / D / E / F / G** names were rollout labels from the first implementation pass. They are not runtime modes, and the training scripts do not read a `--phase` argument. The old notes were moved to [`docs/LEGACY_PHASE_ROLLOUT.md`](docs/LEGACY_PHASE_ROLLOUT.md).
 
-| Phase | Payoff (what you unlock) | Needs | Approx. time |
-|---|---|---|---|
-| **0** | Confirm C1→C2→C3 pipeline is wired correctly on synthetic tensors | conda env | 1 min |
-| **A** | First numbers on the spec §10 ablation table + the structural-safety check | Phase 0 | 5 min |
-| **B** | Llama-3-8B access approved (run **in parallel** with A — it waits on Meta's review) | Phase 0 | 5 min submit + hours-to-day approval |
-| **C** | All 5 backbone weights on disk | Phase 0 | 30–60 min download |
-| **D** | First real-model end-to-end smoke test (no training yet) | A done, B approved, C done | 10 min |
-| **E** | Stage-1 trained: identity-aware alignment | D | hours–day, 1×A100 |
-| **F** | Stage-2 trained: full multi-task with GER LoRA on Llama-3-8B | E | 1–3 days, 1–2×A100 |
-| **G** | Final ablation eval on a real test set + headline metrics in W&B summary | F | tens of minutes |
+For current day-to-day work, use the concrete scripts:
 
-> **Recommended ordering:** Phase 0 → run A and B **at the same time** (B is async, just submit and wait) → C → D → E → F → G.
+| Task | Script | Notes |
+|---|---|---|
+| Enroll speakers | `scripts/enroll_identity.py` | Builds or updates an identity pool. |
+| Single utterance smoke test | `scripts/run_sample.py` | Runs C1 -> C2 -> C3 on one utterance. |
+| Stage-1 training | `scripts/train_identity.py` | Trains the C1 identity fuser with bidirectional InfoNCE. |
+| Stage-2 training | `scripts/train_stage2.py` | Trains alignment, CTC, GER LoRA/QFormer pieces depending on `--warmup`. |
+| Ablation eval | `scripts/eval_ablations.py` | Runs the 5 ablation rows and writes metrics. |
+| Convenience launcher | `one_go/train.py` | Optional wrapper around Stage-1 and Stage-2; useful for quick local runs, not required. |
 
----
+### Minimal Stub Check
 
-### Phase 0 — Stub-mode smoke test (already done if you've followed install)
-
-**Payoff:** confirms C1 enrollment + retrieval + C2 alignment + GER + C3 closed-loop are wired correctly. Pure synthetic tensors, no weights needed.
-
+`configs/default.yaml` defaults to `stub_backbones: true`, so this checks wiring without downloading real model weights.
 
 ```bash
 python scripts/enroll_identity.py --manifest data/sample_manifest.json
-python scripts/run_sample.py     --manifest data/sample_manifest.json --utt utt_0001
+python scripts/run_sample.py --manifest data/sample_manifest.json --utt utt_0001
 ```
 
-**Expected output** (deterministic, seed=1337):
-```
-text       : the quick brown fox jumps over the lazy dog
-speaker_id : spk_02
-confidence : 0.837
-decision   : accept_and_update
-```
-
-If `confidence` ≈ 0.837 and `decision == accept_and_update`, your environment is healthy.
-
----
-
-### Phase A — Eval infrastructure on stub data (no downloads)
-
-**Payoff:** the **5-row ablation table** (full / w/o C1 / w/o C2 / w/o C3 / C3 w/o gate) with all five primary metrics (SA-WER, SCR, AV-SID Acc, DER, JER), plus the spec-mandated structural-safety check (`c3_wo_conf_gate ≥ wo_c3` PASS). All on stub tensors — exercises the eval code without any external dependency.
+Optional stub ablation check:
 
 ```bash
 python scripts/eval_ablations.py \
-    --config   configs/default.yaml \
+    --config configs/default.yaml \
     --manifest data/sample_session_manifest.json \
-    --pool     checkpoints/identity_pool.pt \
-    --out      out/ablation_report_stub.json \
-    --no-power \
-    --wandb-project  avsd-ger \
-    --wandb-run-name stub-ablation-smoke \
-    --wandb-tags     stub eval ablation
+    --pool checkpoints/identity_pool.pt \
+    --out out/ablation_report_stub.json \
+    --no-power
 ```
 
-**Sample session manifest:** `data/sample_session_manifest.json` (3 turns, 2 speakers, already in the repo).
+### Real Training
 
-**Look for in stdout:**
-```
-=== running ablation: full_model    flags={} ===
-{ ... five metrics ... }
-... (4 more rows) ...
-[spec check] C3-w/o-gate SA-WER (...) >= w/o-C3 SA-WER (...): PASS
-[wrote] out/ablation_report_stub.json
-```
+Prepare the real backbones first: set `stub_backbones: false`, put AV-HuBERT at `checkpoints/avhubert_large_lrs3_iter5.pt`, log in to Hugging Face for Llama-3, and let Whisper/ECAPA/InsightFace auto-cache on first use.
 
-**Look for in W&B:** the `ablation/<row>/<metric>` charts populate; the `summary/spec_check_c3_gate_pass` summary key is `true`.
-
----
-
-### Phase B — Apply for Llama-3-8B access (run in parallel with A)
-
-**Payoff:** unlocks the GER head — without this you can't load Llama-3-8B-Instruct, so Stage-2 training and any non-stub `run_sample.py` will fail at the GER step. **Submit early; approval is async.**
+Stage-1:
 
 ```bash
-python -m pip install --upgrade "huggingface_hub>=0.34,<1.0"  # only needed if `hf` is not found
-hf auth login                  # paste a Read-scope token from https://huggingface.co/settings/tokens
-hf auth whoami                 # confirms the token
-# Fallback for old pinned envs: huggingface-cli login
+python scripts/train_identity.py \
+    --config configs/default.yaml \
+    --manifest data/your_real_train_manifest.jsonl \
+    --out checkpoints/stage1/ \
+    --epochs 5 \
+    --wandb-project avsd-ger \
+    --wandb-run-name stage1-real-v1
 ```
 
-Then in a browser, visit [https://huggingface.co/meta-llama/Meta-Llama-3-8B-Instruct](https://huggingface.co/meta-llama/Meta-Llama-3-8B-Instruct) → click **Request access** → fill the form. Approval is typically a few hours to a day.
-
-You can finish Phase A and start Phase C while waiting.
-
----
-
-### Optional — pre-download Whisper into `checkpoints/`
-
-If the training server has a slow Hugging Face/Xet connection, pre-download the
-Whisper weights on a faster machine, then upload the whole `checkpoints/`
-directory. The ASR wrapper first checks these local directories and only
-downloads when they are missing:
+Stage-2:
 
 ```bash
-python - <<'PY'
-from huggingface_hub import snapshot_download
-snapshot_download("Systran/faster-whisper-large-v3", local_dir="checkpoints/whisper/Systran-faster-whisper-large-v3")
-snapshot_download("openai/whisper-large-v3", local_dir="checkpoints/whisper/openai-whisper-large-v3")
-PY
+python scripts/train_stage2.py \
+    --config configs/default.yaml \
+    --manifest data/your_real_train_manifest.jsonl \
+    --stage1-pool checkpoints/stage1/identity_pool_stage1.pt \
+    --out checkpoints/stage2/ \
+    --warmup joint \
+    --wandb-project avsd-ger \
+    --wandb-run-name stage2-real-v1
 ```
 
-Expected local layout:
+Useful Stage-2 `--warmup` modes:
 
-```text
-checkpoints/whisper/Systran-faster-whisper-large-v3/
-checkpoints/whisper/openai-whisper-large-v3/
-```
-
-On the server, no extra flag is needed as long as `configs/default.yaml` keeps
-`asr.checkpoint_dir: checkpoints/whisper`.
-
----
-
-### Phase C — Download backbone weights
-
-**Payoff:** all 5 backbones can load real weights when you flip `stub_backbones: false`.
-
-| Backbone | How to get the weights | Notes |
+| Mode | Trains | When to use |
 |---|---|---|
-| Whisper-large-v3 | Auto-pulled by `faster-whisper` + `transformers` on first call | Cached under `checkpoints/whisper/` so it can be packed and uploaded with the project |
-| AV-HuBERT Large | Manual: download `large_lrs3_iter5.pt` from the AV-HuBERT repo's Model Zoo, drop at `checkpoints/avhubert_large_lrs3_iter5.pt` | Path comes from `configs/default.yaml → vsr.checkpoint` |
-| ECAPA-TDNN | Auto from `speechbrain/spkrec-ecapa-voxceleb` on first call | ~80 MB |
-| InsightFace `buffalo_l` | Auto on first call to `face_encoder.embed()` | ~280 MB |
-| Llama-3-8B-Instruct | Auto-pulled once Phase B is approved | ~16 GB; `hf auth login` already done (`huggingface_hub>=0.34` required for the `hf` command) |
+| `joint` | aligner + CTC + identity fuser + GER projectors/LoRA | Full Stage-2 run. |
+| `align_ctc` | aligner + CTC only | Debug alignment/CTC before loading the LLM path. |
+| `ger_lora` | GER LoRA path only | Lower-memory GER text n-best training. Can pair with `--no-encoder-context`. |
+| `ger_qformer` | GER LoRA + QFormer/id projector | Train GER soft-prefix pieces without the full joint objective. |
 
-Verify after:
-```bash
-ls -lh checkpoints/avhubert_large_lrs3_iter5.pt
-python -c "from huggingface_hub import HfApi; print(HfApi().model_info('meta-llama/Meta-Llama-3-8B-Instruct').gated)"
-```
+Low-memory GER example:
 
----
-
-### Phase D — Flip `stub_backbones: false` and smoke-test
-
-**Payoff:** confirms all 5 real backbones load and the pipeline produces a sensible transcript on real audio/video.
-
-> **Full operational walkthrough:** [`docs/PHASE_D_REAL_MODELS.md`](docs/PHASE_D_REAL_MODELS.md) — pre-flight checklist (Llama-3 access verification, AV-HuBERT path check, fairseq import, GPU sanity), GPU memory budget per GPU class, mouth-ROI preprocessing pointer, common failure modes, and the full **D → G** real-data rollout.
-
-Quick version (Phase D.1 — easy mode, real audio + stubbed video):
-
-1. In `configs/default.yaml` set `stub_backbones: false`.
-2. Drop a 3-10 s mono 16 kHz WAV at `data/utts/utt_0001.wav`, a frontal-face image at `data/spk_01/enroll.jpg`, set `mouth_roi: null` in the manifest.
-3. Re-run:
-   ```bash
-   python scripts/enroll_identity.py --manifest data/sample_manifest.json
-   python scripts/run_sample.py     --manifest data/sample_manifest.json --utt utt_0001
-   ```
-
-**First run** triggers ~25 GB of downloads (Whisper-large-v3 ×2 paths ≈ 6 GB, ECAPA ≈ 80 MB, InsightFace ≈ 280 MB, **Llama-3-8B ≈ 16 GB**). Subsequent runs are fast.
-
-**Look for:** `text` is now your actual transcript, `s_acoustic` is a real Whisper rescore (typically -0.1 to -0.6 for clean speech), `top_ids` has the speaker you enrolled.
-
-If the GER step OOMs (24 GB GPU + Llama-3 fp16 won't fit), enable 4-bit loading — see [`docs/PHASE_D_REAL_MODELS.md#gpu-memory-budget`](docs/PHASE_D_REAL_MODELS.md#gpu-memory-budget).
-
----
-
-### Phase E — Stage-1 training (identity-aware alignment)
-
-**Payoff:** trained C1 fuser + identity-conditioned C2 aligner. Loss is bidirectional InfoNCE + CTC; backbones stay frozen (per spec §7).
-
-**Stub-mode rehearsal** (no real data — verifies wandb + training loop on synthetic batches):
-```bash
-python scripts/train_identity.py \
-    --config   configs/default.yaml \
-    --manifest data/sample_train_manifest.jsonl \
-    --out      checkpoints/stage1/ \
-    --wandb-project  avsd-ger \
-    --wandb-run-name stage1-stub-rehearsal \
-    --wandb-tags     stage1 stub
-```
-
-> The script auto-falls back to 8 synthetic records if the manifest path is missing, so this also works if you point `--manifest` at any non-existent path.
-
-**Real training** (swap to your real JSONL when you have it — one record per line, fields `wav_path`, `face_path`, `lip_conf`):
-```bash
-python scripts/train_identity.py \
-    --config   configs/default.yaml \
-    --manifest data/your_real_train_manifest.jsonl \
-    --out      checkpoints/stage1/ \
-    --wandb-project  avsd-ger \
-    --wandb-run-name stage1-real-v1 \
-    --wandb-tags     stage1 real
-```
-
-**W&B charts to watch:**
-- `stage1/loss/total` — should drop steadily; A→V and V→A losses should converge to similar values (bidirectional balance).
-- `stage1/acc/A->V` and `stage1/acc/V->A` — should rise above chance (1 / batch_size = 1/64 ≈ 0.016) within ~500 steps.
-- `stage1/cold_start/K` — number of pseudo-speakers found by agglomerative clustering (sanity check vs. your dataset's true speaker count).
-
-Stop criterion (per spec §7): **AV-SID accuracy plateau on a held-out set**. The current script uses `epochs` cap as a placeholder; plug in your dev-set evaluator for real plateau detection.
-
-Output: `checkpoints/stage1/identity_pool_stage1.pt`.
-
----
-
-### Phase F — Stage-2 training (multi-task, full unfreeze, GER LoRA)
-
-**Payoff:** end-to-end fine-tuned model with the LLM in the loop. Loss is `L_CTC + L_GER_CE + 0.5 * L_InfoNCE`; everything is unfrozen.
-
-**Stub-mode rehearsal** (manifest path is intentionally non-existent — the script falls back to 8 synthetic records):
 ```bash
 python scripts/train_stage2.py \
-    --config   configs/default.yaml \
-    --manifest data/sample_train_manifest.jsonl \
-    --out      checkpoints/stage2/ \
-    --wandb-project  avsd-ger \
-    --wandb-run-name stage2-stub-rehearsal \
-    --wandb-tags     stage2 stub
-```
-
-> In stub mode you'll see `ctc=0.0000 ger=0.9300 info=...` — the CTC and GER losses are deterministic placeholders (the heads return fixed values when `stub_backbones: true`). Only `info` (InfoNCE on random embeddings) varies. This proves the training loop + autograd + optimizer + W&B are wired correctly; real loss curves require Phase D first.
-
-**Real training:**
-```bash
-python scripts/train_stage2.py \
-    --config   configs/default.yaml \
+    --config configs/default.yaml \
     --manifest data/your_real_train_manifest.jsonl \
-    --out      checkpoints/stage2/ \
-    --wandb-project  avsd-ger \
-    --wandb-run-name stage2-real-v1 \
-    --wandb-tags     stage2 real lora
+    --stage1-pool checkpoints/stage1/identity_pool_stage1.pt \
+    --out checkpoints/stage2_ger_lora/ \
+    --warmup ger_lora \
+    --no-encoder-context \
+    --llm-quant 4bit
 ```
 
-**Spec §7 invariant** is enforced at startup: if `stage2.lr ≠ stage1.lr × 0.1` the script raises `ValueError` and refuses to run. Defaults already satisfy this (`1e-3 × 0.1 == 1e-4`).
+### Final Eval
 
-**W&B charts to watch:**
-- `stage2/loss/total`, `stage2/loss/ctc`, `stage2/loss/ger`, `stage2/loss/info` — all should decrease; GER loss is the slowest to move.
-- `stage2/lr` — should stay flat at `1e-4` after warmup.
+`train_stage2.py` saves trained fuser weights, but it does not enroll test speakers into `identity_pool_stage2.pt`. Use one of these two valid eval patterns.
 
-Output: `checkpoints/stage2/identity_pool_stage2.pt`, `aligner_stage2.pt`, `ctc_head_stage2.pt`, plus the LoRA adapter under `out/peft/` (saved by the GER head).
+Recommended for per-meeting AMI eval: let `eval_ablations.py` load the trained fuser and fresh-enroll speakers from each session manifest:
 
----
-
-### Phase G — Final ablation eval on a real test set
-
-**Payoff:** the headline numbers for the paper. SA-WER, SCR, AV-SID Acc, DER, JER for all 5 ablation rows + energy per row + the spec safety PASS/FAIL.
-
-> Phase G uses a **session manifest** (turns + ref_text + ref_speaker), not the JSONL training manifest. Format: see [`docs/EVALUATION.md#session-manifest`](docs/EVALUATION.md#session-manifest).
-
-**Stub-mode rehearsal** (uses the included 3-turn / 2-speaker session — same manifest as Phase A):
 ```bash
 python scripts/eval_ablations.py \
-    --config   configs/default.yaml \
-    --manifest data/sample_session_manifest.json \
-    --pool     checkpoints/identity_pool.pt \
-    --out      out/ablation_report_stub.json \
-    --no-power \
-    --wandb-project  avsd-ger \
-    --wandb-run-name ablation-stub-rehearsal \
-    --wandb-tags     stub eval ablation
+    --config configs/default.yaml \
+    --manifest data/your_real_test_session_manifest.json \
+    --pool checkpoints/stage2/identity_pool_stage2.pt \
+    --fresh-pool \
+    --out out/ablation_report_real.json \
+    --idle-calibrate-s 2.0 \
+    --wandb-project avsd-ger \
+    --wandb-run-name ablation-final-v1
 ```
 
-> **Important — Phase G needs an *enrolled* pool, not a freshly-trained one.** `train_stage2.py` only updates the fuser weights inside the pool; it never calls `pool.enroll()`, so `checkpoints/stage2/identity_pool_stage2.pt` is **empty of speakers**. For stub rehearsal, reuse the Phase 0 pool (`checkpoints/identity_pool.pt`). For real eval, you must re-enroll your test speakers using the trained fuser before evaluating — see "Real eval" below.
+Alternative for debugging or deployment-style fixed enrollment: pre-enroll once, then evaluate without `--fresh-pool`:
 
-**Real eval** (after Phase F — re-enroll speakers using the trained fuser, then point Phase G at that pool — full walkthrough in [`docs/PHASE_D_REAL_MODELS.md`](docs/PHASE_D_REAL_MODELS.md#phase-g--real-ablation-eval)):
 ```bash
-# 1. Re-enroll test speakers using the Stage-2 fuser. enroll_identity.py loads
-#    fuser weights from --in-pool if it exists, then runs the enrollment loop.
 python scripts/enroll_identity.py \
     --manifest data/your_real_test_speakers.json \
-    --in-pool  checkpoints/stage2/identity_pool_stage2.pt \
+    --in-pool checkpoints/stage2/identity_pool_stage2.pt \
     --out-pool checkpoints/stage2/identity_pool_stage2_enrolled.pt
 
-# 2. Eval against the enrolled pool.
 python scripts/eval_ablations.py \
-    --config   configs/default.yaml \
+    --config configs/default.yaml \
     --manifest data/your_real_test_session_manifest.json \
-    --pool     checkpoints/stage2/identity_pool_stage2_enrolled.pt \
-    --out      out/ablation_report_real.json \
+    --pool checkpoints/stage2/identity_pool_stage2_enrolled.pt \
+    --out out/ablation_report_real.json \
     --idle-calibrate-s 2.0 \
-    --wandb-project  avsd-ger \
-    --wandb-run-name ablation-final-v1 \
-    --wandb-tags     final eval ablation
+    --wandb-project avsd-ger \
+    --wandb-run-name ablation-final-v1
 ```
 
-After the run, the **W&B run summary** has one entry per `(ablation_row, metric)` pair plus `summary/spec_check_c3_gate_pass`. Sort runs by `summary/full_model/sa_wer` to compare experiments.
+When `eval_ablations.py` starts, check that the pool/enrollment log shows a non-zero speaker count.
 
-> **Sanity check that the pool is enrolled**: when `eval_ablations.py` starts you'll see a line like `[pool] loaded from ... — N speakers`. If `N == 0`, the eval will collapse to `wo_c1`-like numbers (every turn returns `is_unknown=True`, AV-SID Acc = 0, DER = JER = 1.0). That's the symptom you saw in stub Phase G when pointing `--pool` at the bare Stage-2 file.
+### Optional One-Go Launcher
+
+`one_go/train.py` is only a convenience wrapper. It writes a runtime config under `one_go/runs/` and then calls the same Stage-1/Stage-2 scripts above.
+
+```bash
+python one_go/train.py --stage all --manifest data/your_real_train_manifest.jsonl --real --device cuda
+```
 
 ---
 
@@ -501,11 +350,12 @@ The metric namespaces written by each script:
 
 | Script | What it does | Detailed docs |
 |---|---|---|
-| `scripts/enroll_identity.py` | Enrol speakers into the cross-modal identity pool. Supports `--in-pool` to load a trained-fuser pool before enrolling (used by Phase G). | [`docs/ARCHITECTURE.md#c1`](docs/ARCHITECTURE.md#c1--cross-modal-identity-pool) |
+| `scripts/enroll_identity.py` | Enrol speakers into the cross-modal identity pool. Supports `--in-pool` to load a trained-fuser pool before evaluation enrollment. | [`docs/ARCHITECTURE.md#c1`](docs/ARCHITECTURE.md#c1--cross-modal-identity-pool) |
 | `scripts/run_sample.py` | Run one utterance end-to-end (single-speaker path). | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) |
-| `scripts/train_identity.py` | Stage-1: identity-aware alignment with InfoNCE + CTC. | [`docs/TRAINING.md#stage-1`](docs/TRAINING.md#stage-1) |
-| `scripts/train_stage2.py` | Stage-2 multi-task: CTC + GER cross-entropy + bidirectional InfoNCE. **Enforces `lr_stage2 == lr_stage1 * 0.1`** at runtime. | [`docs/TRAINING.md#stage-2`](docs/TRAINING.md#stage-2) |
+| `scripts/train_identity.py` | Stage-1: identity fuser training with bidirectional InfoNCE. | [`docs/TRAINING.md`](docs/TRAINING.md) |
+| `scripts/train_stage2.py` | Stage-2 multi-task training with selectable `--warmup` modes. **Enforces `lr_stage2 == lr_stage1 * ratio`** at runtime. | [`docs/TRAINING.md`](docs/TRAINING.md) |
 | `scripts/eval_ablations.py` | Run the five spec ablation rows on a session manifest, write metrics + energy. | [`docs/EVALUATION.md#ablation-runner`](docs/EVALUATION.md#ablation-runner) |
+| `one_go/train.py` | Optional convenience wrapper that calls Stage-1 and/or Stage-2 training. Not required for normal training. | See [Current Workflow](#current-workflow). |
 
 ---
 
@@ -536,11 +386,13 @@ scripts/              # CLI entry points
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | C1/C2/C3 module-level design, data shapes, key implementation choices. |
 | [`docs/RELATED_WORK.md`](docs/RELATED_WORK.md) | Side-by-side comparison vs. DualHyp, AVSD, DiarizationLM. |
 | [`docs/TRAINING.md`](docs/TRAINING.md) | Stage-1 / Stage-2 recipes, loss weights, the spec §7 LR invariant. |
+| [`docs/REAL_MODEL_WORKFLOW.md`](docs/REAL_MODEL_WORKFLOW.md) | Current real-model setup, manifest expectations, Stage-1/Stage-2 commands, re-enrollment, and eval workflow. |
 | [`docs/EVALUATION.md`](docs/EVALUATION.md) | Manifest format, the five primary metrics, power monitor, ablation runner. |
-| [`docs/PHASE_D_REAL_MODELS.md`](docs/PHASE_D_REAL_MODELS.md) | **Real-model rollout (Phase D → G)** — pre-flight checks, GPU memory budget, mouth-ROI preprocessing, stage-1/2 training on real data, re-enrolment for eval, common failure modes. |
+| [`docs/LEGACY_PHASE_ROLLOUT.md`](docs/LEGACY_PHASE_ROLLOUT.md) | Archived Phase 0/A-G rollout notes from the old README. Not the current training workflow. |
 
 ---
 
 ## Status
 
-Skeleton + spec-aligned wiring complete. AST + cross-import verified. Stub-mode Phases 0/A/E/F/G all green; real-model rollout starts at Phase D — see [`docs/PHASE_D_REAL_MODELS.md`](docs/PHASE_D_REAL_MODELS.md).
+Skeleton + spec-aligned wiring complete. AST + cross-import verified. Stub-mode enrollment, sample run, Stage-1, Stage-2, and ablation eval have working script paths. Current training uses `scripts/train_identity.py`, `scripts/train_stage2.py`, or the optional `one_go/train.py` wrapper.
+

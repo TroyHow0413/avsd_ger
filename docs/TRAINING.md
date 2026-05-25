@@ -1,81 +1,185 @@
 # Training
 
-> **Practical, end-to-end real-data rollout (Phase D → G):** [`PHASE_D_REAL_MODELS.md`](PHASE_D_REAL_MODELS.md). That doc covers GPU memory budgets, real manifest construction, mouth-ROI preprocessing, the post-Stage-2 re-enrolment step, and common failure modes. This file is the reference for *what* the two stages are; that file is the reference for *how* to run them.
+This project currently trains through concrete scripts, not Phase A-G labels.
 
-Two stages, **in this order**, per spec §7.
+| Job | Entry point | Output |
+|---|---|---|
+| Stage-1 identity training | `scripts/train_identity.py` | `identity_pool_stage1.pt` |
+| Stage-2 multi-task training | `scripts/train_stage2.py` | `identity_pool_stage2.pt`, `aligner_stage2.pt`, `ctc_head_stage2.pt`, `ger/` |
+| Optional wrapper | `one_go/train.py` | Calls Stage-1 and/or Stage-2 with a generated config under `one_go/runs/` |
 
-| Stage | Frozen | Optimised | Loss |
-|---|---|---|---|
-| Stage 1 | ASR encoder, VSR encoder | identity fuser, aligner, projection heads | bidirectional InfoNCE (`L_{A→V} + L_{V→A}`) + CTC |
-| Stage 2 | none | everything (incl. LoRA on Llama-3-8B) | CTC + GER cross-entropy + bidirectional InfoNCE |
-
-> **Spec §7 invariant (non-negotiable):** `lr_stage2 == lr_stage1 × 0.1`.
-> `scripts/train_stage2.py` enforces this at runtime and raises `ValueError` if `configs/default.yaml` is edited to violate it. The default values (`stage1.lr = 1e-3`, `stage2.lr = 1e-4`, `stage2.lr_ratio_to_stage1 = 0.1`) already satisfy it.
+`configs/default.yaml` defaults to `stub_backbones: true`, so both trainers can run a wiring rehearsal without downloading the real backbones. For real training, set `stub_backbones: false`, use `device: cuda`, and make sure the backbone weights in the README are available.
 
 ---
 
-## Stage 1
+## Stage-1: `train_identity.py`
 
-**Goal**: learn the ID-conditioned cross-modal alignment so the C2 aligner produces useful `f_align` before the LLM is in the loop.
+Stage-1 trains the C1 identity fuser with bidirectional InfoNCE over voice and face embeddings. Backbones are constructed through the wrappers and stay frozen.
+
+Basic run:
 
 ```bash
 python scripts/train_identity.py \
     --config configs/default.yaml \
-    --manifest data/train_manifest.json
+    --manifest data/your_real_train_manifest.jsonl \
+    --out checkpoints/stage1/ \
+    --epochs 5 \
+    --wandb-project avsd-ger \
+    --wandb-run-name stage1-real-v1
 ```
 
-* **Frozen**: Whisper encoder, AV-HuBERT encoder.
-* **Trained**: identity fuser, ID-conditioned aligner (`Concat+Linear` injector + cross-attn blocks), CTC head over expanded token-level features.
-* **Objective**: `L_total = L_{A→V} + L_{V→A} + L_CTC` (config: `objective: [infonce_av, infonce_va, ctc]`).
-* **Stop rule**: `av_sid_acc_plateau` on a held-out set.
-* **InfoNCE temperature**: `0.07`. Bidirectional is non-optional — single-direction collapses the alignment.
+AMI visual manifest directory run:
+
+```bash
+python scripts/train_identity.py \
+    --config configs/default.yaml \
+    --manifest-dir data/ami_train_visual \
+    --out checkpoints/stage1/
+```
+
+Important arguments:
+
+| Argument | Meaning |
+|---|---|
+| `--config` | YAML config path. Defaults to `configs/default.yaml`. |
+| `--manifest` | JSONL training manifest, one utterance per line. |
+| `--manifest-dir` | Directory of AMI visual per-meeting manifests. The script resolves the sibling `<dir>.jsonl`. |
+| `--out` | Output directory. Defaults to `checkpoints/stage1/`. |
+| `--epochs` | Overrides `training.stage1.epochs`. |
+| `--lr` | Overrides `training.stage1.lr`. |
+| `--warmup-steps` | Overrides `training.stage1.warmup_steps`. |
+
+Expected JSONL fields:
+
+| Field | Required | Notes |
+|---|---|---|
+| `wav_path` | Real mode: yes | Audio path. Relative paths are resolved from the repo root. |
+| `face_path` | Real mode: yes | Face crop or enrollment image path. |
+| `lip_conf` | Recommended | Per-frame lip confidence for the dual gate. |
+| `speaker_id` / `ref_speaker` | Optional | Used for bookkeeping; cold-start pseudo-labels still drive Stage-1 training. |
+
+If `--manifest` points to a missing file, the script falls back to 8 synthetic records. That is useful for stub checks, but it is not real training.
+
+Output:
+
+```text
+checkpoints/stage1/identity_pool_stage1.pt
+```
 
 ---
 
-## Stage 2
+## Stage-2: `train_stage2.py`
 
-**Goal**: end-to-end fine-tune with the GER head in the loop.
+Stage-2 composes CTC, GER cross-entropy, and InfoNCE depending on `--warmup`.
+
+Basic full run:
 
 ```bash
 python scripts/train_stage2.py \
     --config configs/default.yaml \
-    --manifest data/train_manifest.json
+    --manifest data/your_real_train_manifest.jsonl \
+    --stage1-pool checkpoints/stage1/identity_pool_stage1.pt \
+    --out checkpoints/stage2/ \
+    --warmup joint \
+    --wandb-project avsd-ger \
+    --wandb-run-name stage2-real-v1
 ```
 
-* **Trained**: identity fuser, aligner, CTC head, GER LoRA (Llama-3-8B), Q-Former projector, id_proj.
-* **Loss**: `L_total = w_ctc · L_CTC + w_ger · L_GER_CE + w_info · L_InfoNCE`, defaults `w_ctc = 1.0, w_ger = 1.0, w_info = 0.5`.
-* **Teacher forcing**: GER cross-entropy is computed with `labels = [-100 over prompt span, target_ids over answer span]`, off-by-one shifted. The same `_render_text` / `_inputs_embeds` paths used at inference are reused so the prompt is identical between train and eval (no train-test prompt skew).
-* **LR**: `1e-4`, exactly `0.1 ×` Stage 1. Runtime guard:
-  ```python
-  expected = stage1_lr * ratio
-  if abs(stage2_lr_cfg - expected) > 1e-9:
-      raise ValueError("Stage 2 LR must equal Stage 1 LR * 0.1 ... Spec §7 forbids deviation.")
-  ```
+The script enforces the learning-rate invariant at startup:
 
-**Checkpoints land at:**
-* `out/identity_pool_stage2.pt`
-* `out/aligner_stage2.pt`
-* `out/ctc_head_stage2.pt`
-* GER LoRA adapters via `peft`'s `save_pretrained` (path configured in the script).
+```text
+training.stage2.lr == training.stage1.lr * training.stage2.lr_ratio_to_stage1
+```
+
+Defaults satisfy this with `1e-4 == 1e-3 * 0.1`. If you pass `--lr`, the script updates the ratio in memory for that run.
+
+### Warmup Modes
+
+| Mode | Loaded modules | Trainable pieces | Loss weights |
+|---|---|---|---|
+| `joint` | ASR, VSR, identity, aligner, CTC, GER | fuser, aligner, CTC, GER LoRA/projectors | `ctc=1`, `ger=1`, `info=0.5` |
+| `align_ctc` | ASR, VSR, identity, aligner, CTC | aligner, CTC | `ctc=1`, `ger=0`, `info=0` |
+| `ger_lora` | ASR, GER; with `--no-encoder-context`, also identity and optionally VSR for text/lip n-best context | GER LoRA only; QFormer/id projector frozen | `ctc=0`, `ger=1`, `info=0` |
+| `ger_qformer` | ASR, VSR, identity, GER | GER LoRA, QFormer, id projector | `ctc=0`, `ger=1`, `info=0` |
+
+`--no-encoder-context` disables Whisper/AV-HuBERT encoder features for GER and is valid only with `--warmup ger_lora`.
+
+Low-memory GER LoRA run:
+
+```bash
+python scripts/train_stage2.py \
+    --config configs/default.yaml \
+    --manifest data/your_real_train_manifest.jsonl \
+    --stage1-pool checkpoints/stage1/identity_pool_stage1.pt \
+    --out checkpoints/stage2_ger_lora/ \
+    --warmup ger_lora \
+    --no-encoder-context \
+    --llm-quant 4bit
+```
+
+Useful initialization arguments:
+
+| Argument | Meaning |
+|---|---|
+| `--stage1-pool` | Loads a Stage-1 identity pool before Stage-2. This initializes the fuser. |
+| `--aligner-checkpoint` | Optional aligner `state_dict` to initialize a warmup or joint run. |
+| `--ctc-checkpoint` | Optional CTC head `state_dict` to initialize a warmup or joint run. |
+| `--ger-projectors-checkpoint` | Optional `ger_projectors.pt` containing `qformer` and `id_proj` state dicts. |
+
+Other practical overrides:
+
+| Argument | Meaning |
+|---|---|
+| `--manifest-dir` | Same AMI visual directory convenience as Stage-1. |
+| `--epochs` | Overrides `training.stage2.epochs`. |
+| `--lr` | Overrides `training.stage2.lr` and adjusts the in-memory ratio guard. |
+| `--ger-mode` | Overrides `cfg.ger.mode`: `audio_only`, `av`, or `visual_only`. |
+| `--asr-backend` | Overrides ASR backend: `faster-whisper` or `openai-whisper`. |
+| `--asr-beam-size` | Overrides ASR beam size. |
+| `--asr-n-best` | Overrides ASR n-best count. |
+| `--llm-quant` | Overrides Llama precision: `auto`, `fp16`, `bf16`, `int8`, or `4bit`. |
+| `--debug-loss-every` | Prints detailed loss/debug info every N steps. |
+| `--no-fail-on-nonfinite` | Logs non-finite losses instead of failing immediately. |
+| `--grad-clip` | Gradient clipping norm. Defaults to `1.0`. |
+
+Expected JSONL fields for real mode:
+
+| Field | Required | Notes |
+|---|---|---|
+| `wav_path` / `audio` | Yes | Audio path. |
+| `video_path` / `mouth_roi` / `video` | Required unless using a text-only GER path | `.npy` mouth ROI for AV-HuBERT is the common path. |
+| `face_path` / `enrollment_face` | Required when identity modules are loaded | Face crop or enrollment image. |
+| `target` / `ref_text` | Yes | Text target for CTC/GER. |
+| `neg_wav_path`, `neg_face_path` | Optional | Used for negative identity pairs when present. |
+
+If the manifest path is missing, Stage-2 falls back to 8 synthetic records. That is only a stub rehearsal.
+
+Outputs:
+
+```text
+checkpoints/stage2/identity_pool_stage2.pt
+checkpoints/stage2/aligner_stage2.pt
+checkpoints/stage2/ctc_head_stage2.pt
+checkpoints/stage2/ger/ger_projectors.pt
+checkpoints/stage2/ger/lora_adapter/   # when a PEFT LoRA adapter exists
+checkpoints/stage2/ger/tokenizer/       # when a tokenizer is available
+```
+
+Important: `identity_pool_stage2.pt` stores the trained fuser state, but it does not enroll evaluation speakers. Before final evaluation, load it with `scripts/enroll_identity.py --in-pool` and save a separate enrolled pool.
 
 ---
 
-## Switching off stub mode
+## Optional Wrapper: `one_go/train.py`
 
-`configs/default.yaml` has `stub_backbones: true` by default so wiring tests pass without weights. To actually train:
+`one_go/train.py` writes a runtime config and delegates to the same scripts above.
 
-1. Set `stub_backbones: false`.
-2. Make sure each backbone can resolve weights:
-   * Whisper: HF cache populated by `faster-whisper` and `transformers` on first call.
-   * AV-HuBERT: `checkpoints/avhubert_large_lrs3_iter5.pt` exists and matches `vsr.config`.
-   * ECAPA: `speechbrain/spkrec-ecapa-voxceleb` reachable.
-   * InsightFace: `buffalo_l` model pack downloads on first call.
-   * Llama-3-8B: `hf auth login` with a token that has access to `meta-llama/Meta-Llama-3-8B-Instruct`. (Legacy `huggingface-cli login` is deprecated; the new unified CLI ships as `hf`.)
-3. Confirm `device: cuda` is set (or `mps` for Apple Silicon dev).
+```bash
+python one_go/train.py \
+    --stage all \
+    --manifest data/your_real_train_manifest.jsonl \
+    --real \
+    --device cuda \
+    --stage2-warmup joint
+```
 
----
-
-## Notes / TODOs visible in the code
-
-* `avsd_ger/backbones/asr_whisper.py` — the N-best is currently the 1-best repeated `n_best` times (search for `# TODO: replace duplicated 1-best padding with real CT2 beam outputs`). Wiring real beam outputs from CT2 is required before Stage 2 training, otherwise `L_GER_CE` sees a degenerate prompt and `nbest_variance` in the C3 confidence is identically zero.
-* CTC head expansion factor is `4×` by default (`avsd_ger/training/ctc_loss.py`). If your corpus has very long words you may need to bump this; the loss will throw an inputs-shorter-than-targets error otherwise.
+Use it when you want a quick single command. Use the direct scripts when debugging, changing warmup/checkpoint inputs, or running on a cluster scheduler.
