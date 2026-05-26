@@ -287,7 +287,7 @@ class AVHubertVSR(nn.Module):
                     text = tgt_dict.string(tokens.int().cpu(), bpe_symbol="subword_nmt")
                 except (TypeError, AttributeError):
                     text = tgt_dict.string(tokens.int().cpu())
-                text = " ".join(text.strip().split())
+                text = self._postprocess_lip_text(text)
                 key = text.lower()
                 if text and key not in seen:
                     seen.add(key)
@@ -307,6 +307,21 @@ class AVHubertVSR(nn.Module):
             else:
                 _log.getLogger(__name__).warning("VSR lip decode failed: %s", self.last_decode_error)
             return []
+
+    @staticmethod
+    def _postprocess_lip_text(text: str) -> str:
+        """Normalize AV-HuBERT VSR dictionary output into plain text.
+
+        Fine-tuned AV-HuBERT VSR checkpoints use sentencepiece-style pieces
+        marked with U+2581 (e.g. ``▁c le an``). fairseq Dictionary.string()
+        returns those pieces space-separated, so scoring the raw string
+        artificially inflates WER. SentencePiece decoding is equivalent to
+        concatenating pieces and then turning ``▁`` into a word boundary.
+        """
+        text = text.strip()
+        if "▁" in text:
+            text = text.replace(" ", "").replace("▁", " ")
+        return " ".join(text.strip().split())
 
     # ------------------------------------------------------------------ stub
     def _stub_extract(self, video_frames) -> dict[str, Any]:
