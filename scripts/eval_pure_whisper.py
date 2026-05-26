@@ -38,6 +38,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from avsd_ger.wandb_logger import WandbLogger, add_wandb_args  # noqa: E402
+from avsd_ger.eval.metrics import compute_sa_wer, compute_scr  # noqa: E402
+from avsd_ger.eval.session import SessionTurnResult  # noqa: E402
 
 
 def _resolve_paths(spec: str) -> list[Path]:
@@ -98,6 +100,18 @@ def _row_id(row: dict[str, Any], i: int) -> str:
     return str(row.get("turn_id") or row.get("utt_id") or row.get("id") or f"utt_{i:06d}")
 
 
+def _row_speaker(row: dict[str, Any], source: str) -> str | None:
+    if source == "none":
+        return None
+    if source == "ref_speaker":
+        return row.get("ref_speaker") or row.get("speaker_id")
+    if source == "frontend_speaker":
+        # Degraded manifests only set frontend_speaker on flipped turns; unflipped
+        # turns inherit the reference/original frontend speaker.
+        return row.get("frontend_speaker") or row.get("ref_speaker") or row.get("speaker_id")
+    return row.get(source)
+
+
 def _tokens(text: str) -> list[str]:
     # AMI references contain punctuation as separated tokens. For a Whisper-only
     # ASR baseline, score lexical words case-insensitively and ignore punctuation.
@@ -156,6 +170,8 @@ class UtteranceResult:
     audio: str
     ref_text: str
     hyp_text: str
+    ref_speaker: str | None
+    hyp_speaker: str | None
     n_ref_words: int
     n_sub: int
     n_del: int
@@ -225,6 +241,15 @@ def main() -> int:
     p.add_argument("--beam-size", type=int, default=5)
     p.add_argument("--language", default=None)
     p.add_argument("--limit", type=int, default=None, help="Optional quick smoke-test limit.")
+    p.add_argument(
+        "--diarization-source",
+        default="none",
+        help=(
+            "Optional manifest field used as hypothesis speaker labels for "
+            "Whisper+diarization SA-WER. Use 'ref_speaker' for oracle diarization, "
+            "'frontend_speaker' for degraded/frontend labels, or 'none' for text-only WER."
+        ),
+    )
     p.add_argument("--out", default=str(ROOT / "out/pure_whisper_eval.json"))
     add_wandb_args(p)
     args = p.parse_args()
@@ -251,6 +276,7 @@ def main() -> int:
             "manifest": args.manifest,
             "n_manifests": len(manifests),
             "limit": args.limit,
+            "diarization_source": args.diarization_source,
             "out": args.out,
         },
     )
@@ -264,6 +290,7 @@ def main() -> int:
     )
 
     results: list[UtteranceResult] = []
+    speaker_turns: list[SessionTurnResult] = []
     total_ref = total_sub = total_del = total_ins = 0
     seen = 0
     for manifest_path in manifests:
@@ -272,6 +299,8 @@ def main() -> int:
                 break
             audio_path = _project_path(_row_audio(row))
             ref_text = _row_ref(row)
+            ref_speaker = row.get("ref_speaker") or row.get("speaker_id")
+            hyp_speaker = _row_speaker(row, args.diarization_source)
             hyp_text = runner.transcribe(audio_path, beam_size=args.beam_size)
             ref_toks = _tokens(ref_text)
             hyp_toks = _tokens(hyp_text)
@@ -284,12 +313,28 @@ def main() -> int:
                 audio=str(audio_path),
                 ref_text=ref_text,
                 hyp_text=hyp_text,
+                ref_speaker=str(ref_speaker) if ref_speaker is not None else None,
+                hyp_speaker=str(hyp_speaker) if hyp_speaker is not None else None,
                 n_ref_words=n_ref,
                 n_sub=n_sub,
                 n_del=n_del,
                 n_ins=n_ins,
                 wer=wer,
             ))
+            if args.diarization_source != "none":
+                speaker_turns.append(SessionTurnResult(
+                    turn_id=_row_id(row, i),
+                    start=float(row.get("start", seen)),
+                    end=float(row.get("end", seen + 1)),
+                    hyp_text=hyp_text,
+                    hyp_speaker=str(hyp_speaker) if hyp_speaker is not None else None,
+                    confidence=0.0,
+                    s_acoustic=None,
+                    iterations=1,
+                    pool_updated=False,
+                    ref_text=ref_text,
+                    ref_speaker=str(ref_speaker) if ref_speaker is not None else None,
+                ))
             total_ref += n_ref
             total_sub += n_sub
             total_del += n_del
@@ -312,6 +357,22 @@ def main() -> int:
 
     total_err = total_sub + total_del + total_ins
     wer = total_err / total_ref if total_ref else 0.0
+    speaker_metrics: dict[str, Any] = {}
+    if args.diarization_source != "none":
+        sa_wer, sa_details = compute_sa_wer(speaker_turns)
+        scr, scr_details = compute_scr(speaker_turns)
+        speaker_metrics = {
+            "sa_wer": sa_wer,
+            "speaker_attributed_word_accuracy": 1.0 - sa_wer,
+            "scr": scr,
+            "diarization_source": args.diarization_source,
+            "n_speaker_turns": len(speaker_turns),
+            "details": {
+                "sa_wer": sa_details,
+                "scr": scr_details,
+            },
+        }
+
     payload = {
         "backend": args.backend,
         "model": args.model,
@@ -323,6 +384,7 @@ def main() -> int:
         "manifest": args.manifest,
         "n_manifests": len(manifests),
         "n_utterances": len(results),
+        "diarization_source": args.diarization_source,
         "metrics": {
             "wer": wer,
             "word_accuracy": 1.0 - wer,
@@ -330,7 +392,9 @@ def main() -> int:
             "n_sub": total_sub,
             "n_del": total_del,
             "n_ins": total_ins,
+            **{k: v for k, v in speaker_metrics.items() if k != "details"},
         },
+        "speaker_metrics": speaker_metrics,
         "utterances": [asdict(x) for x in results],
     }
 
@@ -347,6 +411,11 @@ def main() -> int:
         "summary/n_sub": total_sub,
         "summary/n_del": total_del,
         "summary/n_ins": total_ins,
+        **({
+            "summary/sa_wer": speaker_metrics["sa_wer"],
+            "summary/scr": speaker_metrics["scr"],
+            "summary/speaker_attributed_word_accuracy": speaker_metrics["speaker_attributed_word_accuracy"],
+        } if speaker_metrics else {}),
         "summary/out": str(out),
     })
     wb.log({
@@ -354,6 +423,10 @@ def main() -> int:
         "final/word_accuracy": 1.0 - wer,
         "final/n_ref_words": total_ref,
         "final/n_utterances": len(results),
+        **({
+            "final/sa_wer": speaker_metrics["sa_wer"],
+            "final/scr": speaker_metrics["scr"],
+        } if speaker_metrics else {}),
     }, step=seen)
     wb.finish()
     return 0
