@@ -386,6 +386,7 @@ scripts/              # CLI entry points
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | C1/C2/C3 module-level design, data shapes, key implementation choices. |
 | [`docs/RELATED_WORK.md`](docs/RELATED_WORK.md) | Side-by-side comparison vs. DualHyp, AVSD, DiarizationLM. |
 | [`docs/TRAINING.md`](docs/TRAINING.md) | Stage-1 / Stage-2 recipes, loss weights, the spec §7 LR invariant. |
+| [`docs/SERVER_TRAINING_RECIPE.md`](docs/SERVER_TRAINING_RECIPE.md) | Server AMI visual recipe: identity -> align_ctc -> joint training plus W&B/eval commands. |
 | [`docs/REAL_MODEL_WORKFLOW.md`](docs/REAL_MODEL_WORKFLOW.md) | Current real-model setup, manifest expectations, Stage-1/Stage-2 commands, re-enrollment, and eval workflow. |
 | [`docs/EVALUATION.md`](docs/EVALUATION.md) | Manifest format, the five primary metrics, power monitor, ablation runner. |
 | [`docs/LEGACY_PHASE_ROLLOUT.md`](docs/LEGACY_PHASE_ROLLOUT.md) | Archived Phase 0/A-G rollout notes from the old README. Not the current training workflow. |
