@@ -677,6 +677,27 @@ def main() -> int:
              "Default: read from configs/default.yaml (ger.llm_quant).",
     )
     p.add_argument(
+        "--llm-name",
+        default=None,
+        help=(
+            "Override cfg.ger.llm_name without editing YAML. This selects the "
+            "causal LLM used by the GER head/LoRA adapter. default.yaml sets "
+            "meta-llama/Meta-Llama-3-8B-Instruct. Example: "
+            "Qwen/Qwen2.5-3B-Instruct."
+        ),
+    )
+    p.add_argument(
+        "--max-new-tokens",
+        type=int,
+        default=None,
+        help=(
+            "Override cfg.ger.max_new_tokens without editing YAML. This caps "
+            "how many tokens GER may generate per turn; lower it when a small "
+            "LLM keeps continuing/repeating after the correction. default.yaml "
+            "sets 64."
+        ),
+    )
+    p.add_argument(
         "--ger-mode",
         default=None,
         choices=["audio_only", "av", "visual_only"],
@@ -715,6 +736,12 @@ def main() -> int:
     if args.llm_quant is not None:
         cfg.setdefault("ger", {})["llm_quant"] = args.llm_quant
         print(f"[eval_ablations] Override llm_quant -> {args.llm_quant}")
+    if args.llm_name is not None:
+        cfg.setdefault("ger", {})["llm_name"] = args.llm_name
+        print(f"[eval_ablations] Override ger.llm_name -> {args.llm_name}")
+    if args.max_new_tokens is not None:
+        cfg.setdefault("ger", {})["max_new_tokens"] = args.max_new_tokens
+        print(f"[eval_ablations] Override ger.max_new_tokens -> {args.max_new_tokens}")
     if args.ger_mode is not None:
         cfg.setdefault("ger", {})["mode"] = args.ger_mode
         print(f"[eval_ablations] Override ger.mode -> {args.ger_mode}")

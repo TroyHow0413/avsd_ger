@@ -568,6 +568,27 @@ def main() -> None:
         help="Override cfg.ger.mode for Stage-2 training.",
     )
     ap.add_argument(
+        "--llm-name",
+        default=None,
+        help=(
+            "Override cfg.ger.llm_name without editing YAML. This selects the "
+            "causal LLM used by the GER head/LoRA path. default.yaml sets "
+            "meta-llama/Meta-Llama-3-8B-Instruct. Example: "
+            "Qwen/Qwen2.5-3B-Instruct."
+        ),
+    )
+    ap.add_argument(
+        "--max-new-tokens",
+        type=int,
+        default=None,
+        help=(
+            "Override cfg.ger.max_new_tokens without editing YAML. This caps "
+            "how many tokens GER may generate during inference/eval; lower it "
+            "when a small LLM keeps continuing/repeating after the correction. "
+            "default.yaml sets 64."
+        ),
+    )
+    ap.add_argument(
         "--asr-backend",
         default=None,
         choices=["faster-whisper", "openai-whisper"],
@@ -640,6 +661,12 @@ def main() -> None:
     if args.ger_mode is not None:
         cfg.setdefault("ger", {})["mode"] = args.ger_mode
         print(f"[train_stage2] Override ger.mode -> {args.ger_mode}")
+    if args.llm_name is not None:
+        cfg.setdefault("ger", {})["llm_name"] = args.llm_name
+        print(f"[train_stage2] Override ger.llm_name -> {args.llm_name}")
+    if args.max_new_tokens is not None:
+        cfg.setdefault("ger", {})["max_new_tokens"] = args.max_new_tokens
+        print(f"[train_stage2] Override ger.max_new_tokens -> {args.max_new_tokens}")
     if args.asr_backend is not None:
         cfg.setdefault("asr", {})["backend"] = args.asr_backend
         print(f"[train_stage2] Override asr.backend -> {args.asr_backend}")
