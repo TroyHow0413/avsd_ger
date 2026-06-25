@@ -376,11 +376,26 @@ class AVSDGERPipeline:
         ger_out: dict[str, Any] | None = None
         rep = None
         decision: LoopDecision | None = None
-        speaker_mask_v_device = (
-            speaker_mask_v.to(self.device) if speaker_mask_v is not None else None
-        )
+        vsr_len = int(vsr_out["vsr_features"].shape[0])
+        if use_visual:
+            if speaker_mask_v is not None and int(speaker_mask_v.numel()) != vsr_len:
+                raise ValueError(
+                    "speaker_mask_v length must match vsr_features length "
+                    f"for visual turns: got {int(speaker_mask_v.numel())}, expected {vsr_len}"
+                )
+            if lip_conf_v is not None and int(lip_conf_v.numel()) != vsr_len:
+                raise ValueError(
+                    "lip_conf_v length must match vsr_features length "
+                    f"for visual turns: got {int(lip_conf_v.numel())}, expected {vsr_len}"
+                )
+            speaker_mask_v_device = (
+                speaker_mask_v.to(self.device) if speaker_mask_v is not None else None
+            )
+            lip_conf_v_device = lip_conf_v.to(self.device) if lip_conf_v is not None else None
+        else:
+            speaker_mask_v_device = None
+            lip_conf_v_device = None
         snr_per_tok_device = snr_per_tok.to(self.device) if snr_per_tok is not None else None
-        lip_conf_v_device = lip_conf_v.to(self.device) if lip_conf_v is not None else None
 
         # Ablation: w/o C3 -> cap iterations at 1 and never update pool
         max_iters = 1 if self.disable_c3 else self.loop.max_iters
