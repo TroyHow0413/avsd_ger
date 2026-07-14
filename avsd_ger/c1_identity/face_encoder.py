@@ -6,8 +6,6 @@ internal detector when given a raw frame.
 """
 from __future__ import annotations
 
-from typing import Any
-
 import numpy as np
 import torch
 import torch.nn as nn
@@ -26,9 +24,21 @@ class FaceEncoder(nn.Module):
             self._load()
 
     def _load(self) -> None:
+        import onnxruntime as ort
         from insightface.app import FaceAnalysis
+
         ctx_id = 0 if self.device.type == "cuda" else -1
-        self._app = FaceAnalysis(name=self.pack_name)
+        available = ort.get_available_providers()
+        if self.device.type == "cuda":
+            if "CUDAExecutionProvider" not in available:
+                raise RuntimeError(
+                    "FaceEncoder requested CUDA, but ONNX Runtime does not expose "
+                    f"CUDAExecutionProvider. Available providers: {available}"
+                )
+            providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+        else:
+            providers = ["CPUExecutionProvider"]
+        self._app = FaceAnalysis(name=self.pack_name, providers=providers)
         self._app.prepare(ctx_id=ctx_id, det_size=(640, 640))
 
     @torch.no_grad()

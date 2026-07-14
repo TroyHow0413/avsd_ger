@@ -72,6 +72,8 @@ class AVSDGERPipeline:
                 f"Unsupported ger.mode={self.ger_mode!r}; "
                 "expected audio_only, av, or visual_only"
             )
+        self.disable_lip_hyp = bool(cfg.get("ger", {}).get("disable_lip_hyp", False))
+        self.disable_av_context = bool(cfg.get("ger", {}).get("disable_av_context", False))
 
         # Backbones
         self.asr = WhisperASR(cfg["asr"], stub=stub, device=self.device)
@@ -289,17 +291,26 @@ class AVSDGERPipeline:
                 "lip_hyp": "",
             }
         effective_ger_mode = self.ger_mode if use_visual else "audio_only"
-        use_av_context = effective_ger_mode in {"av", "visual_only"}
+        use_av_context = (
+            effective_ger_mode in {"av", "visual_only"}
+            and not self.disable_av_context
+        )
+        raw_lip_hyp = vsr_out.get("lip_hyp", "")
+        prompt_lip_hyp = "" if self.disable_lip_hyp else raw_lip_hyp
         visual_debug = {
             "requested_ger_mode": self.ger_mode,
             "effective_ger_mode": effective_ger_mode,
             "wants_visual": wants_visual,
             "has_visual": use_visual,
             "use_av_context": use_av_context,
+            "disable_lip_hyp": self.disable_lip_hyp,
+            "disable_av_context": self.disable_av_context,
             "video_frames": _tensor_debug(video_frames),
             "vsr_features": _tensor_debug(vsr_out.get("vsr_features")),
-            "lip_hyp": vsr_out.get("lip_hyp", ""),
-            "lip_hyp_token_count": len(self._gate_tokens(vsr_out.get("lip_hyp", ""))),
+            "lip_hyp": raw_lip_hyp,
+            "prompt_lip_hyp": prompt_lip_hyp,
+            "lip_hyp_token_count": len(self._gate_tokens(raw_lip_hyp)),
+            "prompt_lip_hyp_token_count": len(self._gate_tokens(prompt_lip_hyp)),
             "vsr_emit_text": bool(getattr(self.vsr, "emit_text", False)) if self.vsr is not None else False,
             "vsr_generator_built": bool(getattr(self.vsr, "_generator", None)) if self.vsr is not None else False,
             "vsr_decode_error": getattr(self.vsr, "last_decode_error", None) if self.vsr is not None else None,
@@ -429,7 +440,7 @@ class AVSDGERPipeline:
                     f_align=f_align,
                     nbest=asr_out.nbest,
                     nbest_scores=asr_out.nbest_scores,
-                    lip_hyp=vsr_out.get("lip_hyp", ""),
+                    lip_hyp=prompt_lip_hyp,
                     speaker_id=speaker_id_hint,
                     mode=effective_ger_mode,
                     use_av_context=use_av_context,
@@ -542,7 +553,8 @@ class AVSDGERPipeline:
                 "asr_top": asr_top,
                 "asr_nbest": list(asr_out.nbest),
                 "asr_nbest_scores": [float(x) for x in asr_out.nbest_scores],
-                "lip_hyp": vsr_out.get("lip_hyp", ""),
+                "lip_hyp": raw_lip_hyp,
+                "prompt_lip_hyp": prompt_lip_hyp,
                 "prompt": ger_out.get("prompt"),
                 "raw_generation_before_gate": raw_generated_before_gate,
                 "cleaned_ger_text_before_gate": cleaned_generated_before_gate,
@@ -608,6 +620,8 @@ class AVSDGERPipeline:
                     "speaker_special_token": self.ger.speaker_special_token,
                     "use_av_context": use_av_context,
                     "mode": effective_ger_mode,
+                    "disable_lip_hyp": self.disable_lip_hyp,
+                    "disable_av_context": self.disable_av_context,
                 },
                 "c3": {
                     "disable_c3": self.disable_c3,

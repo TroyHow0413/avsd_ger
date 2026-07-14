@@ -9,6 +9,8 @@ This module stays frozen — C2 learns the alignment, not AV-HuBERT itself.
 """
 from __future__ import annotations
 
+from pathlib import Path
+import sys
 from typing import Any
 
 import torch
@@ -45,10 +47,22 @@ class AVHubertVSR(nn.Module):
 
     # ------------------------------------------------------------------ loader
     def _load_real(self) -> None:
+        # Prefer the AV-HuBERT checkout that belongs to this repository. A
+        # stale PYTHONPATH entry can otherwise silently import another clone
+        # with different code or dependencies.
+        repo_root = Path(__file__).resolve().parents[2]
+        local_paths = (repo_root / "av_hubert", repo_root / "av_hubert" / "avhubert")
+        for local_path in reversed(local_paths):
+            if local_path.exists():
+                path_text = str(local_path)
+                while path_text in sys.path:
+                    sys.path.remove(path_text)
+                sys.path.insert(0, path_text)
+
         # AV-HuBERT uses fairseq's checkpoint loader. We import lazily to keep
         # the skeleton importable without fairseq.
         try:
-            import fairseq
+            import fairseq  # noqa: F401 - import validates task runtime availability
             from fairseq import checkpoint_utils
         except ImportError as e:
             raise RuntimeError(
