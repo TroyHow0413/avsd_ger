@@ -708,6 +708,22 @@ def main() -> int:
         ),
     )
     p.add_argument(
+        "--disable-lip-hyp",
+        action="store_true",
+        help=(
+            "Keep extracting visual features, but pass an empty Visual hypothesis "
+            "to GER. Useful for isolating whether lip_hyp text hurts correction."
+        ),
+    )
+    p.add_argument(
+        "--disable-av-context",
+        action="store_true",
+        help=(
+            "Disable the <AV_CTX> soft-prefix while keeping the selected ger.mode. "
+            "Useful for isolating whether continuous visual context hurts correction."
+        ),
+    )
+    p.add_argument(
         "--asr-backend",
         default=None,
         choices=["faster-whisper", "openai-whisper", "transformers"],
@@ -745,6 +761,12 @@ def main() -> int:
     if args.ger_mode is not None:
         cfg.setdefault("ger", {})["mode"] = args.ger_mode
         print(f"[eval_ablations] Override ger.mode -> {args.ger_mode}")
+    if args.disable_lip_hyp:
+        cfg.setdefault("ger", {})["disable_lip_hyp"] = True
+        print("[eval_ablations] Disable GER lip_hyp text input")
+    if args.disable_av_context:
+        cfg.setdefault("ger", {})["disable_av_context"] = True
+        print("[eval_ablations] Disable GER <AV_CTX> soft-prefix")
     if args.asr_backend is not None:
         cfg.setdefault("asr", {})["backend"] = args.asr_backend
         print(f"[eval_ablations] Override asr.backend -> {args.asr_backend}")
