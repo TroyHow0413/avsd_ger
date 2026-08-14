@@ -139,7 +139,9 @@ ger:
   # Dense Qwen backend, loaded strictly from this local HF directory.
   backend: local_hf
   model_family: qwen2.5-3b-instruct
+  model_id: Qwen/Qwen2.5-3B-Instruct
   model_path: checkpoints/Qwen2.5-3B-Instruct
+  allow_download: true
   max_new_tokens: 24        # 24 is plenty for GER on a single utterance (typical sentence < 30 tokens). Halves the KV cache vs. 128 — saves ~0.5 GB on 16 GB GPUs.
   speaker_special_token: "[Speaker: ID_i]"   # register before training
   dtype: auto

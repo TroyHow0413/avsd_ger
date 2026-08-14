@@ -1,7 +1,9 @@
 import tempfile
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
+import sys
+from types import ModuleType, SimpleNamespace
+from unittest.mock import patch
 
 import torch
 
@@ -99,10 +101,58 @@ class GERBackendRefactorTest(unittest.TestCase):
 
     def test_local_backend_rejects_missing_path_without_downloading(self):
         cfg = ger_config()
-        cfg.update({"backend": "local_hf", "model_path": "missing/model/path"})
+        cfg.update({
+            "backend": "local_hf",
+            "model_path": "missing/model/path",
+            "allow_download": False,
+        })
 
-        with self.assertRaisesRegex(FileNotFoundError, "never downloads"):
-            LocalHFCausalLMBackend(cfg, torch.device("cpu"))
+        with self.assertRaisesRegex(FileNotFoundError, "allow_download"):
+            LocalHFCausalLMBackend._resolve_model_path(cfg)
+
+    def test_missing_local_model_can_be_materialized_from_hugging_face(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "qwen"
+            calls = []
+
+            def fake_snapshot_download(*, repo_id, local_dir):
+                calls.append((repo_id, local_dir))
+                (Path(local_dir) / "config.json").write_text(
+                    "{}", encoding="utf-8"
+                )
+
+            fake_hub = ModuleType("huggingface_hub")
+            fake_hub.snapshot_download = fake_snapshot_download
+            cfg = ger_config()
+            cfg.update({
+                "model_path": str(target),
+                "model_id": "Qwen/Qwen2.5-3B-Instruct",
+                "allow_download": True,
+            })
+            with patch.dict(sys.modules, {"huggingface_hub": fake_hub}):
+                resolved = LocalHFCausalLMBackend._resolve_model_path(cfg)
+
+            self.assertEqual(Path(resolved), target.resolve())
+            self.assertEqual(
+                calls,
+                [("Qwen/Qwen2.5-3B-Instruct", str(target))],
+            )
+
+    def test_existing_local_model_skips_hugging_face_download(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "qwen"
+            target.mkdir()
+            (target / "config.json").write_text("{}", encoding="utf-8")
+            cfg = ger_config()
+            cfg.update({
+                "model_path": str(target),
+                "model_id": "Qwen/Qwen2.5-3B-Instruct",
+                "allow_download": True,
+            })
+
+            resolved = LocalHFCausalLMBackend._resolve_model_path(cfg)
+
+            self.assertEqual(Path(resolved), target.resolve())
 
     def test_generation_policy_uses_only_scored_suffix(self):
         scores = (torch.tensor([[0.0, 2.0, 1.0]]), torch.tensor([[3.0, 0.0, 1.0]]))
@@ -122,6 +172,12 @@ class GERBackendRefactorTest(unittest.TestCase):
 
         self.assertEqual(qwen["model_family"], "qwen2.5-3b-instruct")
         self.assertEqual(llama["model_family"], "llama-3.2-3b-instruct")
+        self.assertEqual(qwen["model_id"], "Qwen/Qwen2.5-3B-Instruct")
+        self.assertEqual(
+            llama["model_id"], "meta-llama/Llama-3.2-3B-Instruct"
+        )
+        self.assertTrue(qwen["allow_download"])
+        self.assertTrue(llama["allow_download"])
         self.assertEqual(qwen["lora"]["target_modules"], "auto")
         self.assertEqual(llama["lora"]["target_modules"], "auto")
 

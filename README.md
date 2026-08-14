@@ -152,8 +152,8 @@ source scripts/setup_avhubert_env.sh
 #     Add-Content "$env:CONDA_PREFIX\etc\conda\activate.d\avhubert_path.bat" `
 #         "@set PYTHONPATH=D:\GitHub\avsd_ger_claude\av_hubert;D:\GitHub\avsd_ger_claude\av_hubert\avhubert;%PYTHONPATH%"
 
-# GER never downloads model weights. Put a complete local Hugging Face model
-# directory at one of the configured paths before setting stub_backbones=false:
+# GER reuses a complete local Hugging Face model directory when present. If it
+# is missing and ger.allow_download=true, it downloads ger.model_id there once:
 #   checkpoints/Qwen2.5-3B-Instruct
 #   checkpoints/Llama-3.2-3B-Instruct
 ```
@@ -172,7 +172,7 @@ source scripts/setup_avhubert_env.sh
 * **AV-HuBERT Large** — drop the `.pt` at `checkpoints/avhubert_large_lrs3_iter5.pt` (path in `configs/default.yaml`).
 * **ECAPA-TDNN** — auto from SpeechBrain.
 * **InsightFace `buffalo_l`** — auto on first use.
-* **GER causal LM** — a dense local HF directory only. Use `configs/qwen25_3b.yaml` for Qwen2.5-3B-Instruct or `configs/llama32_3b.yaml` for Llama-3.2-3B-Instruct. The GER backend never downloads weights.
+* **GER causal LM** — a dense HF model materialized in a configured local directory. Use `configs/qwen25_3b.yaml` for Qwen2.5-3B-Instruct or `configs/llama32_3b.yaml` for Llama-3.2-3B-Instruct. Existing local weights are reused; missing weights are downloaded only when `ger.allow_download: true`.
 
 The repo defaults to `stub_backbones: true` in `configs/default.yaml`, so you can verify wiring without any of the above.
 

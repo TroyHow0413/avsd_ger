@@ -144,6 +144,6 @@ dependencies:
 #        echo 'export PYTHONPATH="$PWD/av_hubert:$PWD/av_hubert/avhubert:$PYTHONPATH"' \
 #            > $CONDA_PREFIX/etc/conda/activate.d/avhubert_path.sh
 #
-# 3. Place the selected dense GER model in the local directory configured by
-#    ger.model_path. GER intentionally never downloads model weights.
+# 3. GER reuses the dense model under ger.model_path. With allow_download=true,
+#    a missing snapshot is downloaded once from ger.model_id.
 # ---------------------------------------------------------------------------

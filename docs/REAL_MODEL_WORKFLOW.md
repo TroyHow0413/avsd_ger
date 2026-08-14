@@ -23,7 +23,7 @@ Backbone expectations:
 | AV-HuBERT Large | `checkpoints/avhubert_large_lrs3_iter5.pt`. |
 | ECAPA-TDNN | Auto-cached from SpeechBrain. |
 | InsightFace `buffalo_l` | Auto-cached on first face embedding call. |
-| GER causal LM | Put Qwen2.5-3B-Instruct or Llama-3.2-3B-Instruct in the local directory selected by the config. GER never downloads weights. |
+| GER causal LM | Qwen2.5-3B-Instruct or Llama-3.2-3B-Instruct is reused from `ger.model_path`; when missing, configs may allow a one-time Hugging Face download from `ger.model_id`. |
 
 For Windows native shells, make sure AV-HuBERT is on `PYTHONPATH` as described in the README install section.
 

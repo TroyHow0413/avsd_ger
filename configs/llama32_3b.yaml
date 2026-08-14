@@ -5,7 +5,9 @@ defaults:
 ger:
   backend: local_hf
   model_family: llama-3.2-3b-instruct
+  model_id: meta-llama/Llama-3.2-3B-Instruct
   model_path: checkpoints/Llama-3.2-3B-Instruct
+  allow_download: true
   dtype: auto
   lora:
     target_modules: auto

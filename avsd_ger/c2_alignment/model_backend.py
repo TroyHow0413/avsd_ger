@@ -129,14 +129,14 @@ class FakeBackend:
 
 
 class LocalHFCausalLMBackend:
-    """Dense AutoModelForCausalLM backend that refuses non-local paths."""
+    """Dense causal LM materialized in a configured local directory."""
 
     kind = "local_hf"
 
     def __init__(self, cfg: dict[str, Any], device: torch.device):
         self.profile = get_model_profile(cfg)
         self.device = device
-        self.model_path = self._require_local_path(cfg)
+        self.model_path = self._resolve_model_path(cfg)
         self.lora_target_modules = self._resolve_lora_targets(cfg)
 
         from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
@@ -223,15 +223,37 @@ class LocalHFCausalLMBackend:
             self.model = self.model.to(device)
 
     @staticmethod
-    def _require_local_path(cfg: dict[str, Any]) -> str:
+    def _resolve_model_path(cfg: dict[str, Any]) -> str:
         raw = cfg.get("model_path", cfg.get("llm_name"))
         if not raw:
             raise ValueError("ger.model_path is required for backend=local_hf")
         path = Path(str(raw)).expanduser()
-        if not path.is_dir():
+        if path.is_dir() and (path / "config.json").is_file():
+            return str(path.resolve())
+
+        if not bool(cfg.get("allow_download", False)):
             raise FileNotFoundError(
-                f"GER local model directory does not exist: {path}. "
-                "This backend never downloads Hugging Face models."
+                f"GER local model is incomplete or missing: {path}. "
+                "Set ger.allow_download=true and ger.model_id to materialize it."
+            )
+
+        model_id = cfg.get("model_id")
+        if not model_id:
+            raise ValueError(
+                "ger.model_id is required when ger.allow_download=true"
+            )
+        from huggingface_hub import snapshot_download
+
+        path.mkdir(parents=True, exist_ok=True)
+        print(
+            f"[GER backend] Local model not found; downloading {model_id!r} "
+            f"to {path.resolve()}",
+            flush=True,
+        )
+        snapshot_download(repo_id=str(model_id), local_dir=str(path))
+        if not (path / "config.json").is_file():
+            raise RuntimeError(
+                f"Hugging Face download completed without config.json: {path}"
             )
         return str(path.resolve())
 

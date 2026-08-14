@@ -60,7 +60,9 @@ ger:
   mode: audio_only
   backend: local_hf
   model_family: qwen2.5-3b-instruct
+  model_id: Qwen/Qwen2.5-3B-Instruct
   model_path: checkpoints/Qwen2.5-3B-Instruct
+  allow_download: true
   max_new_tokens: 64
   speaker_special_token: '[Speaker: ID_i]'
   dtype: auto

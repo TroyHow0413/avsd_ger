@@ -74,7 +74,7 @@ Spec §2 C2 mandates four design choices:
 
 ### GER head (`c2_alignment/`)
 
-* **LLM backend**: local dense Hugging Face causal LM only; phase 1 profiles are Qwen2.5-3B-Instruct (hidden size 2048) and Llama-3.2-3B-Instruct (hidden size 3072).
+* **LLM backend**: dense Hugging Face causal LM materialized in `ger.model_path`; an existing local snapshot is reused, while an absent snapshot may be downloaded from `ger.model_id` when explicitly enabled. Phase 1 profiles are Qwen2.5-3B-Instruct (hidden size 2048) and Llama-3.2-3B-Instruct (hidden size 3072).
 * **Policies**: prompt/chat-template handling, QFormer soft-token bridging, deterministic generation, and checkpoint compatibility metadata are separate modules.
 * **LoRA**: `r=16, α=32, dropout=0.05`; target modules are selected and validated from the active model profile.
 * **Soft prefix**: a Q-Former–style projector turns `f_align` into a fixed-length sequence of pseudo-token embeddings (`<AV_CTX>`).
