@@ -47,25 +47,55 @@ class BackboneOutputs:
 
 
 def load_config(path: str | Path) -> dict[str, Any]:
-    path = Path(path)
-    with open(path, "r", encoding="utf-8") as f:
-        cfg = yaml.safe_load(f)
+    """Load a YAML mapping and recursively merge its ``defaults`` entries.
 
+    Defaults are resolved beside the referring file. Cycles and malformed
+    roots are reported explicitly instead of failing later in model setup.
+    """
+    return _load_config(Path(path).resolve(), stack=())
+
+
+def _load_config(path: Path, stack: tuple[Path, ...]) -> dict[str, Any]:
+    if path in stack:
+        chain = " -> ".join(str(item) for item in (*stack, path))
+        raise ValueError(f"Config defaults cycle detected: {chain}")
+
+    with path.open("r", encoding="utf-8") as config_file:
+        loaded = yaml.safe_load(config_file)
+    if loaded is None:
+        loaded = {}
+    if not isinstance(loaded, dict):
+        raise TypeError(
+            f"Config root must be a mapping, got {type(loaded).__name__}: {path}"
+        )
+
+    cfg = dict(loaded)
     defaults = cfg.pop("defaults", None)
     if not defaults:
         return cfg
+    if not isinstance(defaults, list):
+        raise TypeError(f"Config 'defaults' must be a list: {path}")
 
     merged: dict[str, Any] = {}
     for item in defaults:
         if isinstance(item, str):
-            default_path = path.with_name(f"{item}.yaml")
+            default_name = item
         elif isinstance(item, dict):
             # Hydra-style shorthand, e.g. {"base": "foo"} -> foo.yaml.
+            if len(item) != 1:
+                raise ValueError(
+                    f"Config default mappings need exactly one entry: {item!r}"
+                )
             default_name = next(iter(item.values()))
-            default_path = path.with_name(f"{default_name}.yaml")
         else:
             raise TypeError(f"Unsupported config default entry: {item!r}")
-        merged = _deep_merge(merged, load_config(default_path))
+        if not isinstance(default_name, str) or not default_name:
+            raise TypeError(f"Config default name must be a non-empty string: {item!r}")
+        default_path = path.with_name(f"{default_name}.yaml")
+        merged = _deep_merge(
+            merged,
+            _load_config(default_path, stack=(*stack, path)),
+        )
     return _deep_merge(merged, cfg)
 
 

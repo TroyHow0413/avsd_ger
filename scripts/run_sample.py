@@ -3,7 +3,7 @@
     python scripts/run_sample.py \
         --manifest data/sample_manifest.json \
         --utt utt_0001 \
-        --llm-quant 4bit
+        --ger-dtype bf16
 """
 from __future__ import annotations
 
@@ -63,10 +63,9 @@ def main() -> int:
     p.add_argument("--utt", required=True)
     p.add_argument("--pool", default=str(ROOT / "checkpoints/identity_pool.pt"))
     p.add_argument(
-        "--llm-quant", default=None,
-        choices=["auto", "fp16", "int8", "4bit"],
-        help="Override Llama-3 weight precision. auto = pick from GPU VRAM. "
-             "Default: read from configs/default.yaml (ger.llm_quant).",
+        "--ger-dtype", "--llm-quant", dest="ger_dtype", default=None,
+        choices=["auto", "fp32", "fp16", "bf16"],
+        help="Override dense GER model dtype (legacy alias: --llm-quant).",
     )
     p.add_argument(
         "--ger-mode",
@@ -77,14 +76,14 @@ def main() -> int:
     add_wandb_args(p)
     args = p.parse_args()
 
-    # Apply --llm-quant override before constructing the pipeline.
+    # Apply the dense model dtype override before constructing the pipeline.
     # In-memory dict mutation -- matches enroll_identity.py style; avoids the
     # tempfile dance.
-    if args.llm_quant is not None or args.ger_mode is not None:
+    if args.ger_dtype is not None or args.ger_mode is not None:
         cfg = load_config(args.config)
-        if args.llm_quant is not None:
-            cfg.setdefault("ger", {})["llm_quant"] = args.llm_quant
-            print(f"[run_sample] Override llm_quant -> {args.llm_quant}")
+        if args.ger_dtype is not None:
+            cfg.setdefault("ger", {})["dtype"] = args.ger_dtype
+            print(f"[run_sample] Override ger.dtype -> {args.ger_dtype}")
         if args.ger_mode is not None:
             cfg.setdefault("ger", {})["mode"] = args.ger_mode
             print(f"[run_sample] Override ger.mode -> {args.ger_mode}")
@@ -103,7 +102,7 @@ def main() -> int:
             "manifest": args.manifest,
             "utt": args.utt,
             "pool": args.pool,
-            "llm_quant": args.llm_quant,
+            "ger_dtype": args.ger_dtype,
             "ger_mode": args.ger_mode,
         },
     )

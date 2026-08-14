@@ -78,7 +78,7 @@ Dependency notes:
 | System media libs | `libsndfile`, `ffmpeg`, `openh264` | Required by `soundfile`, `librosa`, and video/audio decode paths. |
 | PyTorch | `torch`, `torchaudio`, `torchvision` from the PyTorch CUDA wheel index | RTX 50-series needs cu128 wheels with `sm_120`; older GPUs can use cu124. |
 | ASR / text backbone | `faster-whisper`, `transformers`, `tokenizers`, `huggingface_hub>=0.34,<1.0`, `accelerate` | Whisper and transformer model loading. `huggingface_hub>=0.34` provides the `hf` CLI used below. |
-| GER head | `peft`, `sentencepiece`, `bitsandbytes` | Llama-3 LoRA and optional quantized loading. |
+| GER head | `transformers`, `peft`, `sentencepiece` | Local dense Qwen2.5/Llama-3.2 causal LM with LoRA. |
 | Identity encoders | `speechbrain`, `insightface`, `onnxruntime` | ECAPA-TDNN voice embeddings and ArcFace face embeddings. |
 | Audio / video Python IO | `librosa`, `opencv-python`, `opencv-python-headless`, `soundfile`, `python_speech_features` | Feature extraction and AV-HuBERT logfbank support. Both OpenCV wheels are pinned `<4.10` so `albumentations`/`insightface` cannot pull an OpenCV build that forces NumPy 2.x. |
 | Monitoring / logging | `nvidia-ml-py`, `psutil`, `wandb` | Power logging and experiment tracking. |
@@ -152,21 +152,16 @@ source scripts/setup_avhubert_env.sh
 #     Add-Content "$env:CONDA_PREFIX\etc\conda\activate.d\avhubert_path.bat" `
 #         "@set PYTHONPATH=D:\GitHub\avsd_ger_claude\av_hubert;D:\GitHub\avsd_ger_claude\av_hubert\avhubert;%PYTHONPATH%"
 
-# Gated Llama-3-8B-Instruct access (only when stub_backbones=false).
-# The `hf` CLI requires huggingface_hub>=0.34. If `hf` is missing, upgrade
-# the package inside the active env first:
-python -m pip install --upgrade "huggingface_hub>=0.34,<1.0"
-hf auth login                         # paste a Read-scope token from https://huggingface.co/settings/tokens
-hf auth whoami                        # sanity check
-# On older environments that you cannot upgrade yet, use: huggingface-cli login
-# then request access at https://huggingface.co/meta-llama/Meta-Llama-3-8B-Instruct
+# GER never downloads model weights. Put a complete local Hugging Face model
+# directory at one of the configured paths before setting stub_backbones=false:
+#   checkpoints/Qwen2.5-3B-Instruct
+#   checkpoints/Llama-3.2-3B-Instruct
 ```
 
 ### Windows 11 — known quirks after `pip install -r requirements.txt`
 
 | Package | Issue | Fix |
 |---|---|---|
-| `bitsandbytes` | The PyPI wheel is Linux-only; the Windows build is at a different index. | `pip install bitsandbytes --index-url https://jllllll.github.io/bitsandbytes-windows-webui` — or skip it entirely if you're not doing 4-/8-bit Llama loading. |
 | DataLoader `num_workers` | Windows uses `spawn` (not `fork`) for multiprocessing — any script that sets `num_workers > 0` without a `__main__` guard will deadlock. | Wrap the entry point of any custom script in `if __name__ == '__main__':`, or pass `--num-workers 0` / set `num_workers=0` in the DataLoader calls. All scripts in `scripts/` already have the guard. |
 
 ---
@@ -177,7 +172,7 @@ hf auth whoami                        # sanity check
 * **AV-HuBERT Large** — drop the `.pt` at `checkpoints/avhubert_large_lrs3_iter5.pt` (path in `configs/default.yaml`).
 * **ECAPA-TDNN** — auto from SpeechBrain.
 * **InsightFace `buffalo_l`** — auto on first use.
-* **Llama-3-8B-Instruct** — pulled by the GER head once `hf auth login` is done. The `hf` CLI ships with `huggingface_hub>=0.34`; older envs may only have the legacy `huggingface-cli login`.
+* **GER causal LM** — a dense local HF directory only. Use `configs/qwen25_3b.yaml` for Qwen2.5-3B-Instruct or `configs/llama32_3b.yaml` for Llama-3.2-3B-Instruct. The GER backend never downloads weights.
 
 The repo defaults to `stub_backbones: true` in `configs/default.yaml`, so you can verify wiring without any of the above.
 
@@ -220,7 +215,7 @@ python scripts/eval_ablations.py \
 
 ### Real Training
 
-Prepare the real backbones first: set `stub_backbones: false`, put AV-HuBERT at `checkpoints/avhubert_large_lrs3_iter5.pt`, log in to Hugging Face for Llama-3, and let Whisper/ECAPA/InsightFace auto-cache on first use.
+Prepare the real backbones first: set `stub_backbones: false`, put AV-HuBERT at `checkpoints/avhubert_large_lrs3_iter5.pt`, place the selected GER model in its configured local directory, and let Whisper/ECAPA/InsightFace use their existing cache paths.
 
 Stage-1:
 
@@ -256,7 +251,7 @@ Useful Stage-2 `--warmup` modes:
 | `ger_lora` | GER LoRA path only | Lower-memory GER text n-best training. Can pair with `--no-encoder-context`. |
 | `ger_qformer` | GER LoRA + QFormer/id projector | Train GER soft-prefix pieces without the full joint objective. |
 
-Low-memory GER example:
+Dense bf16 GER example:
 
 ```bash
 python scripts/train_stage2.py \
@@ -266,7 +261,7 @@ python scripts/train_stage2.py \
     --out checkpoints/stage2_ger_lora/ \
     --warmup ger_lora \
     --no-encoder-context \
-    --llm-quant 4bit
+    --ger-dtype bf16
 ```
 
 ### Final Eval
@@ -365,7 +360,7 @@ The metric namespaces written by each script:
 avsd_ger/
 ├── backbones/        # Whisper + AV-HuBERT wrappers (frozen)
 ├── c1_identity/      # ECAPA + ArcFace + IdentityPool + dual-gate + cold-start
-├── c2_alignment/     # ID-conditioned aligner + GER head (Llama-3-8B + LoRA)
+├── c2_alignment/     # aligner + local HF backend/prompt/bridge/generation/checkpoint policies
 ├── c3_feedback/      # Composite confidence + closed-loop controller
 ├── training/         # CTC head, GER cross-entropy, identity (InfoNCE) loss
 ├── eval/             # SessionRunner, metrics (SA-WER/SCR/AV-SID/DER/JER), PowerMonitor

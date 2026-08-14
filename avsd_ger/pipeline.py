@@ -13,7 +13,6 @@ the session and concatenates outputs (see avsd_ger/eval/session.py).
 from __future__ import annotations
 
 from pathlib import Path
-import re
 from typing import Any
 
 import numpy as np
@@ -24,7 +23,7 @@ from .c1_identity import FaceEncoder, IdentityPool, VoiceEncoder
 from .frontend.mouth_roi import MouthROIExtractor
 from .c1_identity.identity_pool import IdentityQueryResult
 from .c2_alignment import GERHead, IDConditionedAligner
-from .c3_feedback import ClosedLoopController, ConfidenceScorer
+from .c3_feedback import ClosedLoopController, ConfidenceScorer, GERSafetyGate
 from .c3_feedback.closed_loop import LoopAction, LoopDecision
 from .utils import load_config, pool_encoder_to_tokens, resolve_device, seed_all, squash_logprob
 
@@ -124,30 +123,9 @@ class AVSDGERPipeline:
         # C3
         self.scorer = ConfidenceScorer(cfg["feedback"])
         self.loop = ClosedLoopController(cfg["feedback"])
-        self.enable_ger_safety_gate = bool(cfg["feedback"].get("enable_ger_safety_gate", True))
-        self.enable_ger_artifact_gate = bool(cfg["feedback"].get("enable_ger_artifact_gate", True))
-        self.enable_ger_length_gate = bool(cfg["feedback"].get("enable_ger_length_gate", True))
-        self.enable_ger_overlap_gate = bool(cfg["feedback"].get("enable_ger_overlap_gate", True))
-        self.enable_ger_acoustic_fallback = bool(cfg["feedback"].get("enable_ger_acoustic_fallback", True))
+        self.ger_safety = GERSafetyGate.from_config(cfg["feedback"])
         self.ger_fallback_min_conf = float(cfg["feedback"].get("ger_fallback_min_conf", 0.20))
         self.ger_fallback_margin = float(cfg["feedback"].get("ger_fallback_margin", 0.0))
-        self.ger_max_len_ratio = float(cfg["feedback"].get("ger_max_len_ratio", 1.8))
-        self.ger_min_token_overlap = float(cfg["feedback"].get("ger_min_token_overlap", 0.50))
-        self.ger_artifact_blacklist = [
-            str(x).lower()
-            for x in cfg["feedback"].get(
-                "ger_artifact_blacklist",
-                [
-                    "Please provide",
-                    "I'm happy to help",
-                    "Here is the corrected transcript",
-                    "Audio hypothesis:",
-                    "Corrected transcript:",
-                    "transcript provided",
-                    "speaker label",
-                ],
-            )
-        ]
         # Default AMI-safe behavior: C3 may accept/reject/retry, but it does
         # not self-train the identity pool unless explicitly enabled.
         self.enable_pool_update = bool(cfg["feedback"].get("enable_pool_update", False))
@@ -160,70 +138,6 @@ class AVSDGERPipeline:
         self.disable_c2 = bool(abl.get("disable_c2", False))                # skip GER; return ASR 1-best
         self.disable_c3 = bool(abl.get("disable_c3", False))                # skip closed-loop
         self.disable_conf_gate = bool(abl.get("disable_conf_gate", False))  # EMA-update unconditionally
-
-    @staticmethod
-    def _gate_tokens(text: str) -> list[str]:
-        return re.findall(r"[A-Za-z0-9']+", text.lower())
-
-    def _ger_safety_reject_reason(self, ger_text: str, asr_text: str) -> str | None:
-        if not self.enable_ger_safety_gate:
-            return None
-
-        ger = ger_text.strip()
-        asr = asr_text.strip()
-        if not ger:
-            return "GER cleaned to empty text"
-
-        ger_lower = ger.lower()
-        if self.enable_ger_artifact_gate:
-            for artifact in self.ger_artifact_blacklist:
-                if artifact and artifact in ger_lower:
-                    return f"GER artifact matched blacklist: {artifact!r}"
-
-        asr_tokens = self._gate_tokens(asr)
-        ger_tokens = self._gate_tokens(ger)
-        if asr_tokens and ger_tokens:
-            if (
-                self.enable_ger_length_gate
-                and len(ger_tokens) > max(len(asr_tokens) + 8, int(len(asr_tokens) * self.ger_max_len_ratio))
-            ):
-                return (
-                    "GER too long "
-                    f"({len(ger_tokens)} vs ASR {len(asr_tokens)} tokens)"
-                )
-            overlap = len(set(asr_tokens) & set(ger_tokens)) / max(1, len(set(asr_tokens)))
-            if self.enable_ger_overlap_gate and overlap < self.ger_min_token_overlap:
-                return (
-                    "GER/ASR token overlap too low "
-                    f"({overlap:.2f} < {self.ger_min_token_overlap:.2f})"
-                )
-        return None
-
-    def _ger_safety_features(self, ger_text: str, asr_text: str) -> dict[str, Any]:
-        asr_tokens = self._gate_tokens(asr_text)
-        ger_tokens = self._gate_tokens(ger_text)
-        overlap = None
-        if asr_tokens and ger_tokens:
-            overlap = len(set(asr_tokens) & set(ger_tokens)) / max(1, len(set(asr_tokens)))
-        artifacts = [
-            artifact
-            for artifact in self.ger_artifact_blacklist
-            if artifact and artifact in ger_text.lower()
-        ]
-        return {
-            "asr_token_count": len(asr_tokens),
-            "ger_token_count": len(ger_tokens),
-            "length_ratio": (len(ger_tokens) / max(1, len(asr_tokens))) if asr_tokens else None,
-            "token_overlap": overlap,
-            "artifact_hits": artifacts,
-            "gate_enabled": self.enable_ger_safety_gate,
-            "artifact_gate_enabled": self.enable_ger_artifact_gate,
-            "length_gate_enabled": self.enable_ger_length_gate,
-            "overlap_gate_enabled": self.enable_ger_overlap_gate,
-            "acoustic_fallback_enabled": self.enable_ger_acoustic_fallback,
-            "max_len_ratio": self.ger_max_len_ratio,
-            "min_token_overlap": self.ger_min_token_overlap,
-        }
 
     @classmethod
     def from_config(cls, path: str | Path) -> "AVSDGERPipeline":
@@ -309,8 +223,8 @@ class AVSDGERPipeline:
             "vsr_features": _tensor_debug(vsr_out.get("vsr_features")),
             "lip_hyp": raw_lip_hyp,
             "prompt_lip_hyp": prompt_lip_hyp,
-            "lip_hyp_token_count": len(self._gate_tokens(raw_lip_hyp)),
-            "prompt_lip_hyp_token_count": len(self._gate_tokens(prompt_lip_hyp)),
+            "lip_hyp_token_count": len(self.ger_safety.tokens(raw_lip_hyp)),
+            "prompt_lip_hyp_token_count": len(self.ger_safety.tokens(prompt_lip_hyp)),
             "vsr_emit_text": bool(getattr(self.vsr, "emit_text", False)) if self.vsr is not None else False,
             "vsr_generator_built": bool(getattr(self.vsr, "_generator", None)) if self.vsr is not None else False,
             "vsr_decode_error": getattr(self.vsr, "last_decode_error", None) if self.vsr is not None else None,
@@ -453,7 +367,7 @@ class AVSDGERPipeline:
             cleaned_generated_before_gate = ger_out.get("text", "")
 
             if not self.disable_c2 and asr_top:
-                fallback_reason = self._ger_safety_reject_reason(ger_out["text"], asr_top)
+                fallback_reason = self.ger_safety.reject_reason(ger_out["text"], asr_top)
 
             if fallback_reason is not None:
                 raw_generation = ger_out.get("raw_text")
@@ -478,7 +392,7 @@ class AVSDGERPipeline:
             raw_ger_conf = None
             if (
                 not self.disable_c2
-                and self.enable_ger_acoustic_fallback
+                and self.ger_safety.acoustic_fallback_enabled
                 and asr_top
                 and ger_out["text"].strip() != asr_top
             ):
@@ -558,7 +472,7 @@ class AVSDGERPipeline:
                 "prompt": ger_out.get("prompt"),
                 "raw_generation_before_gate": raw_generated_before_gate,
                 "cleaned_ger_text_before_gate": cleaned_generated_before_gate,
-                "safety_features": self._ger_safety_features(cleaned_generated_before_gate, asr_top),
+                "safety_features": self.ger_safety.features(cleaned_generated_before_gate, asr_top),
                 "fallback_applied": fallback_applied,
                 "fallback_reason": fallback_reason,
                 "raw_ger_text": ger_out.get("raw_ger_text") or ger_out.get("raw_text"),
@@ -628,8 +542,8 @@ class AVSDGERPipeline:
                     "disable_conf_gate": self.disable_conf_gate,
                     "max_iters": max_iters,
                     "enable_pool_update": self.enable_pool_update,
-                    "enable_ger_safety_gate": self.enable_ger_safety_gate,
-                    "enable_ger_acoustic_fallback": self.enable_ger_acoustic_fallback,
+                    "enable_ger_safety_gate": self.ger_safety.enabled,
+                    "enable_ger_acoustic_fallback": self.ger_safety.acoustic_fallback_enabled,
                 },
                 "final": {
                     "text": ger_out["text"] if ger_out else "",

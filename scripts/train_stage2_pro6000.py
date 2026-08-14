@@ -257,9 +257,7 @@ def train_cached(
     _load_checkpoint(aligner, aligner_checkpoint, "aligner", device)
     _load_checkpoint(ctc, ctc_checkpoint, "CTC", device)
     if ger is not None and ger_projectors_checkpoint:
-        state = torch.load(ger_projectors_checkpoint, map_location=device)
-        ger.qformer.load_state_dict(state["qformer"])
-        ger.id_proj.load_state_dict(state["id_proj"])
+        ger.load_projector_checkpoint(ger_projectors_checkpoint, map_location=device)
 
     params: list[torch.nn.Parameter] = []
     if warmup == "align_ctc":
@@ -407,7 +405,7 @@ def train_cached(
     if ger is not None:
         ger_dir = out / "ger"
         ger_dir.mkdir(parents=True, exist_ok=True)
-        torch.save({"qformer": ger.qformer.state_dict(), "id_proj": ger.id_proj.state_dict()}, ger_dir / "ger_projectors.pt")
+        ger.save_projector_checkpoint(ger_dir / "ger_projectors.pt")
         if not stub and ger._llm is not None:
             ger._llm.save_pretrained(ger_dir / "lora_adapter")
             if ger._tok is not None:
@@ -432,8 +430,9 @@ def _build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--ctc-checkpoint", default=None)
     ap.add_argument("--ger-projectors-checkpoint", default=None)
     ap.add_argument("--ger-mode", choices=["audio_only", "av", "visual_only"], default=None)
-    ap.add_argument("--llm-name", default=None)
-    ap.add_argument("--llm-quant", choices=["auto", "fp16", "bf16", "int8", "4bit"], default=None)
+    ap.add_argument("--model-path", "--llm-name", dest="model_path", default=None)
+    ap.add_argument("--model-family", choices=["qwen2.5-3b-instruct", "llama-3.2-3b-instruct"], default=None)
+    ap.add_argument("--ger-dtype", "--llm-quant", dest="ger_dtype", choices=["auto", "fp32", "fp16", "bf16"], default=None)
     ap.add_argument("--max-new-tokens", type=int, default=None)
     ap.add_argument("--asr-backend", choices=["faster-whisper", "openai-whisper"], default=None)
     ap.add_argument("--asr-beam-size", type=int, default=None)
@@ -457,8 +456,9 @@ def _apply_overrides(cfg: dict[str, Any], args: argparse.Namespace) -> None:
         stage2["lr_ratio_to_stage1"] = float(args.lr) / stage1_lr
     for arg_name, section, key in (
         ("ger_mode", "ger", "mode"),
-        ("llm_name", "ger", "llm_name"),
-        ("llm_quant", "ger", "llm_quant"),
+        ("model_path", "ger", "model_path"),
+        ("model_family", "ger", "model_family"),
+        ("ger_dtype", "ger", "dtype"),
         ("max_new_tokens", "ger", "max_new_tokens"),
         ("asr_backend", "asr", "backend"),
         ("asr_beam_size", "asr", "beam_size"),

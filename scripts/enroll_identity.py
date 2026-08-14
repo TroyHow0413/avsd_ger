@@ -66,19 +66,17 @@ def main() -> int:
     )
     p.add_argument("--out-pool", default=str(ROOT / "checkpoints/identity_pool.pt"))
     p.add_argument(
-        "--llm-quant", default=None,
-        choices=["auto", "fp16", "int8", "4bit"],
-        help="Override Llama-3 weight precision. auto = pick from GPU VRAM. "
-             "Default: read from configs/default.yaml (ger.llm_quant)."
+        "--ger-dtype", "--llm-quant", dest="ger_dtype", default=None,
+        choices=["auto", "fp32", "fp16", "bf16"],
+        help="Override dense GER model dtype (legacy alias: --llm-quant)."
     )
     add_wandb_args(p)
     args = p.parse_args()
 
-    # Apply --llm-quant override before constructing the pipeline.
-    if args.llm_quant is not None:
+    if args.ger_dtype is not None:
         from avsd_ger.utils import load_config
         cfg = load_config(args.config)
-        cfg.setdefault("ger", {})["llm_quant"] = args.llm_quant
+        cfg.setdefault("ger", {})["dtype"] = args.ger_dtype
         pipe = AVSDGERPipeline(cfg)
     else:
         pipe = AVSDGERPipeline.from_config(args.config)
@@ -94,7 +92,7 @@ def main() -> int:
             "manifest": args.manifest,
             "in_pool": args.in_pool,
             "out_pool": args.out_pool,
-            "llm_quant": args.llm_quant,
+            "ger_dtype": args.ger_dtype,
         },
     )
 

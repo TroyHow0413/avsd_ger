@@ -47,8 +47,8 @@ def make_runtime_config(args: argparse.Namespace) -> Path:
             cfg["training"]["stage1"]["epochs"] = args.stage1_epochs
         if args.stage2_epochs is not None:
             cfg["training"]["stage2"]["epochs"] = args.stage2_epochs
-        if args.llm_quant:
-            cfg.setdefault("ger", {})["llm_quant"] = args.llm_quant
+        if args.ger_dtype:
+            cfg.setdefault("ger", {})["dtype"] = args.ger_dtype
 
     out = RUN_DIR / ("train_config_real.yaml" if args.real else "train_config_stub.yaml")
     _write_yaml(out, cfg)
@@ -67,7 +67,7 @@ def main() -> int:
     p.add_argument("--stage", choices=["stage1", "stage2", "all"], default="stage1")
     p.add_argument("--real", action="store_true", help="Use real backbones and a real manifest.")
     p.add_argument("--device", default=None)
-    p.add_argument("--llm-quant", choices=["auto", "fp16", "int8", "4bit"], default=None)
+    p.add_argument("--ger-dtype", "--llm-quant", dest="ger_dtype", choices=["auto", "fp32", "fp16", "bf16"], default=None)
     p.add_argument(
         "--ger-mode",
         choices=["audio_only", "av", "visual_only"],

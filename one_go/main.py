@@ -40,12 +40,12 @@ def make_runtime_config(args: argparse.Namespace) -> Path:
     if not args.real:
         cfg["stub_backbones"] = True
         cfg["device"] = args.device or "cpu"
-        cfg.setdefault("ger", {})["llm_quant"] = "auto"
+        cfg.setdefault("ger", {})["dtype"] = "auto"
     else:
         if args.device:
             cfg["device"] = args.device
-        if args.llm_quant:
-            cfg.setdefault("ger", {})["llm_quant"] = args.llm_quant
+        if args.ger_dtype:
+            cfg.setdefault("ger", {})["dtype"] = args.ger_dtype
 
     out = RUN_DIR / ("config_real.yaml" if args.real else "config_stub.yaml")
     _write_yaml(out, cfg)
@@ -70,7 +70,7 @@ def main() -> int:
     )
     p.add_argument("--real", action="store_true", help="Use real backbones from configs/default.yaml.")
     p.add_argument("--device", default=None, help="Override device, e.g. cpu or cuda.")
-    p.add_argument("--llm-quant", choices=["auto", "fp16", "int8", "4bit"], default=None)
+    p.add_argument("--ger-dtype", "--llm-quant", dest="ger_dtype", choices=["auto", "fp32", "fp16", "bf16"], default=None)
     p.add_argument(
         "--ger-mode",
         choices=["audio_only", "av", "visual_only"],

@@ -1,0 +1,602 @@
+{
+  "path": "D:\\xmum\\Thesis Reference New\\test_defence\\AVSD-GER_Proposal_Draft_Rev5_Recent_Work_Added.docx",
+  "paragraph_count": 101,
+  "word_count_rough": 4791,
+  "headings": [
+    {
+      "i": 2,
+      "style": "Heading 1",
+      "text": "1. Abstract"
+    },
+    {
+      "i": 4,
+      "style": "Heading 1",
+      "text": "2. Overview of Thesis Proposal and Research Questions"
+    },
+    {
+      "i": 13,
+      "style": "Heading 2",
+      "text": "Research Questions"
+    },
+    {
+      "i": 17,
+      "style": "Heading 2",
+      "text": "Research Objectives"
+    },
+    {
+      "i": 24,
+      "style": "Heading 1",
+      "text": "3. Literature Review"
+    },
+    {
+      "i": 25,
+      "style": "Heading 2",
+      "text": "3.1 Audio-Visual Speech Recognition"
+    },
+    {
+      "i": 29,
+      "style": "Heading 2",
+      "text": "3.2 Speaker Diarization and Active Speaker Detection"
+    },
+    {
+      "i": 33,
+      "style": "Heading 2",
+      "text": "3.3 Speaker Representation Learning"
+    },
+    {
+      "i": 36,
+      "style": "Heading 2",
+      "text": "3.4 Contrastive and Self-Supervised Multimodal Learning"
+    },
+    {
+      "i": 39,
+      "style": "Heading 2",
+      "text": "3.5 Speaker-Conditioned Cross-Modal Attention and Multimodal Fusion"
+    },
+    {
+      "i": 42,
+      "style": "Heading 2",
+      "text": "3.6 Visual-Language Model Bridging for Soft Tokens"
+    },
+    {
+      "i": 46,
+      "style": "Heading 2",
+      "text": "3.7 Generative Error Correction for ASR"
+    },
+    {
+      "i": 50,
+      "style": "Heading 2",
+      "text": "3.8 Confidence Estimation and Uncertainty Control"
+    },
+    {
+      "i": 53,
+      "style": "Heading 2",
+      "text": "3.9 Meeting Transcription Benchmarks and Evaluation Metrics"
+    },
+    {
+      "i": 57,
+      "style": "Heading 1",
+      "text": "4. Research Methods and Objectives"
+    },
+    {
+      "i": 65,
+      "style": "Heading 1",
+      "text": "5. Work Plan and Timetable"
+    },
+    {
+      "i": 67,
+      "style": "Heading 1",
+      "text": "6. Conclusion"
+    },
+    {
+      "i": 70,
+      "style": "Heading 1",
+      "text": "7. Reference List"
+    }
+  ],
+  "tables": [
+    {
+      "index": 0,
+      "rows": 9,
+      "cols": 3,
+      "preview": [
+        [
+          "Period",
+          "Milestone",
+          "Main Activities"
+        ],
+        [
+          "Month 1-2",
+          "Literature review",
+          "Review AVSR, diarization, speaker representation, multimodal alignment, and LLM-based ASR correction."
+        ],
+        [
+          "Month 3",
+          "Dataset and baseline preparation",
+          "Prepare AMI corpus splits, preprocessing scripts, Whisper baseline, AV-HuBERT feature extraction, and diarization frontend outputs."
+        ],
+        [
+          "Month 4-5",
+          "Cross-modal Identity Pool",
+          "Implement ECAPA-TDNN voice embedding extraction, ArcFace face embedding extraction, identity memory, and quality-aware online updating."
+        ],
+        [
+          "Month 6-7",
+          "ID-conditioned Aligner",
+          "Develop token-level soft-gated cross-attention for Whisper and AV-HuBERT features conditioned on speaker identity."
+        ]
+      ]
+    }
+  ],
+  "keyword_hits": [
+    {
+      "i": 3,
+      "style": "Normal",
+      "text": "Multi-speaker meetings remain challenging for audio-visual speech recognition (AVSR) because practical systems must recognise not only what was said, but also who said it. In real meeting environments, upstream frontends such as speaker diarization, face tracking, and active speaker detection are often imperfect due to overlapping speech, occlusion, low-resolution video, variable lighting, and noisy audio. These errors can propagate into downstream speaker-aware transcription, resulting in incorrect word recognition and speaker attribution. This research proposes AVSD-GER, a frontend-agnostic speaker-aware AVSR framework with generative error correction. The proposed framework aims to improve robust meeting transcription through four connected modules: an IdentityFuser that aligns ECAPA-TDNN voice embeddings and ArcFace face embeddings into a shared speaker identity representation using BidirectionalInfoNCE; an IDConditionedAligner that injects the speaker identity representation into audio-visual cross-modal attention; a QFormerProjector that converts aligned audio-visual features into soft tokens for LLM conditioning; and a ConfidenceScorer-controlled GER Head that applies LLM-based correction only when correction is likely to be reliable. Experiments will be conducted on the AMI meeting corpus under clean and degraded frontend conditions, using word error rate and speaker-attributed word error rate as the main evaluation metrics. The expected contribution is a modular backend framework that reduces frontend error propagation and improves speaker-aware transcription in realistic multi-speaker meeting scenarios."
+    },
+    {
+      "i": 4,
+      "style": "Heading 1",
+      "text": "2. Overview of Thesis Proposal and Research Questions"
+    },
+    {
+      "i": 11,
+      "style": "Normal",
+      "text": "The fourth module, ConfidenceScorer-controlled GER Head, will perform confidence-gated generative error correction. Large language models can be useful for correcting recognition errors, restoring missing words, and improving contextual consistency, but recent work also suggests that ASR correction must be controlled carefully to avoid unsupported changes (Ma et al., 2023; Radhakrishnan et al., 2023; Yang et al., 2023). To address this risk, AVSD-GER will aggregate acoustic confidence, cross-modal consistency, hypothesis variance, and LLM entropy before deciding whether to activate correction. LoRA is used as a practical adaptation method for the LLM, not as the main contribution of the research (Hu et al., 2021)."
+    },
+    {
+      "i": 12,
+      "style": "Normal",
+      "text": "The proposed research will be evaluated on the AMI meeting corpus, which contains multi-speaker meeting recordings suitable for studying both speech recognition and speaker attribution (Carletta et al., 2005). The experiments will compare AVSD-GER with strong audio-only, audio-visual, speaker-aware, and text-only GER baselines. In addition to normal evaluation settings, degraded frontend conditions will be simulated to examine whether the proposed framework can remain robust when diarization, face information, or active speaker detection becomes less reliable. The main evaluation metrics will include word error rate (WER), speaker-attributed word error rate (SA-WER), and ablation-based analysis of the proposed modules."
+    },
+    {
+      "i": 13,
+      "style": "Heading 2",
+      "text": "Research Questions"
+    },
+    {
+      "i": 17,
+      "style": "Heading 2",
+      "text": "Research Objectives"
+    },
+    {
+      "i": 22,
+      "style": "List Number",
+      "text": "To design a ConfidenceScorer that aggregates acoustic confidence, cross-modal consistency, hypothesis variance, and LLM entropy for closed-loop correction control."
+    },
+    {
+      "i": 27,
+      "style": "Normal",
+      "text": "Recent work increasingly connects AVSR with large language models and large-scale speech backbones. Whisper-Flamingo integrates visual features into Whisper using Flamingo-style gated cross-attention, showing that Whisper can be adapted for AVSR and speech translation with visual input (Rouditchenko et al., 2024). Llama-AVSR further shows that LLMs can act as strong AVSR learners when modality-specific audio and visual tokens are projected into an LLM decoder (Cappellazzo et al., 2025). More recent LLM-based AVSR systems, such as MMS-LLaMA and AVUR-LLM, focus on token efficiency and sparse modality alignment for robust AVSR (Su et al., 2026; Yeo et al., 2025)."
+    },
+    {
+      "i": 28,
+      "style": "Normal",
+      "text": "Despite these advances, many AVSR methods still assume relatively clean input conditions, known speech segments, or a single active speaker. This assumption is restrictive for realistic meeting transcription, where the recognizer must deal with speaker changes, overlapping turns, uncertain face tracks, and imperfect active speaker detection. Existing AVSR and LLM-based AVSR backbones are therefore useful but insufficient for speaker-aware meeting transcription. In contrast, AVSD-GER uses Whisper and AV-HuBERT as representation backbones within a frontend-agnostic framework that explicitly expects diarization and visual frontend errors."
+    },
+    {
+      "i": 32,
+      "style": "Normal",
+      "text": "However, many AVSR studies rely on oracle or near-clean segmentation and speaker information during evaluation. This does not reflect real meetings, where diarization and active speaker detection can fail because of overlapped speech, short turns, occlusion, off-camera speakers, and listener motion. These frontend errors can propagate into downstream transcription and cause wrong speaker attribution even when the recognised words are mostly correct. In contrast, AVSD-GER treats diarization and active speaker detection outputs as noisy cues rather than ground truth, and uses backend identity, alignment, and confidence mechanisms to reduce error propagation."
+    },
+    {
+      "i": 35,
+      "style": "Normal",
+      "text": "Existing methods often model voice identity and face identity separately. This is limiting in meetings because either modality may be unreliable: voice embeddings may degrade during overlapped speech or noise, while face embeddings may fail under occlusion, poor pose, or low visual quality. AVSD-GER addresses this gap with an IdentityFuser that aligns ECAPA-TDNN voice embeddings and ArcFace face embeddings in a joint identity space. The output speaker identity representation, z_id, is then reused by the aligner and GER modules as speaker-aware context."
+    },
+    {
+      "i": 37,
+      "style": "Normal",
+      "text": "Contrastive and self-supervised learning have become central to multimodal representation learning. Contrastive Predictive Coding introduced the InfoNCE objective, which learns representations by distinguishing positive pairs from negative samples (van den Oord et al., 2018). CLIP later showed that symmetric contrastive learning can align image and text representations at large scale through both image-to-text and text-to-image objectives (Radford et al., 2021). In speech, wav2vec 2.0 showed the strength of self-supervised audio representation learning, while AV-HuBERT extended self-supervised learning to audio-visual speech (Baevski et al., 2020; Shi et al., 2022)."
+    },
+    {
+      "i": 40,
+      "style": "Normal",
+      "text": "Cross-modal attention and multimodal fusion are used to combine information from different modalities while preserving their relationships. The Transformer architecture introduced attention as a general mechanism for modelling dependencies, and later multimodal systems extended attention to cross-modal interaction (Vaswani et al., 2017). Conditional feature modulation methods such as FiLM also show that external conditioning signals can guide how a network uses intermediate features (Perez et al., 2018). Whisper-Flamingo is a particularly relevant AVSR example because it injects visual features into Whisper through gated cross-attention (Rouditchenko et al., 2024). These ideas are relevant to AVSD-GER because audio, video, and identity cues should not always be weighted equally."
+    },
+    {
+      "i": 41,
+      "style": "Normal",
+      "text": "Existing multimodal fusion methods often perform global fusion, where audio and visual features are aligned without explicitly conditioning on the current speaker. This is insufficient in multi-speaker meetings because several faces may be visible, speaker turns may overlap, and frontend labels may be uncertain. Recent LLM-based AVSR systems such as AVUR-LLM highlight the importance of modality alignment and feature refinement, but they still focus primarily on recognition rather than speaker-attributed meeting transcription (Su et al., 2026). AVSD-GER addresses this gap through the IDConditionedAligner, which injects the speaker identity vector z_id into cross-modal attention. This enables per-speaker audio-visual alignment rather than global alignment."
+    },
+    {
+      "i": 43,
+      "style": "Normal",
+      "text": "Visual-language model bridging methods connect non-text encoders with large language models. BLIP-2 introduced the Q-Former, a lightweight trainable module that uses learnable query tokens to extract relevant visual information and pass it to a frozen language model (Li et al., 2023). Other multimodal LLM systems, such as Flamingo and LLaVA, also demonstrate that visual or multimodal representations can be connected to language models through cross-attention or projection mechanisms (Alayrac et al., 2022; Liu et al., 2023)."
+    },
+    {
+      "i": 49,
+      "style": "Normal",
+      "text": "However, most existing GER methods, including recent AVSR-oriented ones, do not primarily address speaker-attributed meeting transcription under imperfect diarization and active speaker detection. Correction must preserve both lexical accuracy and speaker attribution. AVSD-GER addresses this limitation by conditioning the GER Head on speaker identity tokens and audio-visual alignment features. LoRA is used only as a practical adaptation method for the LLM correction module, because full fine-tuning of an 8B LLM is computationally expensive (Hu et al., 2021; Llama Team, AI @ Meta, 2024)."
+    },
+    {
+      "i": 51,
+      "style": "Normal",
+      "text": "Confidence estimation is important in ASR because not every recognised word or segment is equally reliable. Classical ASR confidence methods estimate word or hypothesis reliability using posterior probabilities from word graphs or N-best lists (Wessel et al., 2001). In neural systems, uncertainty can also be reflected in model calibration, entropy, hypothesis disagreement, or consistency across modalities. Calibration research shows that neural network probabilities are not always reliable unless explicitly assessed or adjusted (Guo et al., 2017)."
+    },
+    {
+      "i": 52,
+      "style": "Normal",
+      "text": "For AVSD-GER, confidence is not only a diagnostic score but also a control mechanism for closed-loop correction. The proposed ConfidenceScorer aggregates four heterogeneous signals: acoustic confidence, cross-modal consistency, hypothesis variance, and LLM entropy. This is expected to be more robust than a single confidence measure because meeting transcription errors can arise from different sources. High-confidence segments can remain unchanged, while uncertain segments are sent to the GER Head under speaker-aware and audio-visual constraints. This reduces unnecessary correction and helps limit hallucination."
+    },
+    {
+      "i": 53,
+      "style": "Heading 2",
+      "text": "3.9 Meeting Transcription Benchmarks and Evaluation Metrics"
+    },
+    {
+      "i": 56,
+      "style": "Normal",
+      "text": "AVSD-GER will use AMI as the main evaluation corpus because the framework specifically targets speaker-aware audio-visual meeting transcription. The evaluation will use word error rate (WER) to measure transcription accuracy and speaker-attributed word error rate (SA-WER) to measure the joint correctness of words and speaker labels. The experiments will also include degraded frontend conditions, such as diarization noise, face-track dropout, and active-speaker perturbation, to test whether the proposed IdentityFuser, IDConditionedAligner, ConfidenceScorer, and GER Head improve robust speaker-aware transcription."
+    },
+    {
+      "i": 57,
+      "style": "Heading 1",
+      "text": "4. Research Methods and Objectives"
+    },
+    {
+      "i": 59,
+      "style": "Normal",
+      "text": "The first methodological module is IdentityFuser. For each candidate speaker segment, ECAPA-TDNN will be used to extract voice embeddings, while ArcFace will be used to extract face embeddings when reliable face crops are available (Deng et al., 2019; Desplanques et al., 2020). These embeddings will be projected into a shared speaker identity space and trained using BidirectionalInfoNCE. The audio-to-visual and visual-to-audio objectives will encourage voice and face evidence belonging to the same speaker to be close, while separating mismatched identities. The expected output is z_id, a speaker identity representation that can support alignment and correction even when one modality is temporarily unreliable."
+    },
+    {
+      "i": 62,
+      "style": "Normal",
+      "text": "The fourth module is the ConfidenceScorer-controlled GER Head. The system will estimate the confidence of transcript segments using four signals: acoustic confidence, cross-modal consistency, hypothesis variance, and LLM entropy. Only uncertain segments will be sent to the GER Head. The correction module will use Llama-3-8B-Instruct with LoRA-based adaptation for practical fine-tuning under limited computational resources (Hu et al., 2021; Llama Team, AI @ Meta, 2024). The correction output will be accepted only when it improves confidence-based criteria and remains consistent with speaker identity constraints."
+    },
+    {
+      "i": 64,
+      "style": "Normal",
+      "text": "The evaluation will compare AVSD-GER with several baselines, including an audio-only Whisper baseline, an audio-visual baseline using AV-HuBERT features, a speaker-aware pipeline using diarization output without IdentityFuser, and a text-only LLM correction baseline. The main metrics will be word error rate (WER) for transcription accuracy and speaker-attributed word error rate (SA-WER) for joint word and speaker attribution accuracy. Additional analysis will include ablation studies for IdentityFuser, IDConditionedAligner, QFormerProjector, ConfidenceScorer, and the GER Head under clean and degraded frontend conditions."
+    },
+    {
+      "i": 68,
+      "style": "Normal",
+      "text": "This proposal presents AVSD-GER, a frontend-agnostic speaker-aware audio-visual speech recognition framework with generative error correction. The research is motivated by a practical limitation of existing meeting transcription systems: upstream diarization, face tracking, and active speaker detection are often imperfect, and their errors can propagate into downstream speaker-aware transcription. Instead of assuming an ideal frontend, AVSD-GER is designed to use imperfect frontend outputs selectively and to correct recognition errors only when the available evidence supports correction."
+    },
+    {
+      "i": 69,
+      "style": "Normal",
+      "text": "The proposed framework combines five connected contributions: IdentityFuser for bidirectional voice-face speaker identity alignment, IDConditionedAligner for per-speaker audio-visual alignment, QFormerProjector for converting aligned features into soft tokens, ConfidenceScorer for uncertainty-aware closed-loop control, and a GER Head for speaker-aware generative ASR error correction. The study will evaluate these modules on the AMI meeting corpus using WER, SA-WER, degraded frontend simulations, and ablation studies. If successful, this research will contribute a modular and extensible backend design for robust multi-speaker meeting transcription."
+    },
+    {
+      "i": 89,
+      "style": "Normal",
+      "text": "Radhakrishnan, S., Yang, C.-H. H., Khan, S. A., Kumar, R., Kiani, N. A., Gomez-Cabrero, D., & Tegner, J. N. (2023). Whispering LLaMA: A cross-modal generative error correction framework for speech recognition. Proceedings of the 2023 Conference on Empirical Methods in Natural Language Processing, 10007-10016. https://doi.org/10.18653/v1/2023.emnlp-main.618"
+    },
+    {
+      "i": 90,
+      "style": "Normal",
+      "text": "Roth, J., Chaudhuri, S., Klejch, O., Marvin, R., Gallagher, A., Kaver, L., Ramaswamy, S., Stopczynski, A., Schmid, C., Xi, Z., & Pantofaru, C. (2019). AVA-ActiveSpeaker: An audio-visual dataset for active speaker detection. arXiv:1901.01342."
+    }
+  ],
+  "first_paragraphs": [
+    {
+      "i": 0,
+      "style": "Normal",
+      "text": "AVSD-GER: A Frontend-Agnostic Speaker-Aware Audio-Visual Speech Recognition Framework with Generative Error Correction"
+    },
+    {
+      "i": 1,
+      "style": "Normal",
+      "text": "Keywords: Audio-Visual Speech Recognition; Speaker Diarization; Speaker Representation; Cross-Modal Alignment; Generative Error Correction; Large Language Model"
+    },
+    {
+      "i": 2,
+      "style": "Heading 1",
+      "text": "1. Abstract"
+    },
+    {
+      "i": 3,
+      "style": "Normal",
+      "text": "Multi-speaker meetings remain challenging for audio-visual speech recognition (AVSR) because practical systems must recognise not only what was said, but also who said it. In real meeting environments, upstream frontends such as speaker diarization, face tracking, and active speaker detection are often imperfect due to overlapping speech, occlusion, low-resolution video, variable lighting, and noisy audio. These errors can propagate into downstream speaker-aware transcription, resulting in incorrect word recognition and speaker attribution. This research proposes AVSD-GER, a frontend-agnostic speaker-aware AVSR framework with generative error correction. The proposed framework aims to improve robust meeting transcription through four connected modules: an IdentityFuser that aligns ECAPA-TDNN voice embeddings and ArcFace face embeddings into a shared speaker identity representation using BidirectionalInfoNCE; an IDConditionedAligner that injects the speaker identity representation into audio-visual cross-modal attention; a QFormerProjector that converts aligned audio-visual features into soft tokens for LLM conditioning; and a ConfidenceScorer-controlled GER Head that applies LLM-based correction only when correction is likely to be reliable. Experiments will be conducted on the AMI meeting corpus under clean and degraded frontend conditions, using word error rate and speaker-attributed word error rate as the main evaluation metrics. The expected contribution is a modular backend framework that reduces frontend error propagation and improves speaker-aware transcription in realistic multi-speaker meeting scenarios."
+    },
+    {
+      "i": 4,
+      "style": "Heading 1",
+      "text": "2. Overview of Thesis Proposal and Research Questions"
+    },
+    {
+      "i": 5,
+      "style": "Normal",
+      "text": "Audio-visual speech recognition has become an important research direction for robust speech understanding because visual cues such as lip movement, face identity, and active speaker information can complement acoustic signals, especially in noisy or multi-speaker environments (Afouras et al., 2018; Shi et al., 2022). In meeting transcription, however, the task is more complex than conventional speech recognition. A practical system must identify the spoken words, determine which participant produced them, and maintain consistent speaker attribution across a long conversation. This makes speaker-aware AVSR highly dependent on the reliability of upstream frontends, including diarization, face tracking, visual speech feature extraction, and active speaker detection."
+    },
+    {
+      "i": 6,
+      "style": "Normal",
+      "text": "Existing AVSR and speaker-aware transcription pipelines often assume that these frontend components provide sufficiently accurate outputs. In real-world meetings, this assumption is fragile. Speaker diarization can fail during overlapping speech or rapid turn-taking; visual cues may be unavailable when a speaker is off-camera or occluded; and active speaker detection may confuse listeners with speakers when multiple faces appear on screen. Prior work on meeting corpora, diarization, active speaker detection, and speaker embeddings shows both the importance and difficulty of speaker modelling in multi-speaker settings (Carletta et al., 2005; Desplanques et al., 2020; Roth et al., 2019; Snyder et al., 2018). Once these errors enter the recognition pipeline, they may cause incorrect audio-visual alignment, unstable speaker identities, and inaccurate speaker-attributed transcripts."
+    },
+    {
+      "i": 7,
+      "style": "Normal",
+      "text": "This study addresses the problem through AVSD-GER, a frontend-agnostic speaker-aware AVSR framework with generative error correction. The term frontend-agnostic means that the proposed backend is not designed around a single ideal diarization or active speaker detection module. Instead, it is intended to accept imperfect audio-visual speaker cues, estimate their reliability, and use them selectively. The framework combines cross-modal speaker identity learning, speaker-conditioned audio-visual alignment, soft-token bridging to a language model, and confidence-gated generative error correction to reduce error propagation from upstream components."
+    },
+    {
+      "i": 8,
+      "style": "Normal",
+      "text": "The first module, IdentityFuser, will align ECAPA-TDNN voice embeddings and ArcFace face embeddings into a shared speaker identity representation. These two representation families are suitable because ECAPA-TDNN is widely used for speaker verification, while ArcFace provides discriminative face identity embeddings (Deng et al., 2019; Desplanques et al., 2020). Unlike a simple concatenation of voice and face features, IdentityFuser will be trained using BidirectionalInfoNCE so that both audio-to-visual and visual-to-audio alignment are optimised, following the broader logic of symmetric cross-modal contrastive learning (Radford et al., 2021; van den Oord et al., 2018)."
+    },
+    {
+      "i": 9,
+      "style": "Normal",
+      "text": "The second module, IDConditionedAligner, will align Whisper-large-v3 audio representations with AV-HuBERT audio-visual features using the speaker identity representation z_id as a conditioning signal. This design builds on the robustness of large-scale ASR representations and self-supervised audio-visual speech representations (Radford et al., 2022; Shi et al., 2022). Through speaker-conditioned cross-modal attention, the aligner aims to perform per-speaker audio-visual alignment rather than global fusion, which is important when multiple faces, overlapping turns, or uncertain frontend outputs are present."
+    },
+    {
+      "i": 10,
+      "style": "Normal",
+      "text": "The third module, QFormerProjector, will bridge the aligned audio-visual representation f_align to the language model. Inspired by Q-Former style visual-language bridging, the projector will produce 16 soft tokens that carry speaker-aware audio-visual alignment information into the GER Head (Li et al., 2023). This allows the correction model to use multimodal evidence rather than relying only on text hypotheses."
+    },
+    {
+      "i": 11,
+      "style": "Normal",
+      "text": "The fourth module, ConfidenceScorer-controlled GER Head, will perform confidence-gated generative error correction. Large language models can be useful for correcting recognition errors, restoring missing words, and improving contextual consistency, but recent work also suggests that ASR correction must be controlled carefully to avoid unsupported changes (Ma et al., 2023; Radhakrishnan et al., 2023; Yang et al., 2023). To address this risk, AVSD-GER will aggregate acoustic confidence, cross-modal consistency, hypothesis variance, and LLM entropy before deciding whether to activate correction. LoRA is used as a practical adaptation method for the LLM, not as the main contribution of the research (Hu et al., 2021)."
+    },
+    {
+      "i": 12,
+      "style": "Normal",
+      "text": "The proposed research will be evaluated on the AMI meeting corpus, which contains multi-speaker meeting recordings suitable for studying both speech recognition and speaker attribution (Carletta et al., 2005). The experiments will compare AVSD-GER with strong audio-only, audio-visual, speaker-aware, and text-only GER baselines. In addition to normal evaluation settings, degraded frontend conditions will be simulated to examine whether the proposed framework can remain robust when diarization, face information, or active speaker detection becomes less reliable. The main evaluation metrics will include word error rate (WER), speaker-attributed word error rate (SA-WER), and ablation-based analysis of the proposed modules."
+    },
+    {
+      "i": 13,
+      "style": "Heading 2",
+      "text": "Research Questions"
+    },
+    {
+      "i": 14,
+      "style": "List Number",
+      "text": "How can cross-modal speaker identity representations be learned from voice and face embeddings to support robust speaker-aware transcription under imperfect diarization and visual conditions?"
+    },
+    {
+      "i": 15,
+      "style": "List Number",
+      "text": "To what extent can speaker-conditioned audio-visual alignment improve word recognition and speaker attribution in multi-speaker meeting transcription?"
+    },
+    {
+      "i": 16,
+      "style": "List Number",
+      "text": "How can generative error correction be conditioned on speaker identity, audio-visual alignment features, and confidence signals while reducing the risk of hallucination and speaker attribution errors?"
+    },
+    {
+      "i": 17,
+      "style": "Heading 2",
+      "text": "Research Objectives"
+    },
+    {
+      "i": 18,
+      "style": "List Number",
+      "text": "To design a frontend-agnostic backend framework for speaker-aware audio-visual speech recognition in multi-speaker meeting scenarios."
+    },
+    {
+      "i": 19,
+      "style": "List Number",
+      "text": "To develop IdentityFuser, a cross-modal speaker identity module that aligns ECAPA-TDNN voice embeddings and ArcFace face embeddings using BidirectionalInfoNCE."
+    },
+    {
+      "i": 20,
+      "style": "List Number",
+      "text": "To implement IDConditionedAligner, a speaker-conditioned cross-modal attention module that aligns Whisper-large-v3 and AV-HuBERT representations using z_id."
+    },
+    {
+      "i": 21,
+      "style": "List Number",
+      "text": "To develop QFormerProjector and a GER Head that condition LLM-based ASR correction on speaker-aware audio-visual soft tokens."
+    },
+    {
+      "i": 22,
+      "style": "List Number",
+      "text": "To design a ConfidenceScorer that aggregates acoustic confidence, cross-modal consistency, hypothesis variance, and LLM entropy for closed-loop correction control."
+    },
+    {
+      "i": 23,
+      "style": "List Number",
+      "text": "To evaluate AVSD-GER on the AMI meeting corpus using WER, SA-WER, robustness tests under degraded frontend conditions, and component ablation studies."
+    },
+    {
+      "i": 24,
+      "style": "Heading 1",
+      "text": "3. Literature Review"
+    }
+  ],
+  "last_paragraphs": [
+    {
+      "i": 61,
+      "style": "Normal",
+      "text": "The third module is QFormerProjector. Inspired by Q-Former style bridging, this module will convert the aligned representation f_align into 16 soft tokens that can condition the language model (Li et al., 2023). These soft tokens are intended to carry cross-modal alignment and speaker-aware evidence into the GER Head. This design bridges audio-visual representations and language-model-based correction without requiring the LLM to directly process raw audio or video."
+    },
+    {
+      "i": 62,
+      "style": "Normal",
+      "text": "The fourth module is the ConfidenceScorer-controlled GER Head. The system will estimate the confidence of transcript segments using four signals: acoustic confidence, cross-modal consistency, hypothesis variance, and LLM entropy. Only uncertain segments will be sent to the GER Head. The correction module will use Llama-3-8B-Instruct with LoRA-based adaptation for practical fine-tuning under limited computational resources (Hu et al., 2021; Llama Team, AI @ Meta, 2024). The correction output will be accepted only when it improves confidence-based criteria and remains consistent with speaker identity constraints."
+    },
+    {
+      "i": 63,
+      "style": "Normal",
+      "text": "The experiment will use the AMI meeting corpus because it contains multi-speaker meeting data with audio, video, close-up cameras, and annotations suitable for speech and multimodal meeting research (Carletta et al., 2005). Pre-processing will include audio segmentation, video frame extraction, face track preparation, diarization frontend output generation, active speaker detection output preparation, and alignment with reference transcripts. Degraded frontend settings will be simulated by introducing controlled diarization noise, dropping face tracks, reducing visual confidence, or perturbing active speaker labels."
+    },
+    {
+      "i": 64,
+      "style": "Normal",
+      "text": "The evaluation will compare AVSD-GER with several baselines, including an audio-only Whisper baseline, an audio-visual baseline using AV-HuBERT features, a speaker-aware pipeline using diarization output without IdentityFuser, and a text-only LLM correction baseline. The main metrics will be word error rate (WER) for transcription accuracy and speaker-attributed word error rate (SA-WER) for joint word and speaker attribution accuracy. Additional analysis will include ablation studies for IdentityFuser, IDConditionedAligner, QFormerProjector, ConfidenceScorer, and the GER Head under clean and degraded frontend conditions."
+    },
+    {
+      "i": 65,
+      "style": "Heading 1",
+      "text": "5. Work Plan and Timetable"
+    },
+    {
+      "i": 66,
+      "style": "Normal",
+      "text": "The proposed work plan assumes a twelve-month research schedule. The plan may be adjusted according to supervisor feedback, computational resource availability, and the progress of model implementation. The main milestones are listed below."
+    },
+    {
+      "i": 67,
+      "style": "Heading 1",
+      "text": "6. Conclusion"
+    },
+    {
+      "i": 68,
+      "style": "Normal",
+      "text": "This proposal presents AVSD-GER, a frontend-agnostic speaker-aware audio-visual speech recognition framework with generative error correction. The research is motivated by a practical limitation of existing meeting transcription systems: upstream diarization, face tracking, and active speaker detection are often imperfect, and their errors can propagate into downstream speaker-aware transcription. Instead of assuming an ideal frontend, AVSD-GER is designed to use imperfect frontend outputs selectively and to correct recognition errors only when the available evidence supports correction."
+    },
+    {
+      "i": 69,
+      "style": "Normal",
+      "text": "The proposed framework combines five connected contributions: IdentityFuser for bidirectional voice-face speaker identity alignment, IDConditionedAligner for per-speaker audio-visual alignment, QFormerProjector for converting aligned features into soft tokens, ConfidenceScorer for uncertainty-aware closed-loop control, and a GER Head for speaker-aware generative ASR error correction. The study will evaluate these modules on the AMI meeting corpus using WER, SA-WER, degraded frontend simulations, and ablation studies. If successful, this research will contribute a modular and extensible backend design for robust multi-speaker meeting transcription."
+    },
+    {
+      "i": 70,
+      "style": "Heading 1",
+      "text": "7. Reference List"
+    },
+    {
+      "i": 71,
+      "style": "Normal",
+      "text": "Afouras, T., Chung, J. S., Senior, A., Vinyals, O., & Zisserman, A. (2018). Deep audio-visual speech recognition. arXiv:1809.02108."
+    },
+    {
+      "i": 72,
+      "style": "Normal",
+      "text": "Alayrac, J.-B., Donahue, J., Luc, P., Miech, A., Barr, I., Hasson, Y., Lenc, K., Mensch, A., Millican, K., Reynolds, M., Ring, R., Rutherford, E., Cabi, S., Han, T., Gong, Z., Samangooei, S., Monteiro, M., Menick, J., Borgeaud, S., Brock, A., ... Simonyan, K. (2022). Flamingo: A visual language model for few-shot learning. Advances in Neural Information Processing Systems."
+    },
+    {
+      "i": 73,
+      "style": "Normal",
+      "text": "Baevski, A., Zhou, Y., Mohamed, A., & Auli, M. (2020). wav2vec 2.0: A framework for self-supervised learning of speech representations. Advances in Neural Information Processing Systems."
+    },
+    {
+      "i": 74,
+      "style": "Normal",
+      "text": "Cappellazzo, U., Kim, M., Chen, H., Ma, P., Petridis, S., Falavigna, D., Brutti, A., & Pantic, M. (2025). Large language models are strong audio-visual speech recognition learners. Proceedings of the IEEE International Conference on Acoustics, Speech and Signal Processing."
+    },
+    {
+      "i": 75,
+      "style": "Normal",
+      "text": "Carletta, J., Ashby, S., Bourban, S., Flynn, M., Guillemot, M., Hain, T., Kadlec, J., Karaiskos, V., Kraaij, W., Kronenthal, M., Lathoud, G., Lincoln, M., Lisowska, A., McCowan, I., Post, W., Reidsma, D., & Wellner, P. (2005). The AMI meeting corpus: A pre-announcement. In Machine Learning for Multimodal Interaction (pp. 28-39). Springer."
+    },
+    {
+      "i": 76,
+      "style": "Normal",
+      "text": "Deng, J., Guo, J., Xue, N., & Zafeiriou, S. (2019). ArcFace: Additive angular margin loss for deep face recognition. Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, 4690-4699. https://doi.org/10.1109/CVPR.2019.00482"
+    },
+    {
+      "i": 77,
+      "style": "Normal",
+      "text": "Desplanques, B., Thienpondt, J., & Demuynck, K. (2020). ECAPA-TDNN: Emphasized channel attention, propagation and aggregation in TDNN based speaker verification. Interspeech 2020, 3830-3834."
+    },
+    {
+      "i": 78,
+      "style": "Normal",
+      "text": "Gao, M., Wu, S., Chen, H., Du, J., Lee, C.-H., Watanabe, S., Chen, J., Siniscalchi, S. M., & Scharenborg, O. (2025). The Multimodal Information Based Speech Processing (MISP) 2025 Challenge: Audio-Visual Diarization and Recognition. Interspeech 2025."
+    },
+    {
+      "i": 79,
+      "style": "Normal",
+      "text": "Guo, C., Pleiss, G., Sun, Y., & Weinberger, K. Q. (2017). On calibration of modern neural networks. Proceedings of the 34th International Conference on Machine Learning, 1321-1330."
+    },
+    {
+      "i": 80,
+      "style": "Normal",
+      "text": "Hu, E. J., Shen, Y., Wallis, P., Allen-Zhu, Z., Li, Y., Wang, S., Wang, L., & Chen, W. (2021). LoRA: Low-rank adaptation of large language models. arXiv:2106.09685."
+    },
+    {
+      "i": 81,
+      "style": "Normal",
+      "text": "Li, J., Li, D., Savarese, S., & Hoi, S. (2023). BLIP-2: Bootstrapping language-image pre-training with frozen image encoders and large language models. Proceedings of the 40th International Conference on Machine Learning."
+    },
+    {
+      "i": 82,
+      "style": "Normal",
+      "text": "Liu, H., Li, C., Wu, Q., & Lee, Y. J. (2023). Visual instruction tuning. Advances in Neural Information Processing Systems."
+    },
+    {
+      "i": 83,
+      "style": "Normal",
+      "text": "Liu, R., Yuan, H., & Li, H. (2025). Listening and seeing again: Generative error correction for audio-visual speech recognition. Information Fusion, 120, 103077."
+    },
+    {
+      "i": 84,
+      "style": "Normal",
+      "text": "Llama Team, AI @ Meta. (2024). The Llama 3 herd of models. arXiv:2407.21783."
+    },
+    {
+      "i": 85,
+      "style": "Normal",
+      "text": "Ma, R., Qian, M., Manakul, P., Gales, M., & Knill, K. (2023). Can generative large language models perform ASR error correction? arXiv:2307.04172."
+    },
+    {
+      "i": 86,
+      "style": "Normal",
+      "text": "Perez, E., Strub, F., de Vries, H., Dumoulin, V., & Courville, A. (2018). FiLM: Visual reasoning with a general conditioning layer. Proceedings of the AAAI Conference on Artificial Intelligence."
+    },
+    {
+      "i": 87,
+      "style": "Normal",
+      "text": "Radford, A., Kim, J. W., Hallacy, C., Ramesh, A., Goh, G., Agarwal, S., Sastry, G., Askell, A., Mishkin, P., Clark, J., Krueger, G., & Sutskever, I. (2021). Learning transferable visual models from natural language supervision. Proceedings of the 38th International Conference on Machine Learning, 8748-8763."
+    },
+    {
+      "i": 88,
+      "style": "Normal",
+      "text": "Radford, A., Kim, J. W., Xu, T., Brockman, G., McLeavey, C., & Sutskever, I. (2022). Robust speech recognition via large-scale weak supervision. arXiv:2212.04356."
+    },
+    {
+      "i": 89,
+      "style": "Normal",
+      "text": "Radhakrishnan, S., Yang, C.-H. H., Khan, S. A., Kumar, R., Kiani, N. A., Gomez-Cabrero, D., & Tegner, J. N. (2023). Whispering LLaMA: A cross-modal generative error correction framework for speech recognition. Proceedings of the 2023 Conference on Empirical Methods in Natural Language Processing, 10007-10016. https://doi.org/10.18653/v1/2023.emnlp-main.618"
+    },
+    {
+      "i": 90,
+      "style": "Normal",
+      "text": "Roth, J., Chaudhuri, S., Klejch, O., Marvin, R., Gallagher, A., Kaver, L., Ramaswamy, S., Stopczynski, A., Schmid, C., Xi, Z., & Pantofaru, C. (2019). AVA-ActiveSpeaker: An audio-visual dataset for active speaker detection. arXiv:1901.01342."
+    },
+    {
+      "i": 91,
+      "style": "Normal",
+      "text": "Rouditchenko, A., Gong, Y., Thomas, S., Karlinsky, L., Kuehne, H., Feris, R., & Glass, J. (2024). Whisper-Flamingo: Integrating visual features into Whisper for audio-visual speech recognition and translation. arXiv:2406.10082."
+    },
+    {
+      "i": 92,
+      "style": "Normal",
+      "text": "Schroff, F., Kalenichenko, D., & Philbin, J. (2015). FaceNet: A unified embedding for face recognition and clustering. Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition, 815-823."
+    },
+    {
+      "i": 93,
+      "style": "Normal",
+      "text": "Shi, B., Hsu, W.-N., Lakhotia, K., & Mohamed, A. (2022). Learning audio-visual speech representation by masked multimodal cluster prediction. International Conference on Learning Representations."
+    },
+    {
+      "i": 94,
+      "style": "Normal",
+      "text": "Snyder, D., Garcia-Romero, D., Sell, G., Povey, D., & Khudanpur, S. (2018). X-vectors: Robust DNN embeddings for speaker recognition. 2018 IEEE International Conference on Acoustics, Speech and Signal Processing, 5329-5333. https://doi.org/10.1109/ICASSP.2018.8461375"
+    },
+    {
+      "i": 95,
+      "style": "Normal",
+      "text": "Su, F., Li, C., Liu, J., Ju, W., Suo, H., & Li, M. (2026). Robust LLM-based audio-visual speech recognition with sparse modality alignment and visual unit-guided refinement. arXiv:2603.03811."
+    },
+    {
+      "i": 96,
+      "style": "Normal",
+      "text": "van den Oord, A., Li, Y., & Vinyals, O. (2018). Representation learning with contrastive predictive coding. arXiv:1807.03748."
+    },
+    {
+      "i": 97,
+      "style": "Normal",
+      "text": "Vaswani, A., Shazeer, N., Parmar, N., Uszkoreit, J., Jones, L., Gomez, A. N., Kaiser, L., & Polosukhin, I. (2017). Attention is all you need. Advances in Neural Information Processing Systems."
+    },
+    {
+      "i": 98,
+      "style": "Normal",
+      "text": "Wessel, F., Schluter, R., Macherey, K., & Ney, H. (2001). Confidence measures for large vocabulary continuous speech recognition. IEEE Transactions on Speech and Audio Processing, 9(3), 288-298."
+    },
+    {
+      "i": 99,
+      "style": "Normal",
+      "text": "Yang, H., Gu, Y., Liu, Y.-C., Ghosh, S., Bulyko, I., & Stolcke, A. (2023). Generative speech recognition error correction with large language models and task-activating prompting. 2023 IEEE Automatic Speech Recognition and Understanding Workshop."
+    },
+    {
+      "i": 100,
+      "style": "Normal",
+      "text": "Yeo, J. H., Rha, H., Park, S. J., & Ro, Y. M. (2025). MMS-LLaMA: Efficient LLM-based audio-visual speech recognition with minimal multimodal speech tokens. Findings of the Association for Computational Linguistics: ACL 2025."
+    }
+  ]
+}

@@ -41,10 +41,12 @@ alignment:
   low_conf_handling: soft_gating
   dropout: 0.1
 ger:
-  llm_name: meta-llama/Meta-Llama-3-8B-Instruct
+  backend: local_hf
+  model_family: qwen2.5-3b-instruct
+  model_path: checkpoints/Qwen2.5-3B-Instruct
   max_new_tokens: 64
   speaker_special_token: '[Speaker: ID_i]'
-  llm_quant: 4bit
+  dtype: bf16
   lora:
     r: 16
     alpha: 32

@@ -49,9 +49,8 @@ insightface>=0.7.3      # ArcFace
 onnxruntime>=1.17       # InsightFace backend (use onnxruntime-gpu if you want CUDA exec)
 
 # ---- GER head -------------------------------------------------------------
-peft>=0.10.0            # Llama-3-8B LoRA
+peft>=0.10.0            # Qwen2.5/Llama-3.2 LoRA
 sentencepiece>=0.2.0
-bitsandbytes>=0.45,<0.48 # 0.43+ uses torch.library.impl_abstract (added in torch 2.4); cap <0.48 for stability
 
 
 # ---- Audio / video IO -----------------------------------------------------

@@ -168,9 +168,7 @@ def train(
     if ger is not None and ger_projectors_checkpoint:
         p = Path(ger_projectors_checkpoint)
         if p.exists():
-            state = torch.load(p, map_location=device)
-            ger.qformer.load_state_dict(state["qformer"])
-            ger.id_proj.load_state_dict(state["id_proj"])
+            ger.load_projector_checkpoint(p, map_location=device)
             print(f"[stage2] loaded GER projectors checkpoint from {p}")
         else:
             raise FileNotFoundError(f"GER projectors checkpoint not found: {p}")
@@ -404,13 +402,7 @@ def train(
     if ger is not None:
         ger_dir = out / "ger"
         ger_dir.mkdir(parents=True, exist_ok=True)
-        torch.save(
-            {
-                "qformer": ger.qformer.state_dict(),
-                "id_proj": ger.id_proj.state_dict(),
-            },
-            ger_dir / "ger_projectors.pt",
-        )
+        ger.save_projector_checkpoint(ger_dir / "ger_projectors.pt")
         if not stub and ger._llm is not None:
             ger._llm.save_pretrained(ger_dir / "lora_adapter")
             if ger._tok is not None:
@@ -568,14 +560,17 @@ def main() -> None:
         help="Override cfg.ger.mode for Stage-2 training.",
     )
     ap.add_argument(
-        "--llm-name",
+        "--model-path", "--llm-name", dest="model_path",
         default=None,
         help=(
-            "Override cfg.ger.llm_name without editing YAML. This selects the "
-            "causal LLM used by the GER head/LoRA path. default.yaml sets "
-            "meta-llama/Meta-Llama-3-8B-Instruct. Example: "
-            "Qwen/Qwen2.5-3B-Instruct."
+            "Override the local HF causal-LM directory "
+            "(legacy alias: --llm-name)."
         ),
+    )
+    ap.add_argument(
+        "--model-family",
+        choices=["qwen2.5-3b-instruct", "llama-3.2-3b-instruct"],
+        default=None,
     )
     ap.add_argument(
         "--max-new-tokens",
@@ -621,10 +616,9 @@ def main() -> None:
         ),
     )
     ap.add_argument(
-        "--llm-quant", default=None,
-        choices=["auto", "fp16", "bf16", "int8", "4bit"],
-        help="Override Llama-3 weight precision. auto = pick from GPU VRAM. "
-             "Default: read from configs/default.yaml (ger.llm_quant).",
+        "--ger-dtype", "--llm-quant", dest="ger_dtype", default=None,
+        choices=["auto", "fp32", "fp16", "bf16"],
+        help="Override dense GER model dtype (legacy alias: --llm-quant).",
     )
     ap.add_argument(
         "--debug-loss-every",
@@ -661,9 +655,11 @@ def main() -> None:
     if args.ger_mode is not None:
         cfg.setdefault("ger", {})["mode"] = args.ger_mode
         print(f"[train_stage2] Override ger.mode -> {args.ger_mode}")
-    if args.llm_name is not None:
-        cfg.setdefault("ger", {})["llm_name"] = args.llm_name
-        print(f"[train_stage2] Override ger.llm_name -> {args.llm_name}")
+    if args.model_path is not None:
+        cfg.setdefault("ger", {})["model_path"] = args.model_path
+        print(f"[train_stage2] Override ger.model_path -> {args.model_path}")
+    if args.model_family is not None:
+        cfg.setdefault("ger", {})["model_family"] = args.model_family
     if args.max_new_tokens is not None:
         cfg.setdefault("ger", {})["max_new_tokens"] = args.max_new_tokens
         print(f"[train_stage2] Override ger.max_new_tokens -> {args.max_new_tokens}")
@@ -679,9 +675,9 @@ def main() -> None:
     if args.no_encoder_context:
         cfg.setdefault("asr", {})["expose_encoder"] = False
         print("[train_stage2] no_encoder_context -> ASR/VSR text n-best only; no encoder soft context")
-    if args.llm_quant is not None:
-        cfg.setdefault("ger", {})["llm_quant"] = args.llm_quant
-        print(f"[train_stage2] Override llm_quant -> {args.llm_quant}")
+    if args.ger_dtype is not None:
+        cfg.setdefault("ger", {})["dtype"] = args.ger_dtype
+        print(f"[train_stage2] Override ger.dtype -> {args.ger_dtype}")
     wb = WandbLogger.from_args(
         args,
         default_project="avsd-ger",

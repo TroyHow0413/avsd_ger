@@ -19,7 +19,7 @@
                                               │               │ f_align
                                               ▼               ▼
                                     ┌─────────────────────────────────────┐
-                                    │ GER Head: Llama-3-8B + LoRA         │
+│ GER Head: local dense 3B LM + LoRA  │
                                     │ prompt = [Speaker token]            │
                                     │          + Audio N-best (text)      │
                                     │          + Visual hyp (text)        │
@@ -72,9 +72,11 @@ Spec §2 C2 mandates four design choices:
 3. **Per-speaker key-padding mask**: VSR frames not assigned to the current speaker are masked out — this is the structural reason the aligner cannot hallucinate lip evidence from another speaker.
 4. **Soft gating**: `attn_weight *= min(SNR_per_token, lip_conf_per_frame)`, implemented as an additive log-bias on the logits so gradients flow.
 
-### GER head (`c2_alignment/ger_head.py`)
+### GER head (`c2_alignment/`)
 
-* **LLM**: `meta-llama/Meta-Llama-3-8B-Instruct`, LoRA `r=16, α=32, dropout=0.05`, target modules `{q,k,v,o,gate,up,down}_proj`.
+* **LLM backend**: local dense Hugging Face causal LM only; phase 1 profiles are Qwen2.5-3B-Instruct (hidden size 2048) and Llama-3.2-3B-Instruct (hidden size 3072).
+* **Policies**: prompt/chat-template handling, QFormer soft-token bridging, deterministic generation, and checkpoint compatibility metadata are separate modules.
+* **LoRA**: `r=16, α=32, dropout=0.05`; target modules are selected and validated from the active model profile.
 * **Soft prefix**: a Q-Former–style projector turns `f_align` into a fixed-length sequence of pseudo-token embeddings (`<AV_CTX>`).
 * **Speaker token**: `[Speaker: ID_i]` is **registered** as a special token before training so the LLM cannot fragment it.
 * **Prompt (spec §2 C2, verbatim)**:

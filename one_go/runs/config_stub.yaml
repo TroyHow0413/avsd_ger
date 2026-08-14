@@ -6,6 +6,12 @@ asr:
   backend: faster-whisper
   beam_size: 10
   n_best: 5
+  temperatures:
+  - 0.0
+  - 0.2
+  - 0.4
+  - 0.6
+  - 0.8
   compute_type: int8_float16
   expose_encoder: true
   word_timestamps: true
@@ -14,6 +20,7 @@ vsr:
   checkpoint: checkpoints/self_large_vox_433h.pt
   config: av_hubert/avhubert/conf/finetune/self_large_vox_433h.yaml
   layer: -1
+  n_best: 5
   emit_text: true
 frontend:
   profile: common_pyannote_lightasd
@@ -22,6 +29,14 @@ frontend:
   face_tracking: RetinaFace_or_InsightFace_plus_SORT
   mouth_roi: av_hubert_align_mouth
   claim: frontend_agnostic_avsd_ger
+mouth_roi:
+  backend: dlib
+  crop_height: 48
+  crop_width: 48
+  window_margin: 12
+  face_predictor_path: checkpoints/shape_predictor_68_face_landmarks.dat
+  cnn_detector_path: checkpoints/mmod_human_face_detector.dat
+  mean_face_path: av_hubert/avhubert/preparation/data/20words_mean_face.npy
 identity:
   voice_encoder: speechbrain/spkrec-ecapa-voxceleb
   face_encoder: buffalo_l
@@ -85,8 +100,14 @@ ger:
 feedback:
   max_iters: 3
   tau_update: 0.55
+  enable_pool_update: false
   confidence_low: 0.35
   confidence_mid: 0.55
+  enable_ger_safety_gate: true
+  enable_ger_artifact_gate: true
+  enable_ger_length_gate: true
+  enable_ger_overlap_gate: true
+  enable_ger_acoustic_fallback: false
   ger_fallback_min_conf: 0.2
   ger_fallback_margin: 0.05
   weights:

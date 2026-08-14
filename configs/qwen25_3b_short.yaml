@@ -136,21 +136,21 @@ ger:
   #                  audio_only per turn when no real mouth_roi is present.
   #   visual_only -- reserved for future VSR-only GER experiments.
   mode: av
-  # Spec section 5.2 / 6 finalized: Llama-3-8B LoRA
-  llm_name: Qwen/Qwen2.5-3B-Instruct
+  # Dense Qwen backend, loaded strictly from this local HF directory.
+  backend: local_hf
+  model_family: qwen2.5-3b-instruct
+  model_path: checkpoints/Qwen2.5-3B-Instruct
   max_new_tokens: 24        # 24 is plenty for GER on a single utterance (typical sentence < 30 tokens). Halves the KV cache vs. 128 — saves ~0.5 GB on 16 GB GPUs.
   speaker_special_token: "[Speaker: ID_i]"   # register before training
-  # LLM weight precision. "auto" picks based on detected GPU VRAM:
-  #   >=40GB -> fp16   (full precision, ~16GB weights, A100/H100)
-  #   16-40GB -> int8  (bnb 8-bit, ~9GB,  A6000 / smaller A100)
-  #   <16GB  -> 4bit   (bnb nf4, ~5-6GB,  RTX 3090/4090/5080)
-  # Manual override on CLI via --llm-quant fp16|int8|4bit|auto
-  llm_quant: auto
+  dtype: auto
+  bridge:
+    n_queries: 16
+    n_heads: 8
   lora:
     r: 16
     alpha: 32
     dropout: 0.05
-    target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+    target_modules: auto
   # Spec section 2 C2 prompt template (verbatim; id_prefix injects [Speaker: ID_i])
   prompt_template: |
     {speaker_tag}

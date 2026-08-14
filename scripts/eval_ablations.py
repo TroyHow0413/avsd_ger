@@ -306,9 +306,7 @@ def _load_stage2_checkpoints(
 
     projectors = root / "ger_projectors.pt" if root.is_dir() else root
     if projectors.exists() and projectors.is_file():
-        state = torch.load(projectors, map_location=pipe.device)
-        pipe.ger.qformer.load_state_dict(state["qformer"])
-        pipe.ger.id_proj.load_state_dict(state["id_proj"])
+        pipe.ger.load_projector_checkpoint(projectors, map_location=pipe.device)
         print(f"[stage2] loaded GER projectors: {projectors}")
 
     adapter_dir = root / "lora_adapter" if root.is_dir() else None
@@ -671,20 +669,22 @@ def main() -> int:
         help="restrict to a subset of {full_model,wo_c1,wo_c2,wo_c3,c3_wo_conf_gate}",
     )
     p.add_argument(
-        "--llm-quant", default=None,
-        choices=["auto", "fp16", "bf16", "int8", "4bit"],
-        help="Override LLM weight precision. auto = pick from GPU VRAM. "
-             "Default: read from configs/default.yaml (ger.llm_quant).",
+        "--ger-dtype", "--llm-quant", dest="ger_dtype", default=None,
+        choices=["auto", "fp32", "fp16", "bf16"],
+        help="Override dense GER model dtype (legacy alias: --llm-quant).",
     )
     p.add_argument(
-        "--llm-name",
+        "--model-path", "--llm-name", dest="model_path",
         default=None,
         help=(
-            "Override cfg.ger.llm_name without editing YAML. This selects the "
-            "causal LLM used by the GER head/LoRA adapter. default.yaml sets "
-            "meta-llama/Meta-Llama-3-8B-Instruct. Example: "
-            "Qwen/Qwen2.5-3B-Instruct."
+            "Override the local HF causal-LM directory "
+            "(legacy alias: --llm-name)."
         ),
+    )
+    p.add_argument(
+        "--model-family",
+        choices=["qwen2.5-3b-instruct", "llama-3.2-3b-instruct"],
+        default=None,
     )
     p.add_argument(
         "--max-new-tokens",
@@ -748,13 +748,14 @@ def main() -> int:
     args = p.parse_args()
 
     cfg = load_config(args.config)
-    # Apply --llm-quant override before any per-row pipeline gets built.
-    if args.llm_quant is not None:
-        cfg.setdefault("ger", {})["llm_quant"] = args.llm_quant
-        print(f"[eval_ablations] Override llm_quant -> {args.llm_quant}")
-    if args.llm_name is not None:
-        cfg.setdefault("ger", {})["llm_name"] = args.llm_name
-        print(f"[eval_ablations] Override ger.llm_name -> {args.llm_name}")
+    if args.ger_dtype is not None:
+        cfg.setdefault("ger", {})["dtype"] = args.ger_dtype
+        print(f"[eval_ablations] Override ger.dtype -> {args.ger_dtype}")
+    if args.model_path is not None:
+        cfg.setdefault("ger", {})["model_path"] = args.model_path
+        print(f"[eval_ablations] Override ger.model_path -> {args.model_path}")
+    if args.model_family is not None:
+        cfg.setdefault("ger", {})["model_family"] = args.model_family
     if args.max_new_tokens is not None:
         cfg.setdefault("ger", {})["max_new_tokens"] = args.max_new_tokens
         print(f"[eval_ablations] Override ger.max_new_tokens -> {args.max_new_tokens}")

@@ -23,7 +23,7 @@ Backbone expectations:
 | AV-HuBERT Large | `checkpoints/avhubert_large_lrs3_iter5.pt`. |
 | ECAPA-TDNN | Auto-cached from SpeechBrain. |
 | InsightFace `buffalo_l` | Auto-cached on first face embedding call. |
-| Llama-3-8B-Instruct | Requires `hf auth login` and approved gated access. |
+| GER causal LM | Put Qwen2.5-3B-Instruct or Llama-3.2-3B-Instruct in the local directory selected by the config. GER never downloads weights. |
 
 For Windows native shells, make sure AV-HuBERT is on `PYTHONPATH` as described in the README install section.
 
@@ -117,7 +117,7 @@ python scripts/train_stage2.py \
     --out checkpoints/stage2_ger_lora/ \
     --warmup ger_lora \
     --no-encoder-context \
-    --llm-quant 4bit
+    --ger-dtype bf16
 ```
 
 Current warmup modes:
@@ -188,8 +188,8 @@ The first eval log should show a non-zero speaker count or fresh enrollment mess
 
 | GPU class | Practical setting |
 |---|---|
-| 24 GB cards | Prefer `--warmup ger_lora --no-encoder-context --llm-quant 4bit` before attempting joint runs. |
-| A100 40 GB | Joint with Llama fp16/bf16 is more realistic, still keep batch sizes conservative. |
+| 24 GB cards | Prefer the Qwen2.5-3B config with `--warmup ger_lora --no-encoder-context --ger-dtype bf16` before attempting joint runs. |
+| A100 40 GB | Joint dense fp16/bf16 runs are more realistic; still keep batch sizes conservative. |
 | A100 80 GB / H100 | Joint runs have more room for full AV context and larger accumulation. |
 
-Use `--llm-quant auto` or `4bit` when memory is tight. The exact supported quantization path is implemented in `avsd_ger/c2_alignment/ger_head.py`.
+Use `--ger-dtype auto`, `bf16`, or `fp16`. Quantized GER loading is intentionally outside the phase-1 backend scope.
