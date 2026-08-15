@@ -87,17 +87,14 @@ class AVSDGERPipeline:
         #   Requires: shape_predictor_68_face_landmarks.dat, mmod_human_face_detector.dat,
         #             20words_mean_face.npy  (see avsd_ger/frontend/mouth_roi.py for links)
         # backend='haar'  → fallback: no external model files, works out of the box.
-        roi_cfg = cfg.get("mouth_roi", {})
-        roi_backend = str(roi_cfg.get("backend", "haar"))
-        self.mouth_roi_extractor = MouthROIExtractor(
-            backend=roi_backend,
-            crop_height=int(roi_cfg.get("crop_height", 48)),
-            crop_width=int(roi_cfg.get("crop_width", 48)),
-            window_margin=int(roi_cfg.get("window_margin", 12)),
-            face_predictor_path=roi_cfg.get("face_predictor_path"),
-            cnn_detector_path=roi_cfg.get("cnn_detector_path"),
-            mean_face_path=roi_cfg.get("mean_face_path"),
-        )
+        # Evaluation and training normally consume proposal-compliant mouth
+        # ROIs precomputed by AV-HuBERT's dlib/align_mouth pipeline.  Do not
+        # construct the native dlib detector for that path: besides being
+        # unnecessary, loading it can introduce a C++ ABI failure even though
+        # no raw video will be processed.  Instantiate it lazily only when
+        # run() actually receives a raw video_path without video_frames.
+        self._mouth_roi_cfg = dict(cfg.get("mouth_roi", {}) or {})
+        self.mouth_roi_extractor: MouthROIExtractor | None = None
 
         # C1
         self.voice = VoiceEncoder(cfg["identity"]["voice_encoder"], stub=stub, device=self.device)
@@ -155,6 +152,20 @@ class AVSDGERPipeline:
     def load_pool(self, path: str | Path) -> None:
         self.pool.load(path)
 
+    def _get_mouth_roi_extractor(self) -> MouthROIExtractor:
+        if self.mouth_roi_extractor is None:
+            roi_cfg = self._mouth_roi_cfg
+            self.mouth_roi_extractor = MouthROIExtractor(
+                backend=str(roi_cfg.get("backend", "haar")),
+                crop_height=int(roi_cfg.get("crop_height", 48)),
+                crop_width=int(roi_cfg.get("crop_width", 48)),
+                window_margin=int(roi_cfg.get("window_margin", 12)),
+                face_predictor_path=roi_cfg.get("face_predictor_path"),
+                cnn_detector_path=roi_cfg.get("cnn_detector_path"),
+                mean_face_path=roi_cfg.get("mean_face_path"),
+            )
+        return self.mouth_roi_extractor
+
     # ------------------------------------------------------------------ main run
     def run(
         self,
@@ -183,7 +194,7 @@ class AVSDGERPipeline:
         # Auto-extract mouth ROI from video_path if video_frames not already provided
         if video_frames is None and video_path is not None and wants_visual:
             try:
-                video_frames = self.mouth_roi_extractor.extract_from_file(video_path)
+                video_frames = self._get_mouth_roi_extractor().extract_from_file(video_path)
                 video_frames = video_frames.to(self.device)
             except Exception as _e:
                 import logging as _log
