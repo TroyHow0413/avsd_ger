@@ -43,6 +43,7 @@ class IdentityQueryResult:
     av_consistency: float
     z_id: torch.Tensor
     is_unknown: bool
+    evidence_mode: str = "audio_visual"
 
 
 class IdentityFuser(nn.Module):
@@ -86,7 +87,7 @@ class IdentityPool(nn.Module):
         self,
         speaker_id: str,
         voice_emb: torch.Tensor,
-        face_emb: torch.Tensor,
+        face_emb: torch.Tensor | None,
         meta: dict[str, Any] | None = None,
     ) -> None:
         self._speakers[speaker_id] = EnrolledSpeaker(
@@ -98,6 +99,15 @@ class IdentityPool(nn.Module):
 
     def __len__(self) -> int:
         return len(self._speakers)
+
+    @property
+    def speaker_ids(self) -> tuple[str, ...]:
+        """Return the enrolled gallery IDs without exposing mutable state."""
+        return tuple(self._speakers)
+
+    def clear_gallery(self) -> None:
+        """Remove enrollment records while preserving the trained fuser."""
+        self._speakers.clear()
 
     # -------------------------------------------------------------- EMA update
     def ema_update(
@@ -132,22 +142,31 @@ class IdentityPool(nn.Module):
     ) -> IdentityQueryResult:
         skip_ids = skip_ids or set()
         voice_emb = voice_emb.to(self.device)
-        face_emb = face_emb.to(self.device)
+        face_emb = face_emb.to(self.device) if face_emb is not None else None
 
         # Voice and face live in different native dims (192 vs 512); they can
         # only be compared after the learnable fuser projects both into
         # `fused_dim` space.
-        z_query = self.fuser(
-            voice_emb.unsqueeze(0), face_emb.unsqueeze(0)
-        ).squeeze(0)
+        if face_emb is None:
+            z_query = F.normalize(
+                self.fuser.voice_proj(voice_emb.unsqueeze(0)), dim=-1
+            ).squeeze(0)
+            evidence_mode = "voice_only"
+        else:
+            z_query = self.fuser(
+                voice_emb.unsqueeze(0), face_emb.unsqueeze(0)
+            ).squeeze(0)
+            evidence_mode = "audio_visual"
 
         scored: list[tuple[str, float]] = []
         for sid, spk in self._speakers.items():
             if sid in skip_ids:
                 continue
-            z_spk = self.fuser(
-                spk.voice_emb.unsqueeze(0), spk.face_emb.unsqueeze(0)
-            ).squeeze(0)
+            z_spk = (
+                F.normalize(self.fuser.voice_proj(spk.voice_emb.unsqueeze(0)), dim=-1).squeeze(0)
+                if face_emb is None
+                else self.fuser(spk.voice_emb.unsqueeze(0), spk.face_emb.unsqueeze(0)).squeeze(0)
+            )
             scored.append((sid, float(cosine_sim(z_query, z_spk).item())))
         scored.sort(key=lambda x: x[1], reverse=True)
         top = scored[: self.top_k]
@@ -160,9 +179,11 @@ class IdentityPool(nn.Module):
         else:
             sid_top, _ = top[0]
             spk = self._speakers[sid_top]
-            z_spk = self.fuser(
-                spk.voice_emb.unsqueeze(0), spk.face_emb.unsqueeze(0)
-            ).squeeze(0)
+            z_spk = (
+                F.normalize(self.fuser.voice_proj(spk.voice_emb.unsqueeze(0)), dim=-1).squeeze(0)
+                if face_emb is None
+                else self.fuser(spk.voice_emb.unsqueeze(0), spk.face_emb.unsqueeze(0)).squeeze(0)
+            )
             z_id = F.normalize(0.5 * z_query + 0.5 * z_spk, dim=-1)
 
         return IdentityQueryResult(
@@ -171,6 +192,7 @@ class IdentityPool(nn.Module):
             av_consistency=av_consistency,
             z_id=z_id,
             is_unknown=is_unknown,
+            evidence_mode=evidence_mode,
         )
 
     # -------------------------------------------------------------- i/o
@@ -190,10 +212,19 @@ class IdentityPool(nn.Module):
         }
         torch.save(state, path)
 
-    def load(self, path: str | Path) -> None:
-        state = torch.load(path, map_location=self.device)
+    def load(self, path: str | Path, *, load_gallery: bool = True) -> None:
+        """Load fuser weights and, unless disabled, the enrollment gallery.
+
+        ``load_gallery=False`` is the safe evaluation/fresh-pool operation: it
+        deliberately reuses the learned identity model but never imports
+        training or another meeting's speaker identities.
+        """
+        state = torch.load(path, map_location=self.device, weights_only=True)
         self.fuser.load_state_dict(state["fuser"])
-        for sid, rec in state["speakers"].items():
+        self.clear_gallery()
+        if not load_gallery:
+            return
+        for sid, rec in state.get("speakers", {}).items():
             self._speakers[sid] = EnrolledSpeaker(
                 speaker_id=sid,
                 voice_emb=torch.tensor(rec["voice_emb"], device=self.device),

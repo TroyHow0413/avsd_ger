@@ -26,6 +26,18 @@ def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any
     return out
 
 
+def _validate_override_keys(
+    base: dict[str, Any], override: dict[str, Any], *, prefix: str = ""
+) -> None:
+    """Fail fast on typos in configs that inherit a declared schema."""
+    for key, value in override.items():
+        dotted = f"{prefix}.{key}" if prefix else key
+        if key not in base:
+            raise KeyError(f"Unknown config key in inherited config: {dotted}")
+        if isinstance(value, dict) and isinstance(base[key], dict):
+            _validate_override_keys(base[key], value, prefix=dotted)
+
+
 @dataclass
 class BackboneOutputs:
     """Container passed between pipeline stages."""
@@ -96,6 +108,8 @@ def _load_config(path: Path, stack: tuple[Path, ...]) -> dict[str, Any]:
             merged,
             _load_config(default_path, stack=(*stack, path)),
         )
+    _validate_override_keys(merged, cfg)
+    # Lists deliberately replace their parent value; they are never appended.
     return _deep_merge(merged, cfg)
 
 

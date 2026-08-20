@@ -125,7 +125,19 @@ class FakeBackend:
         self.speaker_token_id = self.tokenizer.convert_tokens_to_ids(
             self.tokenizer.speaker_token
         )
-        self.lora_target_modules = self.profile.lora_target_modules
+        configured = cfg.get("lora", {}).get("target_modules")
+        self.lora_target_modules = (
+            self.profile.lora_target_modules
+            if configured is None or configured == "auto"
+            else tuple(str(item) for item in configured)
+        )
+        unsupported = sorted(
+            set(self.lora_target_modules) - set(self.profile.lora_target_modules)
+        )
+        if unsupported:
+            raise ValueError(
+                f"LoRA targets not supported by {self.profile.family}: {unsupported}"
+            )
 
 
 class LocalHFCausalLMBackend:
@@ -273,7 +285,13 @@ class LocalHFCausalLMBackend:
     def _resolve_dtype(value: str, device: torch.device) -> torch.dtype:
         value = value.lower()
         if value == "auto":
-            return torch.float32 if device.type == "cpu" else torch.bfloat16
+            if device.type != "cuda":
+                return torch.float32
+            return (
+                torch.bfloat16
+                if torch.cuda.is_bf16_supported()
+                else torch.float16
+            )
         choices = {
             "fp32": torch.float32,
             "float32": torch.float32,
@@ -286,7 +304,16 @@ class LocalHFCausalLMBackend:
             raise ValueError(
                 f"Unsupported dense GER dtype={value!r}; use auto/fp32/fp16/bf16"
             )
-        return choices[value]
+        selected = choices[value]
+        if device.type == "cpu" and selected == torch.float16:
+            raise ValueError("fp16 is not supported for the dense GER backend on CPU")
+        if (
+            device.type == "cuda"
+            and selected == torch.bfloat16
+            and not torch.cuda.is_bf16_supported()
+        ):
+            raise ValueError("bf16 was requested but this CUDA device does not support it")
+        return selected
 
 
 def create_model_backend(

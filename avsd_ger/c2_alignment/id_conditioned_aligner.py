@@ -157,17 +157,20 @@ class IDConditionedAligner(nn.Module):
             key_pad = ~speaker_mask_v.to(q.device).bool()  # True = mask this frame
 
         soft_gate = None
-        if self.use_soft_gate and (snr_per_tok is not None or lip_conf_v is not None):
+        if self.use_soft_gate:
             N, M = q.size(0), kv.size(0)
+            # Missing quality evidence is unavailable, never implicit high
+            # confidence. A zero gate conservatively suppresses unsupported
+            # cross-modal evidence while retaining the audio residual path.
             s = (
                 snr_per_tok.to(q.device)
                 if snr_per_tok is not None
-                else torch.ones(N, device=q.device)
+                else torch.zeros(N, device=q.device)
             )
             v = (
                 lip_conf_v.to(kv.device)
                 if lip_conf_v is not None
-                else torch.ones(M, device=kv.device)
+                else torch.zeros(M, device=kv.device)
             )
             # gate[n,m] = min(SNR(n), lip_conf(m))
             soft_gate = torch.minimum(s.view(N, 1), v.view(1, M))

@@ -172,9 +172,9 @@ source scripts/setup_avhubert_env.sh
 * **AV-HuBERT Large** — drop the `.pt` at `checkpoints/avhubert_large_lrs3_iter5.pt` (path in `configs/default.yaml`).
 * **ECAPA-TDNN** — auto from SpeechBrain.
 * **InsightFace `buffalo_l`** — auto on first use.
-* **GER causal LM** — a dense HF model materialized in a configured local directory. Use `configs/qwen25_3b.yaml` for Qwen2.5-3B-Instruct or `configs/llama32_3b.yaml` for Llama-3.2-3B-Instruct. Existing local weights are reused; missing weights are downloaded only when `ger.allow_download: true`.
+* **GER causal LM** — a dense HF model materialized in a configured local directory. Use `configs/qwen25_3b.yaml` for Qwen2.5-3B-Instruct or `configs/llama32_3b.yaml` for Llama-3.2-3B-Instruct. Training and evaluation default to `ger.allow_download: false` and fail fast when `ger.model_path` is incomplete. Model acquisition is a separate explicit preparation operation: temporarily opt in with `ger.allow_download: true`, materialize the model once, then restore the safe default before training or evaluation.
 
-The repo defaults to `stub_backbones: true` in `configs/default.yaml`, so you can verify wiring without any of the above.
+Set `stub_backbones: true` in an inherited smoke config to verify wiring without any of the above.
 
 ---
 

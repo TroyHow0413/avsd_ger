@@ -29,6 +29,7 @@ import argparse
 import copy
 import glob
 import json
+import hashlib
 import sys
 from collections import Counter
 from dataclasses import asdict
@@ -57,6 +58,18 @@ ABLATION_MATRIX = [
     ("wo_c3",                {"disable_c3": True}),
     ("c3_wo_conf_gate",      {"disable_conf_gate": True}),
 ]
+
+
+def _config_audit(cfg: dict[str, Any]) -> dict[str, Any]:
+    canonical = json.dumps(cfg, sort_keys=True, default=str, ensure_ascii=False)
+    ger = cfg.get("ger", {})
+    return {
+        "effective_config_sha256": hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
+        "model_family": ger.get("model_family"),
+        "model_id": ger.get("model_id"),
+        "training_hyperparameters": copy.deepcopy(cfg.get("training", {})),
+        "comparison_interpretation": "per-model configuration; not a strictly controlled backbone comparison",
+    }
 
 
 def _frontend_choices() -> list[str]:
@@ -290,6 +303,7 @@ def _load_stage2_checkpoints(
     *,
     aligner_ckpt: str | None = None,
     ger_ckpt: str | None = None,
+    allow_legacy_checkpoint: bool = False,
 ) -> None:
     if aligner_ckpt:
         path = Path(aligner_ckpt)
@@ -306,7 +320,10 @@ def _load_stage2_checkpoints(
 
     projectors = root / "ger_projectors.pt" if root.is_dir() else root
     if projectors.exists() and projectors.is_file():
-        pipe.ger.load_projector_checkpoint(projectors, map_location=pipe.device)
+        pipe.ger.load_projector_checkpoint(
+            projectors, map_location=pipe.device,
+            allow_legacy=allow_legacy_checkpoint,
+        )
         print(f"[stage2] loaded GER projectors: {projectors}")
 
     adapter_dir = root / "lora_adapter" if root.is_dir() else None
@@ -335,6 +352,8 @@ def _run_one(
     monitor: PowerMonitor | None,
     aligner_ckpt: str | None = None,
     ger_ckpt: str | None = None,
+    pipe: AVSDGERPipeline | None = None,
+    allow_legacy_checkpoint: bool = False,
 ) -> dict[str, Any]:
     cfg_run = copy.deepcopy(cfg)
     cfg_run.setdefault("ablation", {})
@@ -350,18 +369,35 @@ def _run_one(
         cfg_run["ablation"]["disable_c2"] = False
 
     allow_synthetic_audio = bool(cfg_run.get("stub_backbones", False))
-    pipe = AVSDGERPipeline(cfg_run)
-    _load_stage2_checkpoints(pipe, aligner_ckpt=aligner_ckpt, ger_ckpt=ger_ckpt)
+    if pipe is None:
+        pipe = AVSDGERPipeline(cfg_run)
+        _load_stage2_checkpoints(
+            pipe, aligner_ckpt=aligner_ckpt, ger_ckpt=ger_ckpt,
+            allow_legacy_checkpoint=allow_legacy_checkpoint,
+        )
+    else:
+        # Only ablation switches vary. Neural weights stay resident while all
+        # per-run mutable state is reset below.
+        pipe.disable_c1 = bool(cfg_run["ablation"]["disable_c1"])
+        pipe.disable_c2 = bool(cfg_run["ablation"]["disable_c2"])
+        pipe.disable_c3 = bool(cfg_run["ablation"]["disable_c3"])
+        pipe.disable_conf_gate = bool(cfg_run["ablation"]["disable_conf_gate"])
+    pipe.pool.clear_gallery()
     loaded_pool = False
     if pool_path and Path(pool_path).exists() and not fresh_pool:
         pipe.load_pool(pool_path)
         loaded_pool = True
     elif pool_path and Path(pool_path).exists() and fresh_pool:
-        pipe.load_pool(pool_path)
+        # Reuse only the learned identity fuser.  The checkpoint gallery may
+        # contain hundreds of training speakers and must never enter a fresh
+        # dev/test meeting.
+        pipe.load_pool(pool_path, load_gallery=False)
         loaded_pool = True
         print(f"[pool] loaded fuser from {pool_path}; re-enrolling speakers from manifest")
 
     if fresh_pool or not loaded_pool:
+        if fresh_pool and len(pipe.pool):
+            raise RuntimeError("fresh-pool invariant violated: gallery is not empty")
         if fresh_pool:
             print(f"[pool] fresh-pool enabled; enrolling {ablation_name} from manifest")
         _enroll_pool_from_manifest(
@@ -414,6 +450,7 @@ def _run_one(
         "speaker_order": session.speaker_order,
         "turn_debug": _build_turn_debug(session.turns),
         "trace_summary": trace_summary,
+        "config_audit": _config_audit(cfg_run),
     }
 
 
@@ -542,6 +579,7 @@ def _write_debug_sidecars(
                 "frontend": r["frontend"],
                 "metrics": r["metrics"],
                 "trace_summary": r["trace_summary"],
+                "config_audit": r["config_audit"],
                 "speaker_order": r["speaker_order"],
                 "turns": turn_debug,
             }, f, indent=2, ensure_ascii=False)
@@ -562,6 +600,8 @@ def _run_manifest(
     step_offset: int = 0,
     aligner_ckpt: str | None = None,
     ger_ckpt: str | None = None,
+    pipe: AVSDGERPipeline | None = None,
+    allow_legacy_checkpoint: bool = False,
 ) -> tuple[list[dict[str, Any]], bool | None]:
     with open(manifest_path, "r", encoding="utf-8") as f:
         manifest = json.load(f)
@@ -587,6 +627,8 @@ def _run_manifest(
             monitor,
             aligner_ckpt=aligner_ckpt,
             ger_ckpt=ger_ckpt,
+            pipe=pipe,
+            allow_legacy_checkpoint=allow_legacy_checkpoint,
         )
         print(json.dumps(r["metrics"], indent=2))
         results.append(r)
@@ -650,6 +692,14 @@ def main() -> int:
         "--ger-ckpt",
         default=None,
         help="Optional Stage-2 GER directory containing ger_projectors.pt and lora_adapter/.",
+    )
+    p.add_argument(
+        "--allow-legacy-checkpoint",
+        action="store_true",
+        help=(
+            "Explicitly allow a legacy GER projector checkpoint without v2 "
+            "compatibility metadata. Unsafe for formal cross-model evaluation."
+        ),
     )
     p.add_argument(
         "--fresh-pool",
@@ -811,6 +861,13 @@ def main() -> int:
     all_runs: list[dict[str, Any]] = []
     spec_checks: dict[str, bool | None] = {}
     ablations_per_manifest = len(args.only) if args.only is not None else len(ABLATION_MATRIX)
+    # The 3B backend and immutable checkpoints are loaded once for the entire
+    # 12x5 batch. _run_one resets gallery and ablation flags on every run.
+    shared_pipe = AVSDGERPipeline(cfg)
+    _load_stage2_checkpoints(
+        shared_pipe, aligner_ckpt=args.aligner_ckpt, ger_ckpt=args.ger_ckpt,
+        allow_legacy_checkpoint=args.allow_legacy_checkpoint,
+    )
     for m_idx, manifest_path in enumerate(manifest_paths):
         results, spec_check_pass = _run_manifest(
             cfg,
@@ -823,6 +880,8 @@ def main() -> int:
             step_offset=m_idx * max(1, ablations_per_manifest),
             aligner_ckpt=args.aligner_ckpt,
             ger_ckpt=args.ger_ckpt,
+            pipe=shared_pipe,
+            allow_legacy_checkpoint=args.allow_legacy_checkpoint,
         )
         out_path = _output_path_for_manifest(args.out, manifest_path, multi=multi)
         out_path.parent.mkdir(parents=True, exist_ok=True)

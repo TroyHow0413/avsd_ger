@@ -44,8 +44,12 @@ import os
 from collections import deque
 from typing import Optional
 
-import cv2
 import numpy as np
+
+try:  # Keep precomputed-ROI/audio-only pipeline imports dependency-light.
+    import cv2
+except ImportError:  # pragma: no cover - exercised through constructor error
+    cv2 = None
 
 
 # ─────────────────────────────────────────────────────── shared crop helpers ──
@@ -164,6 +168,11 @@ class MouthROIExtractor:
         mouth_start_idx: int = 48,
         mouth_stop_idx:  int = 68,
     ):
+        if cv2 is None:
+            raise RuntimeError(
+                "opencv-python is required only when extracting mouth ROIs "
+                "from raw video; precomputed ROI and audio-only paths do not need it"
+            )
         self.backend       = backend.lower()
         self.crop_height   = crop_height
         self.crop_width    = crop_width

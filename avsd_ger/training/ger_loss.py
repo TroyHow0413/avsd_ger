@@ -65,7 +65,7 @@ class GERCrossEntropy(nn.Module):
         text = self.ger._render_text(
             speaker_id, nbest, lip_hyp, mode=mode, use_av_context=use_av_context
         )
-        prompt_embeds = self.ger._inputs_embeds(
+        prompt_embeds, prompt_mask = self.ger._model_inputs(
             z_id, f_align, text, use_av_context=use_av_context
         )   # [1, P, H]
 
@@ -74,6 +74,8 @@ class GERCrossEntropy(nn.Module):
         emb = self.ger._llm.get_input_embeddings()
         tgt_embeds = emb(tgt_ids).to(prompt_embeds.dtype)              # [1, T, H]
         full = torch.cat([prompt_embeds, tgt_embeds], dim=1)           # [1, P+T, H]
+        target_mask = torch.ones_like(tgt_ids, dtype=torch.long)
+        attention_mask = torch.cat([prompt_mask, target_mask], dim=1)
 
         # Labels: -100 for prompt positions, tgt_ids for target positions,
         # plus the standard "predict next token" off-by-one.
@@ -82,7 +84,7 @@ class GERCrossEntropy(nn.Module):
         labels = torch.full((1, P + T), -100, dtype=torch.long, device=prompt_embeds.device)
         labels[0, P : P + T] = tgt_ids[0]
 
-        out = self.ger._llm(inputs_embeds=full)
+        out = self.ger._llm(inputs_embeds=full, attention_mask=attention_mask)
         logits = out.logits[:, :-1, :]            # predict positions 1..N
         labels = labels[:, 1:]
         loss = F.cross_entropy(

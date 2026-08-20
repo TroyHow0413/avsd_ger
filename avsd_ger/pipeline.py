@@ -109,8 +109,10 @@ class AVSDGERPipeline:
             d_asr=WhisperASR.ENCODER_DIM,
             d_vsr=AVHubertVSR.FEATURE_DIM,
         ).to(self.device)
+        ger_cfg = dict(cfg["ger"])
+        ger_cfg["training_hyperparameters"] = dict(cfg.get("training", {}))
         self.ger = GERHead(
-            cfg["ger"],
+            ger_cfg,
             z_dim=cfg["identity"]["fused_dim"],
             d_align=cfg["alignment"]["d_model"],
             stub=stub,
@@ -149,8 +151,8 @@ class AVSDGERPipeline:
     def save_pool(self, path: str | Path) -> None:
         self.pool.save(path)
 
-    def load_pool(self, path: str | Path) -> None:
-        self.pool.load(path)
+    def load_pool(self, path: str | Path, *, load_gallery: bool = True) -> None:
+        self.pool.load(path, load_gallery=load_gallery)
 
     def _get_mouth_roi_extractor(self) -> MouthROIExtractor:
         if self.mouth_roi_extractor is None:
@@ -279,11 +281,15 @@ class AVSDGERPipeline:
         embedding_debug = {
             "voice_emb": _tensor_debug(voice_emb),
             "face_emb": _tensor_debug(face_emb),
+            "voice_signal_status": "valid",
+            "face_signal_status": "valid" if face_image is not None else "unavailable",
         }
 
         trace: list[dict[str, Any]] = []
         skip_ids: set[str] = set()
-        id_q = self.pool.query(voice_emb, face_emb, skip_ids=skip_ids)
+        id_q = self.pool.query(
+            voice_emb, face_emb if face_image is not None else None, skip_ids=skip_ids
+        )
         c1_initial_debug = {
             "disable_c1": self.disable_c1,
             "pool_size": len(self.pool),
@@ -292,6 +298,7 @@ class AVSDGERPipeline:
             "top_scores": [float(x) for x in id_q.top_scores],
             "av_consistency_raw": float(id_q.av_consistency),
             "is_unknown": bool(id_q.is_unknown),
+            "identity_evidence_mode": id_q.evidence_mode,
             "z_id": _tensor_debug(id_q.z_id),
         }
 
@@ -300,12 +307,14 @@ class AVSDGERPipeline:
             id_q = IdentityQueryResult(
                 top_ids=[], top_scores=[], av_consistency=0.0,
                 z_id=torch.zeros_like(id_q.z_id), is_unknown=True,
+                evidence_mode="disabled",
             )
         c1_effective_debug = {
             "top_ids": list(id_q.top_ids),
             "top_scores": [float(x) for x in id_q.top_scores],
             "av_consistency_raw": float(id_q.av_consistency),
             "is_unknown": bool(id_q.is_unknown),
+            "identity_evidence_mode": id_q.evidence_mode,
             "z_id": _tensor_debug(id_q.z_id),
         }
 
@@ -353,6 +362,18 @@ class AVSDGERPipeline:
                 "speaker_mask_v_present": speaker_mask_v_device is not None,
                 "snr_per_tok_present": snr_per_tok_device is not None,
                 "lip_conf_v_present": lip_conf_v_device is not None,
+                "speaker_mask_v_status": (
+                    "valid" if speaker_mask_v_device is not None
+                    else ("unavailable" if use_visual else "disabled")
+                ),
+                "snr_per_tok_status": (
+                    "valid" if snr_per_tok_device is not None else "unavailable"
+                ),
+                "lip_conf_v_status": (
+                    "valid" if lip_conf_v_device is not None
+                    else ("unavailable" if use_visual else "disabled")
+                ),
+                "missing_quality_policy": "zero_gate_conservative",
             }
 
             if self.disable_c2:
@@ -376,9 +397,19 @@ class AVSDGERPipeline:
             asr_top = (asr_out.nbest[0].strip() if asr_out.nbest else "")
             raw_generated_before_gate = ger_out.get("raw_text")
             cleaned_generated_before_gate = ger_out.get("text", "")
+            asr_s_acoustic = self.asr.rescore(audio_wav, asr_top) if asr_top else None
+            asr_s_acoustic_conf = (
+                squash_logprob(asr_s_acoustic) if asr_s_acoustic is not None else None
+            )
+            safety_evaluation = self.ger_safety.evaluate(
+                cleaned_generated_before_gate,
+                asr_top,
+                prompt_lip_hyp,
+                asr_s_acoustic_conf,
+            )
 
             if not self.disable_c2 and asr_top:
-                fallback_reason = self.ger_safety.reject_reason(ger_out["text"], asr_top)
+                fallback_reason = safety_evaluation.reason
 
             if fallback_reason is not None:
                 raw_generation = ger_out.get("raw_text")
@@ -398,8 +429,6 @@ class AVSDGERPipeline:
             # Fall back to ASR 1-best instead of accepting an LLM artifact.
             s_acoustic = self.asr.rescore(audio_wav, ger_out["text"])
             s_acoustic_conf = squash_logprob(s_acoustic)
-            asr_s_acoustic = None
-            asr_s_acoustic_conf = None
             raw_ger_conf = None
             if (
                 not self.disable_c2
@@ -407,8 +436,6 @@ class AVSDGERPipeline:
                 and asr_top
                 and ger_out["text"].strip() != asr_top
             ):
-                asr_s_acoustic = self.asr.rescore(audio_wav, asr_top)
-                asr_s_acoustic_conf = squash_logprob(asr_s_acoustic)
                 if (
                     s_acoustic_conf < self.ger_fallback_min_conf
                     or asr_s_acoustic_conf >= s_acoustic_conf + self.ger_fallback_margin
@@ -483,7 +510,10 @@ class AVSDGERPipeline:
                 "prompt": ger_out.get("prompt"),
                 "raw_generation_before_gate": raw_generated_before_gate,
                 "cleaned_ger_text_before_gate": cleaned_generated_before_gate,
-                "safety_features": self.ger_safety.features(cleaned_generated_before_gate, asr_top),
+                "safety_features": safety_evaluation.features,
+                "safety_gates": list(safety_evaluation.checks),
+                "safety_gate_passed": safety_evaluation.accepted,
+                "final_source": "ASR" if fallback_applied or self.disable_c2 else "GER",
                 "fallback_applied": fallback_applied,
                 "fallback_reason": fallback_reason,
                 "raw_ger_text": ger_out.get("raw_ger_text") or ger_out.get("raw_text"),
@@ -507,7 +537,7 @@ class AVSDGERPipeline:
                     self.pool.ema_update(
                         speaker_id_hint,
                         new_voice_emb=voice_emb,
-                        new_face_emb=face_emb,
+                        new_face_emb=face_emb if face_image is not None else None,
                         alpha=self.ema_alpha,
                     )
                 break
@@ -515,7 +545,10 @@ class AVSDGERPipeline:
                 break
             if decision.action == LoopAction.REIDENTIFY and id_q.top_ids:
                 skip_ids.add(id_q.top_ids[0])
-                id_q = self.pool.query(voice_emb, face_emb, skip_ids=skip_ids)
+                id_q = self.pool.query(
+                    voice_emb, face_emb if face_image is not None else None,
+                    skip_ids=skip_ids,
+                )
                 if id_q.is_unknown:
                     break
             # REALIGN falls through to re-run C2 with same id_q.

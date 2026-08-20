@@ -176,8 +176,8 @@ class GERBackendRefactorTest(unittest.TestCase):
         self.assertEqual(
             llama["model_id"], "meta-llama/Llama-3.2-3B-Instruct"
         )
-        self.assertTrue(qwen["allow_download"])
-        self.assertTrue(llama["allow_download"])
+        self.assertFalse(qwen["allow_download"])
+        self.assertFalse(llama["allow_download"])
         self.assertEqual(qwen["lora"]["target_modules"], "auto")
         self.assertEqual(llama["lora"]["target_modules"], "auto")
 

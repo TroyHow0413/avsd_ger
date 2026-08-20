@@ -3,6 +3,10 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+import hashlib
+import importlib.metadata
+import json
+import subprocess
 
 import torch
 import torch.nn as nn
@@ -106,6 +110,14 @@ class GERHead(nn.Module):
         text: str,
         use_av_context: bool = True,
     ) -> torch.Tensor:
+        return self._model_inputs(
+            z_id, f_align, text, use_av_context=use_av_context
+        )[0]
+
+    def _model_inputs(
+        self, z_id: torch.Tensor, f_align: torch.Tensor, text: str,
+        use_av_context: bool = True,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         return self.bridge.build_inputs_embeds(
             text=text,
             tokenizer=self._tok,
@@ -118,18 +130,70 @@ class GERHead(nn.Module):
         )
 
     def checkpoint_metadata(self) -> GERCheckpointMetadata:
+        def fingerprint(value: Any) -> str:
+            raw = json.dumps(value, sort_keys=True, default=str, ensure_ascii=False)
+            return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+        def package_version(name: str) -> str:
+            try:
+                return importlib.metadata.version(name)
+            except importlib.metadata.PackageNotFoundError:
+                return "not-installed"
+
+        raw_model_cfg = getattr(self._llm, "config", None)
+        model_cfg = (
+            raw_model_cfg.to_dict()
+            if hasattr(raw_model_cfg, "to_dict")
+            else dict(vars(raw_model_cfg))
+        )
+        for location_key in ("_name_or_path", "name_or_path"):
+            model_cfg.pop(location_key, None)
+        get_vocab = getattr(self._tok, "get_vocab", None)
+        tokenizer_identity = {
+            "class": type(self._tok).__name__,
+            "vocab_size": len(self._tok),
+            "special_tokens_map": getattr(self._tok, "special_tokens_map", {}),
+            "vocabulary": get_vocab() if callable(get_vocab) else None,
+        }
+        lora = self.cfg.get("lora", {})
+        model_id = str(self.cfg.get("model_id") or Path(
+            str(self.cfg.get("model_path", self.backend.profile.family))
+        ).name)
+        try:
+            git_commit = subprocess.run(
+                ["git", "rev-parse", "HEAD"], capture_output=True, text=True,
+                check=True, timeout=2,
+            ).stdout.strip() or None
+        except (OSError, subprocess.SubprocessError):
+            git_commit = None
         return GERCheckpointMetadata(
             format_version=FORMAT_VERSION,
+            model_identifier=model_id,
             model_family=self.backend.profile.family,
+            model_type=str(getattr(getattr(self._llm, "config", None), "model_type", "")),
             hidden_size=self._llm_embed_dim,
+            model_config_fingerprint=fingerprint(model_cfg),
             tokenizer_class=type(self._tok).__name__,
             tokenizer_vocab_size=len(self._tok),
+            tokenizer_fingerprint=fingerprint(tokenizer_identity),
+            chat_template_fingerprint=fingerprint(getattr(self._tok, "chat_template", None)),
             speaker_special_token=self.speaker_special_token,
             speaker_token_id=self._spk_token_id,
-            lora_target_modules=tuple(self.backend.lora_target_modules),
+            prompt_template_fingerprint=fingerprint(self.template),
             z_dim=self._z_dim,
             d_align=self._d_align,
             n_queries=self.bridge.n_queries,
+            n_heads=self.bridge.n_heads,
+            lora_target_modules=tuple(self.backend.lora_target_modules),
+            lora_rank=int(lora.get("r", 16)),
+            lora_alpha=float(lora.get("alpha", 32)),
+            lora_dropout=float(lora.get("dropout", 0.05)),
+            lora_bias=str(lora.get("bias", "none")),
+            torch_version=str(torch.__version__),
+            transformers_version=package_version("transformers"),
+            peft_version=package_version("peft"),
+            git_commit=git_commit,
+            training_hyperparameters=dict(self.cfg.get("training_hyperparameters", {})),
         )
 
     def save_projector_checkpoint(self, path: str | Path) -> None:
@@ -137,7 +201,7 @@ class GERHead(nn.Module):
 
     def load_projector_checkpoint(
         self, path: str | Path, *, map_location: Any = None,
-        allow_legacy: bool = True,
+        allow_legacy: bool = False,
     ) -> None:
         load_projector_checkpoint(
             path,
@@ -175,12 +239,17 @@ class GERHead(nn.Module):
             mode=mode,
             use_av_context=use_av_context,
         )
-        inputs_embeds = self._inputs_embeds(
+        inputs_embeds, attention_mask = self._model_inputs(
             z_id, f_align, prompt, use_av_context=use_av_context
         )
+        generation_kwargs = self.generation_policy.kwargs(self._tok.pad_token_id)
+        generation_config = self.generation_policy.generation_config(self._llm)
+        if generation_config is not None:
+            generation_kwargs["generation_config"] = generation_config
         output = self._llm.generate(
             inputs_embeds=inputs_embeds,
-            **self.generation_policy.kwargs(self._tok.pad_token_id),
+            attention_mask=attention_mask,
+            **generation_kwargs,
         )
         generated_ids = self.generation_policy.generated_ids(output)
         raw_text = self._tok.decode(

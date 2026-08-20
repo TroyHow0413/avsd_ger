@@ -141,10 +141,10 @@ ger:
   model_family: qwen2.5-3b-instruct
   model_id: Qwen/Qwen2.5-3B-Instruct
   model_path: checkpoints/Qwen2.5-3B-Instruct
-  allow_download: true
+  allow_download: false
   max_new_tokens: 64        # 64 is plenty for GER on a single utterance (typical sentence < 30 tokens). Halves the KV cache vs. 128 — saves ~0.5 GB on 16 GB GPUs.
   speaker_special_token: "[Speaker: ID_i]"   # register before training
-  # Dense weights only. auto = fp32 on CPU, bf16 on CUDA.
+  # Dense weights only. auto = fp32 on CPU, bf16 on capable CUDA, else fp16.
   dtype: auto
   bridge:
     n_queries: 16
@@ -176,7 +176,13 @@ feedback:
   enable_ger_artifact_gate: true
   enable_ger_length_gate: true
   enable_ger_overlap_gate: true
-  enable_ger_acoustic_fallback: false
+  enable_ger_acoustic_fallback: true
+  ger_max_len_ratio: 1.8
+  ger_min_token_overlap: 0.5
+  ger_max_repeated_ngram_ratio: 0.35
+  ger_filler_max_added: 0
+  ger_high_conf_asr_threshold: 0.85
+  ger_language_min_ascii_ratio: 0.8
   ger_fallback_min_conf: 0.2
   ger_fallback_margin: 0.05
   weights:

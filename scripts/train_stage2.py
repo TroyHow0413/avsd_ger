@@ -139,9 +139,11 @@ def train(
         d_asr=WhisperASR.ENCODER_DIM,
         d_vsr=AVHubertVSR.FEATURE_DIM,
     ).to(device)
+    ger_cfg = dict(cfg["ger"])
+    ger_cfg["training_hyperparameters"] = dict(cfg.get("training", {}))
     ger = (
         GERHead(
-            cfg["ger"], z_dim=cfg["identity"]["fused_dim"],
+            ger_cfg, z_dim=cfg["identity"]["fused_dim"],
             d_align=cfg["alignment"]["d_model"], stub=stub, device=device,
         )
         if needs_ger
