@@ -45,6 +45,8 @@ class ASROutputs:
     encoder_features: torch.Tensor | None = None     # [T_a, 1280]
     words: list[WordTiming] = field(default_factory=list)
     frame_rate_hz: float = 50.0                      # Whisper encoder ~50 fps
+    detected_language: str | None = None
+    language_probability: float | None = None
 
 
 class WhisperASR(nn.Module):
@@ -223,6 +225,12 @@ class WhisperASR(nn.Module):
             nbest_scores=[h.logprob for h in nbest[: self.n_best]],
             encoder_features=enc_feats,
             words=words,
+            detected_language=getattr(_info, "language", None),
+            language_probability=(
+                float(getattr(_info, "language_probability"))
+                if getattr(_info, "language_probability", None) is not None
+                else None
+            ),
         )
 
     @torch.no_grad()
@@ -245,6 +253,11 @@ class WhisperASR(nn.Module):
             nbest_scores=[0.0],
             encoder_features=enc_feats,
             words=words,
+            detected_language=(
+                None
+                if self.cfg.get("language") in (None, "auto")
+                else str(self.cfg.get("language"))
+            ),
         )
 
     @torch.no_grad()
@@ -325,6 +338,11 @@ class WhisperASR(nn.Module):
             nbest_scores=scores[: self.n_best] or [0.0],
             encoder_features=enc_feats,
             words=words,
+            detected_language=(
+                str(results[0].get("language"))
+                if results[0].get("language")
+                else None
+            ),
         )
 
     @staticmethod
@@ -478,4 +496,10 @@ class WhisperASR(nn.Module):
             nbest_scores=[float(-i) for i in range(len(fake))],
             encoder_features=enc,
             words=words,
+            detected_language=(
+                "en"
+                if self.cfg.get("language") in (None, "auto")
+                else str(self.cfg.get("language"))
+            ),
+            language_probability=1.0,
         )

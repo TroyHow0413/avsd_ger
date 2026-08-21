@@ -9,9 +9,8 @@ JER) plus the power-monitor energy number for each run:
     3. w/o C2                  -- disable_c2: true   (skip GER, return ASR 1-best)
     4. w/o C3                  -- disable_c3: true   (no closed-loop retries,
                                                       frozen identity pool)
-    5. C3 w/o Conf. Gate       -- disable_conf_gate: true
-                                  (must perform *worse* than #4 per spec; this
-                                   is the structural-safety proof of the gate)
+    5. C3 w/o Conf. Gates      -- decision and update confidence gates off;
+                                  GER safety gates remain enabled
 
 The manifest format is intentionally permissive -- see SessionRunner and
 SessionTurn docstrings. At minimum each turn needs: turn_id, start, end,
@@ -43,6 +42,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from avsd_ger.pipeline import AVSDGERPipeline            # noqa: E402
+from avsd_ger.c3_statistics import c3_cluster_bootstrap_spec_check  # noqa: E402
 from avsd_ger.eval.session import SessionRunner, SessionTurn  # noqa: E402
 from avsd_ger.eval.metrics import evaluate_session, MetricsReport  # noqa: E402
 from avsd_ger.eval.power import PowerMonitor             # noqa: E402
@@ -56,7 +56,10 @@ ABLATION_MATRIX = [
     ("wo_c1",                {"disable_c1": True}),
     ("wo_c2",                {"disable_c2": True}),
     ("wo_c3",                {"disable_c3": True}),
-    ("c3_wo_conf_gate",      {"disable_conf_gate": True}),
+    ("c3_wo_conf_gates",     {
+        "disable_c3_decision_gate": True,
+        "disable_c3_update_gate": True,
+    }),
 ]
 
 
@@ -362,6 +365,8 @@ def _run_one(
         "disable_c1": False,
         "disable_c2": False,
         "disable_c3": False,
+        "disable_c3_decision_gate": False,
+        "disable_c3_update_gate": False,
         "disable_conf_gate": False,
     }
     cfg_run["ablation"].update(flags)
@@ -382,6 +387,12 @@ def _run_one(
         pipe.disable_c2 = bool(cfg_run["ablation"]["disable_c2"])
         pipe.disable_c3 = bool(cfg_run["ablation"]["disable_c3"])
         pipe.disable_conf_gate = bool(cfg_run["ablation"]["disable_conf_gate"])
+        pipe.disable_c3_decision_gate = bool(
+            cfg_run["ablation"]["disable_c3_decision_gate"]
+        )
+        pipe.disable_c3_update_gate = bool(
+            cfg_run["ablation"]["disable_c3_update_gate"]
+        )
     pipe.pool.clear_gallery()
     loaded_pool = False
     if pool_path and Path(pool_path).exists() and not fresh_pool:
@@ -417,7 +428,8 @@ def _run_one(
         session = runner.run(turns)
         pwr = None
 
-    report = evaluate_session(session.turns)
+    metric_language = cfg_run.get("asr", {}).get("language") or "auto"
+    report = evaluate_session(session.turns, language=metric_language)
     frontend_meta = _frontend_meta_from_cfg(cfg_run)
     trace_summary = _summarize_traces(session.turns)
 
@@ -434,6 +446,9 @@ def _run_one(
             "jer": report.jer,
             "n_ref_words": report.n_ref_words,
             "n_turns": report.n_turns,
+            "legacy_raw_wer": report.details["sa_wer"].get("legacy_raw_wer"),
+            "normalizer_version": report.details["sa_wer"].get("normalizer_version"),
+            "metric_language": metric_language,
         },
         "power": ({
             "label": pwr.label,
@@ -659,19 +674,7 @@ def _run_manifest(
                 f"{prefix}/avg_power_w": r["power"]["avg_power_w"]} if r["power"] else {}),
         }, step=step_offset + i)
 
-    by_name = {r["ablation"]: r for r in results}
-    spec_check_pass: bool | None = None
-    if "wo_c3" in by_name and "c3_wo_conf_gate" in by_name:
-        a = by_name["wo_c3"]["metrics"]["sa_wer"]
-        b = by_name["c3_wo_conf_gate"]["metrics"]["sa_wer"]
-        spec_check_pass = b >= a
-        print(
-            f"\n[spec check] {manifest_path.name}: C3-w/o-gate SA-WER ({b:.4f}) "
-            f"{'>=' if spec_check_pass else '<'} w/o-C3 SA-WER ({a:.4f}): "
-            f"{'PASS' if spec_check_pass else 'FAIL -- gate-removed variant should degrade'}"
-        )
-
-    return results, spec_check_pass
+    return results, None
 
 
 def main() -> int:
@@ -716,8 +719,10 @@ def main() -> int:
         "--only",
         nargs="+",
         default=None,
-        help="restrict to a subset of {full_model,wo_c1,wo_c2,wo_c3,c3_wo_conf_gate}",
+        help="restrict to a subset of {full_model,wo_c1,wo_c2,wo_c3,c3_wo_conf_gates}",
     )
+    p.add_argument("--spec-bootstrap-samples", type=int, default=10_000)
+    p.add_argument("--spec-bootstrap-seed", type=int, default=1337)
     p.add_argument(
         "--ger-dtype", "--llm-quant", dest="ger_dtype", default=None,
         choices=["auto", "fp32", "fp16", "bf16"],
@@ -859,7 +864,6 @@ def main() -> int:
         monitor.calibrate_idle(duration_s=args.idle_calibrate_s)
 
     all_runs: list[dict[str, Any]] = []
-    spec_checks: dict[str, bool | None] = {}
     ablations_per_manifest = len(args.only) if args.only is not None else len(ABLATION_MATRIX)
     # The 3B backend and immutable checkpoints are loaded once for the entire
     # 12x5 batch. _run_one resets gallery and ablation flags on every run.
@@ -869,7 +873,7 @@ def main() -> int:
         allow_legacy_checkpoint=args.allow_legacy_checkpoint,
     )
     for m_idx, manifest_path in enumerate(manifest_paths):
-        results, spec_check_pass = _run_manifest(
+        results, _ = _run_manifest(
             cfg,
             manifest_path,
             args.pool,
@@ -891,11 +895,21 @@ def main() -> int:
             "frontend": frontend_meta,
             "results": results_for_payload,
         }
+        payload["c3_spec_check"] = c3_cluster_bootstrap_spec_check(
+            [payload],
+            samples=args.spec_bootstrap_samples,
+            seed=args.spec_bootstrap_seed,
+        )
         with open(out_path, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2)
         print(f"\n[wrote] {out_path}")
         all_runs.append(payload)
-        spec_checks[manifest_path.stem] = spec_check_pass
+
+    c3_spec_check = c3_cluster_bootstrap_spec_check(
+        all_runs,
+        samples=args.spec_bootstrap_samples,
+        seed=args.spec_bootstrap_seed,
+    )
 
     if multi:
         out = Path(args.out)
@@ -906,7 +920,7 @@ def main() -> int:
             json.dump({
                 "frontend": frontend_meta,
                 "n_manifests": len(manifest_paths),
-                "spec_checks": spec_checks,
+                "c3_spec_check": c3_spec_check,
                 "runs": all_runs,
             }, f, indent=2)
         print(f"\n[wrote] {summary_path}")
@@ -926,10 +940,12 @@ def main() -> int:
                 if k in ts:
                     summary[f"summary/{stem}/{r['ablation']}/{k}"] = ts[k]
                     summary[f"summary_metric/{r['ablation']}/{k}/{stem}"] = ts[k]
-    for stem, passed in spec_checks.items():
-        if passed is not None:
-            summary[f"summary/{stem}/spec_check_c3_gate_pass"] = bool(passed)
-            summary[f"summary_metric/spec_check/c3_gate_pass/{stem}"] = bool(passed)
+    summary["summary/spec_check/c3_gate_status"] = c3_spec_check["status"]
+    summary["summary/spec_check/c3_gate_pass"] = c3_spec_check["pass"]
+    if "mean_delta" in c3_spec_check:
+        summary["summary/spec_check/c3_gate_mean_delta"] = c3_spec_check["mean_delta"]
+        summary["summary/spec_check/c3_gate_ci95_low"] = c3_spec_check["ci95"][0]
+        summary["summary/spec_check/c3_gate_ci95_high"] = c3_spec_check["ci95"][1]
     wb.summary(summary)
     wb.finish()
     return 0

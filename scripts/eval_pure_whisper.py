@@ -359,8 +359,11 @@ def main() -> int:
     wer = total_err / total_ref if total_ref else 0.0
     speaker_metrics: dict[str, Any] = {}
     if args.diarization_source != "none":
-        sa_wer, sa_details = compute_sa_wer(speaker_turns)
-        scr, scr_details = compute_scr(speaker_turns)
+        metric_language = args.language or "en"
+        sa_wer, sa_details = compute_sa_wer(
+            speaker_turns, language=metric_language
+        )
+        scr, scr_details = compute_scr(speaker_turns, language=metric_language)
         speaker_metrics = {
             "sa_wer": sa_wer,
             "speaker_attributed_word_accuracy": 1.0 - sa_wer,

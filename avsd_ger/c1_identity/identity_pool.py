@@ -116,22 +116,26 @@ class IdentityPool(nn.Module):
         new_voice_emb: torch.Tensor | None = None,
         new_face_emb: torch.Tensor | None = None,
         alpha: float = 0.1,
-    ) -> None:
+    ) -> bool:
         """Spec §2 C3: e_id_new = (1-α)·e_id_old + α·e_obs, applied per modality.
 
-        Only called when the C3 acoustic-rescore gate (s_i ≥ tau_update) passes —
-        the pipeline never calls this unconditionally. That gate is the
-        structural safety mechanism preventing error amplification.
+        Normally called only when the C3 acoustic-rescore gate passes. The
+        explicit update-gate ablation may call it unconditionally for a known
+        enrolled speaker so the safety mechanism can be measured.
         """
         if speaker_id not in self._speakers:
-            return
+            return False
         spk = self._speakers[speaker_id]
+        updated = False
         if new_voice_emb is not None:
             v = new_voice_emb.detach().to(spk.voice_emb.device)
             spk.voice_emb = (1.0 - alpha) * spk.voice_emb + alpha * v
+            updated = True
         if new_face_emb is not None:
             f = new_face_emb.detach().to(spk.face_emb.device)
             spk.face_emb = (1.0 - alpha) * spk.face_emb + alpha * f
+            updated = True
+        return updated
 
     # -------------------------------------------------------------- query
     def query(

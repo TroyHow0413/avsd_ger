@@ -47,17 +47,20 @@ class ClosedLoopController:
         total_confidence: float,
         s_acoustic_conf: float,
         iteration: int,
+        *,
+        disable_decision_gate: bool = False,
+        disable_update_gate: bool = False,
     ) -> LoopDecision:
         last = iteration >= self.max_iters - 1
 
-        if total_confidence < self.low and not last:
+        if not disable_decision_gate and total_confidence < self.low and not last:
             return LoopDecision(
                 LoopAction.REIDENTIFY,
                 f"total {total_confidence:.2f} < low {self.low}",
                 iteration,
             )
 
-        if total_confidence < self.mid and not last:
+        if not disable_decision_gate and total_confidence < self.mid and not last:
             return LoopDecision(
                 LoopAction.REALIGN,
                 f"mid band: total {total_confidence:.2f}",
@@ -65,14 +68,27 @@ class ClosedLoopController:
             )
 
         # Accept -- now decide whether to refresh the ID pool.
+        if disable_update_gate:
+            return LoopDecision(
+                LoopAction.ACCEPT_AND_UPDATE,
+                "C3 update confidence gate DISABLED (ablation)",
+                iteration,
+            )
         if s_acoustic_conf >= self.tau_update:
             return LoopDecision(
                 LoopAction.ACCEPT_AND_UPDATE,
                 f"s_acoustic_conf {s_acoustic_conf:.2f} >= tau_update {self.tau_update}",
                 iteration,
             )
+        reason = (
+            "C3 decision confidence gate DISABLED (ablation); "
+            if disable_decision_gate
+            else ""
+        )
         return LoopDecision(
             LoopAction.ACCEPT_NO_UPDATE,
-            f"s_acoustic_conf {s_acoustic_conf:.2f} < tau_update {self.tau_update} -- pool frozen",
+            reason
+            + f"s_acoustic_conf {s_acoustic_conf:.2f} < tau_update "
+            f"{self.tau_update} -- pool frozen",
             iteration,
         )

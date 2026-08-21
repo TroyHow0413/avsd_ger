@@ -110,7 +110,10 @@ Spec §2 C2 mandates four design choices:
 * `total < 0.35` → **REIDENTIFY** (skip current top-1 ID and re-query the pool).
 * Hard cap `max_iters=3`.
 
-The acoustic-rescore-gated EMA is the structural safety mechanism that prevents the loop from drifting on confident-but-wrong outputs. Removing it (`disable_conf_gate: true`) must perform **worse** than disabling C3 entirely — see `docs/EVALUATION.md`.
+The decision and acoustic-rescore update gates are separate structural-safety
+mechanisms. Their joint removal is evaluated with a paired, manifest-cluster
+bootstrap; an interval touching zero is inconclusive rather than evidence that
+the gate is safe. See `docs/EVALUATION.md`.
 
 ---
 
@@ -123,4 +126,6 @@ Set in `configs/default.yaml` under `ablation:`. One flag at a time reproduces o
 | `disable_c1` | Replace `id_q.z_id` with zeros → GER is no longer ID-aware. |
 | `disable_c2` | Skip the GER head; return ASR 1-best as the hypothesis. |
 | `disable_c3` | Cap `max_iters=1`; never EMA-update the pool. |
-| `disable_conf_gate` | Promote every `ACCEPT_NO_UPDATE` → `ACCEPT_AND_UPDATE` (unconditional pool update). |
+| `disable_c3_decision_gate` | Bypass REALIGN/REIDENTIFY and enter the first-pass accept branch. |
+| `disable_c3_update_gate` | Bypass `tau_update`; a known enrolled speaker is updated unconditionally. |
+| `disable_conf_gate` | Deprecated alias that enables both switches above. |

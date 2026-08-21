@@ -14,7 +14,7 @@ This framework **adopts the dual-hypothesis prompting paradigm popularised by Du
 
 1. **Identity conditioning (C1)** — a fused ECAPA + ArcFace embedding `z_id`, registered as a `[Speaker: ID_i]` special token, and an EMA-refreshed pool that gives the model *persistent memory of who is speaking*.
 2. **Continuous soft prefix (C2)** — instead of relying on text alone, an ID-conditioned, token-level cross-attention over Whisper × AV-HuBERT features produces `f_align`, which is projected into the LLM as a `<AV_CTX>` soft prefix. The aligner is also **per-speaker key-masked** so it cannot hallucinate lip evidence from other speakers.
-3. **Closed-loop confidence gate (C3)** — composite confidence + acoustic-rescore gate decides whether to accept, re-align, re-identify, or refresh the pool. Removing the gate (the `c3_wo_conf_gate` ablation) must *degrade* SA-WER relative to disabling C3 entirely; this is the structural-safety claim of the framework.
+3. **Closed-loop confidence gates (C3)** — composite confidence controls accept/re-align/re-identify, while acoustic confidence separately controls pool refresh. The corrected `c3_wo_conf_gates` ablation removes both and tests the structural-safety claim with a paired manifest-cluster bootstrap.
 
 No DualHyp code or checkpoint is used. The lineage is **conceptual** (prompt structure inherited), not **implementational**.
 

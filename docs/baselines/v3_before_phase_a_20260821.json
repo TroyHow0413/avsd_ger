@@ -1,0 +1,440 @@
+{
+  "schema_version": 1,
+  "baseline_id": "v3_before_phase_a_20260821",
+  "experiment_git_commit": "60f86fc442e234fd4366c1a35ac77a8fd44151bd",
+  "source_access": "read_only",
+  "snapshot": {
+    "file_count": 170,
+    "total_bytes": 144802704,
+    "inventory_sha256": "99c3a07d9473b48a5ea6a05adcbd90fcb881e26a9f7507bcb5e023ca1add977d"
+  },
+  "snapshot_manifest": "out/baselines/v3_before_phase_a_20260821/provenance.full.json",
+  "manifests": [
+    {
+      "path": "manifests/ES2011a.json",
+      "bytes": 106855,
+      "sha256": "9eee8c8e3aba03b9894797148a0a2442a57449a1e2e4a9d1d296490b36cd578b"
+    },
+    {
+      "path": "manifests/ES2011b.json",
+      "bytes": 88189,
+      "sha256": "e1902fe10127bc09a39851ddcfd028c75f924f0a425bbcf6c08e28afd87e5f05"
+    },
+    {
+      "path": "manifests/ES2011c.json",
+      "bytes": 108913,
+      "sha256": "832c6ebfe0bda07390a26a7eebd702112cff57a70355f05617911138dc20e075"
+    },
+    {
+      "path": "manifests/ES2011d.json",
+      "bytes": 96020,
+      "sha256": "0b6eb326e6157621b4d2084d4837dda4235dbb36d66c74cad4b07530971bb40a"
+    },
+    {
+      "path": "manifests/IS1008a.json",
+      "bytes": 97786,
+      "sha256": "13f5d9e297cf29a9f5ec7ee0b316cb1788ebf7a6542b67d4ef94953be14ac894"
+    },
+    {
+      "path": "manifests/IS1008b.json",
+      "bytes": 103761,
+      "sha256": "682890a0dea9fbd4fffd89ef043ce61a38c97993d6e66faec51a8823bbfd6076"
+    },
+    {
+      "path": "manifests/IS1008c.json",
+      "bytes": 110297,
+      "sha256": "e6ce7534d784c1ae229f78319ce6ee08f3d0654fa1807fa71ed71a7998c231b6"
+    },
+    {
+      "path": "manifests/IS1008d.json",
+      "bytes": 104633,
+      "sha256": "e9aa37fcf8d8b309d6f354a0de2c8342105f92c30cda82b25174330e2584ca48"
+    },
+    {
+      "path": "manifests/TS3004a.json",
+      "bytes": 78676,
+      "sha256": "c21e4469b3ea13bbef3319843f7a90f66a4cd3546adeeefcef0238b468c9a549"
+    },
+    {
+      "path": "manifests/TS3004b.json",
+      "bytes": 108418,
+      "sha256": "452072c9ef03f9ab91ee0511bb4e7a7238de0def04a1173102d9e2cb20530381"
+    },
+    {
+      "path": "manifests/TS3004c.json",
+      "bytes": 105662,
+      "sha256": "eee893406cffb8539ad088a239b49a01f2c103fb3bc9f8d3f39c7af9cdfbbd56"
+    },
+    {
+      "path": "manifests/TS3004d.json",
+      "bytes": 105324,
+      "sha256": "05840fc380767b13094ca2e9a2e1456027ca5377f51054d4b056f5390eb0e7e8"
+    }
+  ],
+  "wandb_metadata": [
+    {
+      "path": "wandb/run-20260821_024647-npes8vhk/config.yaml",
+      "bytes": 8804,
+      "sha256": "f52cd7cbe623645c1404f5848de343f208beb4b56a304d5a5be23b07fdc74ac6"
+    },
+    {
+      "path": "wandb/run-20260821_024647-npes8vhk/wandb-metadata.json",
+      "bytes": 2327,
+      "sha256": "a12cd6d8be4ebe27e94065e025e991b017bf32dbb3d5e584d82d5674d1927d83"
+    },
+    {
+      "path": "wandb/run-20260821_024647-npes8vhk/wandb-summary.json",
+      "bytes": 402,
+      "sha256": "c22099bb2afe530a591ba51041c5ee0bfe66b25fc63a7c5a243b2dc6acc4c5ec"
+    },
+    {
+      "path": "wandb/run-20260821_070504-4vpt97bj/config.yaml",
+      "bytes": 8627,
+      "sha256": "eba602894e616430f8e148f6074bb6041f0ba395db30b7e7b507d39fee805ca5"
+    },
+    {
+      "path": "wandb/run-20260821_070504-4vpt97bj/wandb-metadata.json",
+      "bytes": 2223,
+      "sha256": "598510c0fb8ea0284e3588ea197269ef10ea4368f86a1647d127fb5c75e6afa5"
+    },
+    {
+      "path": "wandb/run-20260821_070504-4vpt97bj/wandb-summary.json",
+      "bytes": 134177,
+      "sha256": "bdbd3b4b6023f0e8c159b4c8a2d9ab613c85e1fd8e86a7b1f4c1057947cbbfe2"
+    },
+    {
+      "path": "wandb/run-20260821_085930-e9o5qudm/config.yaml",
+      "bytes": 8834,
+      "sha256": "a2711697f876e65ca372b0e98352f2c1ced1865255ad218f12f4eff0e7523e4f"
+    },
+    {
+      "path": "wandb/run-20260821_085930-e9o5qudm/wandb-metadata.json",
+      "bytes": 2344,
+      "sha256": "732813bca6a2c8d20f145f425cd3b24edf7ad4074cd4ff0e07a81955a1ad2735"
+    },
+    {
+      "path": "wandb/run-20260821_085930-e9o5qudm/wandb-summary.json",
+      "bytes": 395,
+      "sha256": "b6d74add97baf49d5d8ec4f6e9573d797155b93d9a8e70ed43db553e74600875"
+    },
+    {
+      "path": "wandb/run-20260821_131346-mt94hrxl/config.yaml",
+      "bytes": 8669,
+      "sha256": "998edd106479c4d0e5de57ad48953b456e3912fe3887d0e39c03657f76019183"
+    },
+    {
+      "path": "wandb/run-20260821_131346-mt94hrxl/wandb-metadata.json",
+      "bytes": 2252,
+      "sha256": "431ae09f6fa4a0e4aaa5a16a862db58bea6b400130382ee6b2a793ec45d523b2"
+    },
+    {
+      "path": "wandb/run-20260821_131346-mt94hrxl/wandb-summary.json",
+      "bytes": 135632,
+      "sha256": "f8355f5e0a53e1ee8a5cb8a3c307b3dbd9db06a2a75d59db4a14fb792482062b"
+    }
+  ],
+  "eval_artifacts": {
+    "qwen": {
+      "file_count": 73,
+      "total_bytes": 71320823,
+      "inventory_sha256": "8a0ed4db55e42c4d4ab4a1c73232fc454aabaeccfd43e797061588acfcab1157"
+    },
+    "llama": {
+      "file_count": 73,
+      "total_bytes": 71952661,
+      "inventory_sha256": "2b4c19c167ee81c9503569542a7842759a5aaba3483f0f1fe3bd23c8ee15fa2e"
+    }
+  },
+  "models": {
+    "qwen": {
+      "checkpoint_source": "F:\\workspace\\avsd_ger\\checkpoints\\server_qwen3b_av_joint_e3_v3",
+      "checkpoint_file_count": 14,
+      "checkpoint_total_bytes": 1418077947,
+      "checkpoint_files": [
+        {
+          "path": "aligner_stage2.pt",
+          "bytes": 30483749,
+          "sha256": "1f91bed64f1884a488691baaf545510e20b00a7c89fdd792675996d4c4138052"
+        },
+        {
+          "path": "ctc_head_stage2.pt",
+          "bytes": 61477,
+          "sha256": "8f5a136cf9b73136235d705aec41032e23cc978f6e491faa697bd413b8136ee9"
+        },
+        {
+          "path": "ger/ger_projectors.pt",
+          "bytes": 5277490,
+          "sha256": "47efbf169b4a84bc05a4675ec03ecf9480f4e4bed2fa6f37fe4b1e5b56705344"
+        },
+        {
+          "path": "ger/lora_adapter/adapter_config.json",
+          "bytes": 1136,
+          "sha256": "424f0db51583358e533337efbf0e870110257db0744e8db214713d67ba0cbe96"
+        },
+        {
+          "path": "ger/lora_adapter/adapter_model.safetensors",
+          "bytes": 1362249632,
+          "sha256": "923bfaec3e777b94555740184939a2d7cb284d21b22dd9e3ac9f82daf7192185"
+        },
+        {
+          "path": "ger/lora_adapter/README.md",
+          "bytes": 5268,
+          "sha256": "8d8b808a3620efa1d5b7378327d32c62092a0baabe619ee8c82eb08444b261fa"
+        },
+        {
+          "path": "ger/tokenizer/added_tokens.json",
+          "bytes": 634,
+          "sha256": "173b8f472e26af0ec7598fca671aa80cfdbab880fa25198da0a6d993c3b9ca9b"
+        },
+        {
+          "path": "ger/tokenizer/chat_template.jinja",
+          "bytes": 2507,
+          "sha256": "cd8e9439f0570856fd70470bf8889ebd8b5d1107207f67a5efb46e342330527f"
+        },
+        {
+          "path": "ger/tokenizer/merges.txt",
+          "bytes": 1671853,
+          "sha256": "8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5"
+        },
+        {
+          "path": "ger/tokenizer/special_tokens_map.json",
+          "bytes": 478,
+          "sha256": "e4e4120277aa2f0a1ccbb114046c92b7e5a9d6f5826abd8371c73604574dfc3c"
+        },
+        {
+          "path": "ger/tokenizer/tokenizer.json",
+          "bytes": 11422088,
+          "sha256": "2f2a3ed76030d01a261239c2ee1c651d5f8599a6cac27ba576a8b60ab104da4d"
+        },
+        {
+          "path": "ger/tokenizer/tokenizer_config.json",
+          "bytes": 4607,
+          "sha256": "e5c6d4cb81755105d347a118f98ad5486e5702011a75205486295bb62778b817"
+        },
+        {
+          "path": "ger/tokenizer/vocab.json",
+          "bytes": 2776833,
+          "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910"
+        },
+        {
+          "path": "identity_pool_stage2.pt",
+          "bytes": 4120195,
+          "sha256": "53f45a1bfe02d02ef2971915dd8a3b3fa2fea951cd92f022311aee46fca588e0"
+        }
+      ],
+      "checkpoint_metadata": {
+        "status": "extracted",
+        "value": {
+          "format_version": 2,
+          "model_identifier": "Qwen/Qwen2.5-3B-Instruct",
+          "model_family": "qwen2.5-3b-instruct",
+          "model_type": "qwen2",
+          "hidden_size": 2048,
+          "model_config_fingerprint": "331afdf4d402273fefc51c9fa0f6291ba4e8a81b36eb85363675e1ba32f0c9fb",
+          "tokenizer_class": "Qwen2TokenizerFast",
+          "tokenizer_vocab_size": 151666,
+          "tokenizer_fingerprint": "d085bb36b7b87c287f332c65e2c8cfd52e9b5445b3fb8cf11f1237e45b1a642d",
+          "chat_template_fingerprint": "2e2d2512cfe46af53dc1eed45368ecaab26ac4461c480e6b69fe571cf0ceaa75",
+          "speaker_special_token": "[Speaker: ID_i]",
+          "speaker_token_id": 151665,
+          "prompt_template_fingerprint": "d093a7831a61bb1c1162287886f8f1c901926585087996f947e1ae810af709d2",
+          "z_dim": 256,
+          "d_align": 512,
+          "n_queries": 16,
+          "n_heads": 8,
+          "lora_target_modules": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+            "o_proj",
+            "gate_proj",
+            "up_proj",
+            "down_proj"
+          ],
+          "lora_rank": 16,
+          "lora_alpha": 32.0,
+          "lora_dropout": 0.05,
+          "lora_bias": "none",
+          "torch_version": "2.11.0+cu128",
+          "transformers_version": "4.54.1",
+          "peft_version": "0.19.1",
+          "git_commit": "60f86fc442e234fd4366c1a35ac77a8fd44151bd",
+          "training_hyperparameters": {
+            "stage1": {
+              "epochs": 20,
+              "lr": 0.001,
+              "warmup_steps": 500,
+              "freeze": [
+                "asr_encoder",
+                "vsr_encoder"
+              ],
+              "objective": [
+                "infonce_av",
+                "infonce_va",
+                "ctc"
+              ],
+              "stop_on": "av_sid_acc_plateau"
+            },
+            "stage2": {
+              "epochs": 3,
+              "lr": 0.0001,
+              "lr_ratio_to_stage1": 0.1,
+              "freeze": [],
+              "objective": [
+                "ctc",
+                "ger_ce",
+                "infonce_av",
+                "infonce_va"
+              ],
+              "stage1_pool": "checkpoints/server_qwen3b_identity_e1/identity_pool_stage1.pt"
+            },
+            "infonce": {
+              "temperature": 0.07,
+              "bidirectional": true
+            }
+          }
+        }
+      }
+    },
+    "llama": {
+      "checkpoint_source": "F:\\workspace\\avsd_ger\\checkpoints\\server_llama32_3b_av_joint_e3_v3",
+      "checkpoint_file_count": 11,
+      "checkpoint_total_bytes": 1732121311,
+      "checkpoint_files": [
+        {
+          "path": "aligner_stage2.pt",
+          "bytes": 30483749,
+          "sha256": "97a92a5f73784b1b3c473eec8163b1e632aca99659d296c3a3f095b889a4c76a"
+        },
+        {
+          "path": "ctc_head_stage2.pt",
+          "bytes": 61477,
+          "sha256": "82d970ffe178ad6a4833a9d7b4bd2f686434e9a0f0c7b82e68bda4079bd75ce9"
+        },
+        {
+          "path": "ger/ger_projectors.pt",
+          "bytes": 6854450,
+          "sha256": "dae44bf1b5aeb02016f73ea973fa6b8cbb2de5b88382cee9a0fe10e879356720"
+        },
+        {
+          "path": "ger/lora_adapter/adapter_config.json",
+          "bytes": 1138,
+          "sha256": "492a407d8ad1a1dad9c9594b749b8dd0ac796dc164db5e95c12b894bab67a108"
+        },
+        {
+          "path": "ger/lora_adapter/adapter_model.safetensors",
+          "bytes": 1673329784,
+          "sha256": "adafd4c82cf9ae973cdd7f48763c0acdb2ba423875c60df548ee911577389e29"
+        },
+        {
+          "path": "ger/lora_adapter/README.md",
+          "bytes": 5272,
+          "sha256": "318965a105e652414fbc8f51d1327aa383f8d112a54764dd94cf0f03e4caa6ef"
+        },
+        {
+          "path": "ger/tokenizer/chat_template.jinja",
+          "bytes": 3827,
+          "sha256": "5816fce10444e03c2e9ee1ef8a4a1ea61ae7e69e438613f3b17b69d0426223a4"
+        },
+        {
+          "path": "ger/tokenizer/special_tokens_map.json",
+          "bytes": 511,
+          "sha256": "29869a3fb2efab60b070ba391ee8b8928d37a15b3a9e14b3606209644106bb99"
+        },
+        {
+          "path": "ger/tokenizer/tokenizer.json",
+          "bytes": 17210112,
+          "sha256": "06e32a6b449cfc5a2c5869b1bdfa44f37843a8e08f504526f8740420dc3d224a"
+        },
+        {
+          "path": "ger/tokenizer/tokenizer_config.json",
+          "bytes": 50796,
+          "sha256": "f065718ef68a63b8e5b4a4780443f05045b6fbe51e5ce3aeedcbe7f57715e86e"
+        },
+        {
+          "path": "identity_pool_stage2.pt",
+          "bytes": 4120195,
+          "sha256": "af62c061ff7b766d5358e0e952b6a14651e7c498921eea29c2a771deb65d85f3"
+        }
+      ],
+      "checkpoint_metadata": {
+        "status": "extracted",
+        "value": {
+          "format_version": 2,
+          "model_identifier": "meta-llama/Llama-3.2-3B-Instruct",
+          "model_family": "llama-3.2-3b-instruct",
+          "model_type": "llama",
+          "hidden_size": 3072,
+          "model_config_fingerprint": "cc58f6e765ef2f5468dee9be9453e43fbcd53e9e266b5e5646fe2058e8096ae8",
+          "tokenizer_class": "PreTrainedTokenizerFast",
+          "tokenizer_vocab_size": 128257,
+          "tokenizer_fingerprint": "b2b4bb5469cc0ea85fa03818e5cfc00a9107cf18155efc1e9ad34096ec9d3c29",
+          "chat_template_fingerprint": "2732d9da5568668ed22ea202bffb12f0df405439651e1275ba1f521522f92966",
+          "speaker_special_token": "[Speaker: ID_i]",
+          "speaker_token_id": 128256,
+          "prompt_template_fingerprint": "d093a7831a61bb1c1162287886f8f1c901926585087996f947e1ae810af709d2",
+          "z_dim": 256,
+          "d_align": 512,
+          "n_queries": 16,
+          "n_heads": 8,
+          "lora_target_modules": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+            "o_proj",
+            "gate_proj",
+            "up_proj",
+            "down_proj"
+          ],
+          "lora_rank": 16,
+          "lora_alpha": 32.0,
+          "lora_dropout": 0.05,
+          "lora_bias": "none",
+          "torch_version": "2.11.0+cu128",
+          "transformers_version": "4.54.1",
+          "peft_version": "0.19.1",
+          "git_commit": "60f86fc442e234fd4366c1a35ac77a8fd44151bd",
+          "training_hyperparameters": {
+            "stage1": {
+              "epochs": 20,
+              "lr": 0.001,
+              "warmup_steps": 500,
+              "freeze": [
+                "asr_encoder",
+                "vsr_encoder"
+              ],
+              "objective": [
+                "infonce_av",
+                "infonce_va",
+                "ctc"
+              ],
+              "stop_on": "av_sid_acc_plateau"
+            },
+            "stage2": {
+              "epochs": 3,
+              "lr": 2e-05,
+              "lr_ratio_to_stage1": 0.02,
+              "freeze": [],
+              "objective": [
+                "ctc",
+                "ger_ce",
+                "infonce_av",
+                "infonce_va"
+              ],
+              "stage1_pool": "checkpoints/server_qwen3b_identity_e1/identity_pool_stage1.pt"
+            },
+            "infonce": {
+              "temperature": 0.07,
+              "bidirectional": true
+            }
+          }
+        }
+      }
+    }
+  },
+  "notes": [
+    "Raw eval/debug artifacts are intentionally ignored by Git.",
+    "Historical c3_wo_conf_gate means update-gate-only, not all C3 confidence gates.",
+    "Qwen and Llama used per-model Stage-3 settings; this is not a strictly controlled backbone comparison."
+  ]
+}

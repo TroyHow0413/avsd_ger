@@ -32,6 +32,7 @@ einops>=0.7.0
 # ---- ASR backbone ---------------------------------------------------------
 faster-whisper>=1.0.0   # CTranslate2 Whisper-large-v3
 openai-whisper>=20231117 # optional unified Whisper backend: decode + encoder + rescore
+jiwer==4.0.0            # independent canonical WER cross-check
 transformers>=4.49,<4.55    # torch 2.6 satisfies >=2.4 requirement; cap <4.55 for stability
 tokenizers>=0.21,<0.22      # transformers 4.49+ mandates this exact range
 huggingface_hub>=0.34,<1.0  # 0.34+ provides the `hf` CLI; keep <1.0 for transformers compatibility

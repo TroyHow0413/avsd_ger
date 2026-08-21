@@ -60,9 +60,14 @@ Bundled:
 
 ```python
 from avsd_ger.eval.metrics import evaluate_session
-report = evaluate_session(session.turns)
+report = evaluate_session(session.turns, language="auto")
 print(report.sa_wer, report.scr, report.av_sid_acc, report.der, report.jer)
 ```
+
+`language="auto"` uses the per-turn Whisper detector metadata. Legacy debug
+files do not contain that field and must be analysed with an explicit ISO
+language such as `language="en"`. English uses Whisper's
+`EnglishTextNormalizer`; other languages use `BasicTextNormalizer`.
 
 ---
 
@@ -135,12 +140,18 @@ Rows (controlled via `cfg.ablation` overrides):
 | `wo_c1` | `disable_c1: true` | contribution of cross-modal identity conditioning |
 | `wo_c2` | `disable_c2: true` | contribution of the GER head over ASR 1-best |
 | `wo_c3` | `disable_c3: true` | contribution of the closed loop |
-| `c3_wo_conf_gate` | `disable_conf_gate: true` | contribution of the **gate** itself, not C3 |
+| `c3_wo_conf_gates` | `disable_c3_decision_gate: true`, `disable_c3_update_gate: true` | both C3 confidence gates; GER safety remains enabled |
 
-**Spec-mandated structural-safety check** (printed by the script):
+The legacy `disable_conf_gate` key remains accepted, emits a deprecation
+warning, and maps to both new switches. Historical `c3_wo_conf_gate` results
+only disabled the update gate and must not be mixed with the corrected row.
+
+**Structural-safety check** is computed across manifests using a paired
+manifest-cluster bootstrap. Equality and a 95% interval crossing zero are
+`inconclusive`, never `PASS`; a single manifest is `insufficient`.
 
 ```
-[spec check] C3-w/o-gate SA-WER (X.XXXX) >= w/o-C3 SA-WER (Y.YYYY): PASS / FAIL
+c3_wo_conf_gates - wo_c3 canonical SA-WER: mean delta, 95% CI, status
 ```
 
 If `FAIL`, the gate isn't doing what the spec says it does — investigate before claiming the framework's safety property.
@@ -154,7 +165,7 @@ The output JSON (`out/ablation_report.json`) is one record per ablation row: met
 Restrict to a few rows:
 
 ```bash
-python scripts/eval_ablations.py --only full_model wo_c1 c3_wo_conf_gate ...
+python scripts/eval_ablations.py --only full_model wo_c1 c3_wo_conf_gates ...
 ```
 
 Skip the power monitor (e.g. on a CI runner without NVML):
@@ -196,3 +207,19 @@ python scripts\eval_ablations.py `
 
 When multiple manifests are matched, `--out` is treated as an output directory
 and the script writes one report per manifest plus `summary.json`.
+
+## Offline canonical debug audit
+
+Recompute ASR, raw-GER, final and lip WER without loading any model:
+
+```bash
+python scripts/analyze_debug_outputs.py \
+  out/eval_qwen/summary.json out/eval_llama/summary.json \
+  --language en --out-dir out/phase_a_analysis
+```
+
+The output includes `report.json`, `report.md`, `sessions.csv` and `turns.csv`.
+It reports GER candidate/acceptance coverage, per-turn improvement or harm,
+iteration versus final fallback, gate failure reasons, C1 raw top-1 accuracy,
+UNKNOWN coverage and runtime/throughput metadata. `jiwer==4.0.0` independently
+checks every edit-distance result.

@@ -12,6 +12,7 @@ the session and concatenates outputs (see avsd_ger/eval/session.py).
 """
 from __future__ import annotations
 
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -136,7 +137,21 @@ class AVSDGERPipeline:
         self.disable_c1 = bool(abl.get("disable_c1", False))                # bypass ID conditioning
         self.disable_c2 = bool(abl.get("disable_c2", False))                # skip GER; return ASR 1-best
         self.disable_c3 = bool(abl.get("disable_c3", False))                # skip closed-loop
-        self.disable_conf_gate = bool(abl.get("disable_conf_gate", False))  # EMA-update unconditionally
+        legacy_disable = bool(abl.get("disable_conf_gate", False))
+        if legacy_disable:
+            warnings.warn(
+                "ablation.disable_conf_gate is deprecated; it now disables both "
+                "C3 decision and update confidence gates",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+        self.disable_conf_gate = legacy_disable
+        self.disable_c3_decision_gate = bool(
+            abl.get("disable_c3_decision_gate", legacy_disable)
+        )
+        self.disable_c3_update_gate = bool(
+            abl.get("disable_c3_update_gate", legacy_disable)
+        )
 
     @classmethod
     def from_config(cls, path: str | Path) -> "AVSDGERPipeline":
@@ -261,6 +276,8 @@ class AVSDGERPipeline:
             "nbest_scores": [float(x) for x in asr_out.nbest_scores],
             "top": asr_out.nbest[0] if asr_out.nbest else "",
             "frame_rate_hz": float(asr_out.frame_rate_hz),
+            "detected_language": asr_out.detected_language,
+            "language_probability": asr_out.language_probability,
             "encoder_features": _tensor_debug(asr_feats),
             "token_features": _tensor_debug(asr_tok_feats),
             "words": [
@@ -321,6 +338,7 @@ class AVSDGERPipeline:
         ger_out: dict[str, Any] | None = None
         rep = None
         decision: LoopDecision | None = None
+        pool_updated = False
         vsr_len = int(vsr_out["vsr_features"].shape[0])
         if use_visual:
             if speaker_mask_v is not None and int(speaker_mask_v.numel()) != vsr_len:
@@ -473,17 +491,9 @@ class AVSDGERPipeline:
                 total_confidence=rep.total,
                 s_acoustic_conf=s_acoustic_conf,
                 iteration=it,
+                disable_decision_gate=self.disable_c3_decision_gate,
+                disable_update_gate=self.disable_c3_update_gate,
             )
-            # Ablation: C3 w/o Conf. Gate -- promote every ACCEPT to
-            # ACCEPT_AND_UPDATE so the pool is refreshed unconditionally.
-            # Spec section 10 note: this variant must perform *worse* than
-            # disabling C3 entirely -- proves the gate is structural safety.
-            if self.disable_conf_gate and decision.action == LoopAction.ACCEPT_NO_UPDATE:
-                decision = LoopDecision(
-                    LoopAction.ACCEPT_AND_UPDATE,
-                    "conf-gate DISABLED (ablation) -- unconditional pool update",
-                    it,
-                )
 
             trace.append({
                 "iter": it,
@@ -525,7 +535,7 @@ class AVSDGERPipeline:
             })
 
             if decision.action == LoopAction.ACCEPT_AND_UPDATE:
-                if not self.enable_pool_update and not self.disable_conf_gate:
+                if not self.enable_pool_update and not self.disable_c3_update_gate:
                     decision = LoopDecision(
                         LoopAction.ACCEPT_NO_UPDATE,
                         f"{decision.reason}; pool update disabled by feedback.enable_pool_update=false",
@@ -534,12 +544,13 @@ class AVSDGERPipeline:
                     trace[-1]["decision"] = decision.action.value
                     trace[-1]["reason"] = decision.reason
                 elif speaker_id_hint is not None and not self.disable_c3:
-                    self.pool.ema_update(
+                    pool_updated = self.pool.ema_update(
                         speaker_id_hint,
                         new_voice_emb=voice_emb,
                         new_face_emb=face_emb if face_image is not None else None,
                         alpha=self.ema_alpha,
                     )
+                trace[-1]["pool_updated"] = pool_updated
                 break
             if decision.action == LoopAction.ACCEPT_NO_UPDATE:
                 break
@@ -559,12 +570,9 @@ class AVSDGERPipeline:
             "confidence": rep.total if rep else 0.0,
             "s_acoustic": trace[-1]["s_acoustic"] if trace else None,
             "iterations": len(trace),
-            "pool_updated": (
-                decision.action == LoopAction.ACCEPT_AND_UPDATE
-                and not self.disable_c3
-                and (self.enable_pool_update or self.disable_conf_gate)
-                if decision else False
-            ),
+            "pool_updated": pool_updated,
+            "asr_language": asr_out.detected_language,
+            "asr_language_probability": asr_out.language_probability,
             "trace": trace,
             "debug": {
                 "input": input_debug,
@@ -584,6 +592,9 @@ class AVSDGERPipeline:
                 "c3": {
                     "disable_c3": self.disable_c3,
                     "disable_conf_gate": self.disable_conf_gate,
+                    "disable_c3_decision_gate": self.disable_c3_decision_gate,
+                    "disable_c3_update_gate": self.disable_c3_update_gate,
+                    "semantics_version": 2,
                     "max_iters": max_iters,
                     "enable_pool_update": self.enable_pool_update,
                     "enable_ger_safety_gate": self.ger_safety.enabled,
@@ -594,12 +605,7 @@ class AVSDGERPipeline:
                     "speaker_id": id_q.top_ids[0] if (id_q.top_ids and not id_q.is_unknown) else None,
                     "confidence": rep.total if rep else 0.0,
                     "iterations": len(trace),
-                    "pool_updated": (
-                        decision.action == LoopAction.ACCEPT_AND_UPDATE
-                        and not self.disable_c3
-                        and (self.enable_pool_update or self.disable_conf_gate)
-                        if decision else False
-                    ),
+                    "pool_updated": pool_updated,
                 },
             },
         }

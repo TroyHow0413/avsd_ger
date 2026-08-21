@@ -226,4 +226,7 @@ ablation:
   disable_c1: false
   disable_c2: false
   disable_c3: false
+  disable_c3_decision_gate: false
+  disable_c3_update_gate: false
+  # Deprecated compatibility alias. true means both C3 gates are disabled.
   disable_conf_gate: false

@@ -22,14 +22,18 @@ the pyannote implementations they can swap them in behind the same API.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Iterable, Sequence
+from typing import Callable, Iterable, Sequence
 
 import numpy as np
 
 from .session import SessionTurnResult
+from ..text_normalization import NORMALIZER_VERSION, normalize_text
 
 
 # ------------------------------------------------------------------ helpers
+
+TextNormalizer = Callable[[str | None, str | None, str | None], str]
+
 
 def _tokens(text: str | None) -> list[str]:
     if not text:
@@ -40,6 +44,9 @@ def _tokens(text: str | None) -> list[str]:
 def _pairs_from_turns(
     turns: Sequence[SessionTurnResult],
     which: str,  # "ref" or "hyp"
+    *,
+    language: str,
+    normalizer: TextNormalizer | None,
 ) -> list[tuple[str, str]]:
     """Return a flat list of (speaker_label, word) tuples across turns."""
     out: list[tuple[str, str]] = []
@@ -52,7 +59,14 @@ def _pairs_from_turns(
             text = t.hyp_text
         else:
             raise ValueError(which)
-        for w in _tokens(text):
+        detected = getattr(t, "asr_language", None)
+        if normalizer is None:
+            normalized = normalize_text(
+                text, language=language, detected_language=detected
+            )
+        else:
+            normalized = normalizer(text, language, detected)
+        for w in _tokens(normalized):
             out.append((spk, w))
     return out
 
@@ -173,7 +187,12 @@ class MetricsReport:
     details: dict = field(default_factory=dict)
 
 
-def compute_sa_wer(turns: Sequence[SessionTurnResult]) -> tuple[float, dict]:
+def compute_sa_wer(
+    turns: Sequence[SessionTurnResult],
+    *,
+    language: str = "en",
+    normalizer: TextNormalizer | None = None,
+) -> tuple[float, dict]:
     """Speaker-Attributed WER.
 
     Alignment is done on words (standard Levenshtein). A ref word is "correct"
@@ -183,8 +202,12 @@ def compute_sa_wer(turns: Sequence[SessionTurnResult]) -> tuple[float, dict]:
 
     Returns (sa_wer, details). details includes raw WER, counts, and mapping.
     """
-    ref_pairs = _pairs_from_turns(turns, "ref")
-    hyp_pairs = _pairs_from_turns(turns, "hyp")
+    ref_pairs = _pairs_from_turns(
+        turns, "ref", language=language, normalizer=normalizer
+    )
+    hyp_pairs = _pairs_from_turns(
+        turns, "hyp", language=language, normalizer=normalizer
+    )
     n_ref = len(ref_pairs)
     if n_ref == 0:
         return 0.0, {"n_ref_words": 0, "wer": 0.0}
@@ -228,18 +251,43 @@ def compute_sa_wer(turns: Sequence[SessionTurnResult]) -> tuple[float, dict]:
         "n_ins": n_ins,
         "n_spk_err": n_spk_err,
         "mapping": mapping,
+        "normalizer_version": NORMALIZER_VERSION,
+        "language": language,
     }
+    raw_ref = [
+        (t.ref_speaker if t.ref_speaker is not None else "__NONE__", word)
+        for t in turns
+        for word in _tokens(t.ref_text)
+    ]
+    raw_hyp = [
+        (t.hyp_speaker if t.hyp_speaker is not None else "__NONE__", word)
+        for t in turns
+        for word in _tokens(t.hyp_text)
+    ]
+    raw_ops = _word_levenshtein_align(raw_ref, raw_hyp)
+    raw_edits = sum(op != "match" for op, _, _ in raw_ops)
+    details["legacy_raw_wer"] = raw_edits / len(raw_ref) if raw_ref else 0.0
+    details["legacy_raw_n_ref_words"] = len(raw_ref)
     return sa_wer, details
 
 
-def compute_scr(turns: Sequence[SessionTurnResult]) -> tuple[float, dict]:
+def compute_scr(
+    turns: Sequence[SessionTurnResult],
+    *,
+    language: str = "en",
+    normalizer: TextNormalizer | None = None,
+) -> tuple[float, dict]:
     """Speaker Confusion Rate.
 
     Among reference words that the hypothesis got *textually right* (matched in
     alignment), what fraction were attributed to the wrong speaker?
     """
-    ref_pairs = _pairs_from_turns(turns, "ref")
-    hyp_pairs = _pairs_from_turns(turns, "hyp")
+    ref_pairs = _pairs_from_turns(
+        turns, "ref", language=language, normalizer=normalizer
+    )
+    hyp_pairs = _pairs_from_turns(
+        turns, "hyp", language=language, normalizer=normalizer
+    )
     if not ref_pairs or not hyp_pairs:
         return 0.0, {"n_matched": 0, "n_spk_err": 0}
 
@@ -460,10 +508,17 @@ def compute_jer(turns: Sequence[SessionTurnResult]) -> tuple[float, dict]:
 
 # ------------------------------------------------------------------ bundled runner
 
-def evaluate_session(turns: Sequence[SessionTurnResult]) -> MetricsReport:
+def evaluate_session(
+    turns: Sequence[SessionTurnResult],
+    *,
+    language: str = "en",
+    normalizer: TextNormalizer | None = None,
+) -> MetricsReport:
     """Compute all five spec metrics on one session's turn results."""
-    sa_wer, sa_det = compute_sa_wer(turns)
-    scr, scr_det = compute_scr(turns)
+    sa_wer, sa_det = compute_sa_wer(
+        turns, language=language, normalizer=normalizer
+    )
+    scr, scr_det = compute_scr(turns, language=language, normalizer=normalizer)
     av_sid, sid_det = compute_av_sid_accuracy(turns)
     der, der_det = compute_der(turns)
     jer, jer_det = compute_jer(turns)

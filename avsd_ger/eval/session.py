@@ -83,6 +83,8 @@ class SessionTurnResult:
     s_acoustic: float | None
     iterations: int
     pool_updated: bool
+    asr_language: str | None = None
+    asr_language_probability: float | None = None
     trace: list[dict[str, Any]] = field(default_factory=list)
     debug: dict[str, Any] = field(default_factory=dict)
     # Passthrough ground truth so metrics don't need the original SessionTurn.
@@ -151,6 +153,8 @@ class SessionRunner:
                 s_acoustic=out.get("s_acoustic"),
                 iterations=int(out.get("iterations", 0) or 0),
                 pool_updated=bool(out.get("pool_updated", False)),
+                asr_language=out.get("asr_language"),
+                asr_language_probability=out.get("asr_language_probability"),
                 trace=list(out.get("trace", []) or []),
                 debug={
                     "turn": {
