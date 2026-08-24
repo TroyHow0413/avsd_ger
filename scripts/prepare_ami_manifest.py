@@ -27,12 +27,12 @@ Then run eval over all produced manifests:
     done
 
 Notes on AMI coverage:
-  - Channel → speaker mapping: Headset-0=A, 1=B, 2=C, 3=D (from meetings.xml).
-  - Video: only Closeup1 and Closeup2 are present (2 of 4 speakers per meeting).
-    mouth_roi is set to null for ALL turns — run av_hubert/preparation/align_mouth.py
-    on the Closeup AVI files if you need lip features.
-  - The standard AMI test split consists of the meetings present in datasets/ami/audio/:
-    ES2004a-d, ES2011a-d, IS1008a-d, IS1009a-d  (16 meetings, 4 speakers each).
+  - Channel, camera, and corpus-global participant mappings are read from the
+    official corpusResources/meetings.xml. They must not be hard-coded.
+  - mouth_roi is set to null here and populated by
+    prepare_ami_visual_manifest.py from the verified Closeup stream.
+  - Keep train/dev/test meeting lists disjoint. The batch visual builder also
+    excludes legacy test entries duplicated in train/dev.
 """
 
 from __future__ import annotations
@@ -46,6 +46,12 @@ import sys
 import tempfile
 from pathlib import Path
 from xml.etree import ElementTree as ET
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from scripts.ami_metadata import apply_ami_speaker_metadata, load_ami_meetings  # noqa: E402
 
 # AMI convention: nxt_agent letter → Headset channel number
 SPK_TO_CHANNEL: dict[str, int] = {"A": 0, "B": 1, "C": 2, "D": 3}
@@ -106,9 +112,18 @@ def ref_text_for_segment(words: list[dict], seg_start: float, seg_end: float) ->
 # Audio helpers (uses ffmpeg — no extra Python dep needed)
 # ---------------------------------------------------------------------------
 
-def ffmpeg_slice(src: Path, dst: Path, start: float, end: float, sr: int = 16000) -> None:
+def ffmpeg_slice(
+    src: Path,
+    dst: Path,
+    start: float,
+    end: float,
+    sr: int = 16000,
+    overwrite: bool = True,
+) -> None:
     """Cut src[start:end] → dst at sr Hz mono 16-bit PCM WAV."""
     dst.parent.mkdir(parents=True, exist_ok=True)
+    if dst.exists() and not overwrite:
+        return
     subprocess.run(
         [
             "ffmpeg", "-y", "-loglevel", "error",
@@ -238,13 +253,15 @@ def process_meeting(
     enrollment_mode: str,
     enroll_min_turn_secs: float,
     enroll_max_turn_secs: float,
+    meeting_speakers: dict[str, dict] | None = None,
+    overwrite_turn_audio: bool = False,
+    dataset_build_id: str | None = None,
 ) -> dict:
     """
     Process one AMI meeting and return a session manifest dict.
 
-    Speaker IDs in the manifest use the format  {meeting_id}_{spk},
-    e.g. "ES2004a_A".  This is stable across meetings so the pipeline
-    can track cross-meeting speaker consistency if desired.
+    With meetings.xml metadata, speaker IDs use AMI corpus-global participant
+    IDs. The local ``{meeting_id}_{agent}`` ID is retained separately.
     """
     audio_dir = ami_root / "audio"
     ann_dir   = ami_root / "annotations"
@@ -252,8 +269,17 @@ def process_meeting(
     # ------------------------------------------------------------------
     # 1. Discover which speakers have complete data
     # ------------------------------------------------------------------
+    channel_by_speaker = (
+        {
+            agent: int(meta["channel"])
+            for agent, meta in meeting_speakers.items()
+            if meta.get("channel") is not None
+        }
+        if meeting_speakers
+        else dict(SPK_TO_CHANNEL)
+    )
     speakers_present: list[str] = []
-    for spk, ch in SPK_TO_CHANNEL.items():
+    for spk, ch in channel_by_speaker.items():
         wav      = audio_dir / f"{meeting_id}.Headset-{ch}.wav"
         seg_xml  = ann_dir / "segments" / f"{meeting_id}.{spk}.segments.xml"
         wrd_xml  = ann_dir / "words"    / f"{meeting_id}.{spk}.words.xml"
@@ -277,7 +303,7 @@ def process_meeting(
     # ------------------------------------------------------------------
     enrol_entries: list[dict] = []
     for spk in speakers_present:
-        ch      = SPK_TO_CHANNEL[spk]
+        ch      = channel_by_speaker[spk]
         src_wav = audio_dir / f"{meeting_id}.Headset-{ch}.wav"
         enrol_wav = out_root / "enrollment" / f"{meeting_id}_{spk}.wav"
         selected = (
@@ -304,9 +330,16 @@ def process_meeting(
             actual_enrollment_mode = "first_seconds_fallback"
         enrol_entries.append({
             "speaker_id":       f"{meeting_id}_{spk}",
+            "session_speaker_id": f"{meeting_id}_{spk}",
+            "nxt_agent": spk,
+            "identity_scope": "meeting_local",
+            "microphone_id": f"Headset-{ch}",
             "enrollment_audio": str(enrol_wav),
             "meta": {
                 "enrollment_mode": actual_enrollment_mode,
+                "enrollment_selected_seconds": round(
+                    sum(float(s["end"]) - float(s["start"]) for s in selected), 3
+                ),
                 "enrollment_selected_turns": [
                     {
                         "id": s.get("id"),
@@ -324,7 +357,7 @@ def process_meeting(
     # ------------------------------------------------------------------
     turns: list[dict] = []
     for spk in speakers_present:
-        ch      = SPK_TO_CHANNEL[spk]
+        ch      = channel_by_speaker[spk]
         src_wav = audio_dir / f"{meeting_id}.Headset-{ch}.wav"
 
         words = speaker_data[spk]["words"]
@@ -346,7 +379,13 @@ def process_meeting(
             # Safe filename: replace non-alphanumeric with _
             seg_fname = re.sub(r"[^a-zA-Z0-9]", "_", seg["id"])
             turn_wav  = out_root / "audio" / f"{seg_fname}.wav"
-            ffmpeg_slice(src_wav, turn_wav, seg["start"], seg["end"])
+            ffmpeg_slice(
+                src_wav,
+                turn_wav,
+                seg["start"],
+                seg["end"],
+                overwrite=overwrite_turn_audio,
+            )
 
             turns.append({
                 "turn_id":    seg["id"],
@@ -356,6 +395,11 @@ def process_meeting(
                 "mouth_roi":  None,  # set to .npy path after running av_hubert preprocessor
                 "ref_text":   ref_text,
                 "ref_speaker": f"{meeting_id}_{spk}",
+                "session_speaker_id": f"{meeting_id}_{spk}",
+                "nxt_agent": spk,
+                "identity_scope": "meeting_local",
+                "audio_source_type": "individual_headset_microphone",
+                "turn_boundary_source": "oracle_reference_transcript",
             })
 
         print(
@@ -367,7 +411,27 @@ def process_meeting(
     # Sort turns chronologically (interleaved across speakers)
     turns.sort(key=lambda t: t["start"])
 
-    return {"speakers": enrol_entries, "turns": turns}
+    manifest = {
+        "meeting_id": meeting_id,
+        "speakers": enrol_entries,
+        "turns": turns,
+        "meta": {
+            "source": "AMI manual annotations",
+            "config": "ihm",
+            "audio_condition": {
+                "ami_microphone_setup": "ihm",
+                "description": "individual_headset_microphone",
+                "far_field": False,
+            },
+            "turn_boundary_source": "oracle_reference_transcript",
+            "diarization_is_system_output": False,
+            "speaker_identity_scope": "meeting_local",
+            "dataset_build_id": dataset_build_id,
+        },
+    }
+    if meeting_speakers is not None:
+        manifest = apply_ami_speaker_metadata(manifest, meeting_id, meeting_speakers)
+    return manifest
 
 
 # ---------------------------------------------------------------------------
@@ -389,19 +453,57 @@ def main() -> None:
     ap.add_argument("--enroll-secs",   type=float, default=30.0,
                     help="Enrollment clip duration in seconds (default: 30)")
     ap.add_argument("--enrollment-mode", choices=["first_seconds", "turn_quality"],
-                    default="first_seconds",
-                    help="How to build enrollment clips (default: first_seconds)")
+                    default="turn_quality",
+                    help="How to build enrollment clips (default: turn_quality)")
     ap.add_argument("--enroll-min-turn-secs", type=float, default=3.0,
                     help="Minimum duration for turn-quality enrollment segments (default: 3)")
     ap.add_argument("--enroll-max-turn-secs", type=float, default=8.0,
                     help="Maximum duration for turn-quality enrollment segments (default: 8)")
     ap.add_argument("--min-turn-secs", type=float, default=1.0,
                     help="Skip turns shorter than this (default: 1.0 s)")
+    ap.add_argument(
+        "--meetings-xml",
+        type=Path,
+        default=None,
+        help="AMI meetings.xml; defaults to <ami>/corpusResources/meetings.xml.",
+    )
+    ap.add_argument(
+        "--allow-meeting-local-speakers",
+        action="store_true",
+        help="Allow legacy A-D meeting-local identities if meetings.xml is unavailable.",
+    )
+    ap.add_argument(
+        "--overwrite-turn-audio",
+        action="store_true",
+        help="Re-slice turn WAVs even when the destination already exists.",
+    )
+    ap.add_argument(
+        "--dataset-build-id",
+        default=None,
+        help="Immutable dataset version label recorded in manifest metadata.",
+    )
     args = ap.parse_args()
 
     ami_root = Path(args.ami)
     out_root = Path(args.out)
     out_root.mkdir(parents=True, exist_ok=True)
+    meetings_xml = args.meetings_xml or (ami_root / "corpusResources" / "meetings.xml")
+    if meetings_xml.is_file():
+        ami_meetings = load_ami_meetings(meetings_xml)
+        print(f"Loaded {len(ami_meetings)} meetings from {meetings_xml}")
+    elif args.allow_meeting_local_speakers:
+        ami_meetings = {}
+        print(
+            f"WARNING: {meetings_xml} missing; using meeting-local speaker IDs",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            f"ERROR: AMI metadata missing: {meetings_xml}\n"
+            "Run scripts/fetch_ami_metadata.py or pass --allow-meeting-local-speakers.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
 
     # Discover meetings
     if args.meetings:
@@ -423,12 +525,18 @@ def main() -> None:
     for mid in meetings:
         print(f"=== {mid} ===")
         try:
+            meeting_speakers = ami_meetings.get(mid)
+            if ami_meetings and meeting_speakers is None:
+                raise KeyError(f"Meeting {mid} is missing from {meetings_xml}")
             manifest  = process_meeting(mid, ami_root, out_root,
-                                        enroll_secs=args.enroll_secs,
-                                        min_turn_secs=args.min_turn_secs,
-                                        enrollment_mode=args.enrollment_mode,
-                                        enroll_min_turn_secs=args.enroll_min_turn_secs,
-                                        enroll_max_turn_secs=args.enroll_max_turn_secs)
+                                         enroll_secs=args.enroll_secs,
+                                         min_turn_secs=args.min_turn_secs,
+                                         enrollment_mode=args.enrollment_mode,
+                                         enroll_min_turn_secs=args.enroll_min_turn_secs,
+                                         enroll_max_turn_secs=args.enroll_max_turn_secs,
+                                         meeting_speakers=meeting_speakers,
+                                         overwrite_turn_audio=args.overwrite_turn_audio,
+                                         dataset_build_id=args.dataset_build_id)
             out_json  = manifests_dir / f"{mid}.json"
             with open(out_json, "w", encoding="utf-8") as fh:
                 json.dump(manifest, fh, indent=2, ensure_ascii=False)

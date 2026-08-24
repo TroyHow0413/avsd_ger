@@ -34,7 +34,10 @@ def _resolve_existing(path: str | None, *, base: Path) -> str | None:
             candidates.append(base / normalized)
     for candidate in candidates:
         if candidate.exists():
-            return str(candidate)
+            try:
+                return str(candidate.resolve().relative_to(base.resolve()))
+            except ValueError:
+                return str(candidate.resolve())
     return str(raw)
 
 
@@ -56,7 +59,12 @@ def _load_manifest(path: Path) -> dict[str, Any]:
         return json.load(f)
 
 
-def iter_records(manifest_paths: list[Path], *, root: Path) -> list[dict[str, Any]]:
+def iter_records(
+    manifest_paths: list[Path],
+    *,
+    root: Path,
+    require_lip_confidence: bool = True,
+) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for manifest_path in manifest_paths:
         manifest = _load_manifest(manifest_path)
@@ -73,35 +81,58 @@ def iter_records(manifest_paths: list[Path], *, root: Path) -> list[dict[str, An
             face_path = _resolve_existing(spk.get("enrollment_face"), base=root)
             if not wav_path or not video_path or not face_path:
                 continue
-            n_frames = _roi_frame_count(video_path)
+            roi_for_count = Path(video_path)
+            if not roi_for_count.is_absolute():
+                roi_for_count = root / roi_for_count
+            n_frames = _roi_frame_count(str(roi_for_count))
             lip_conf = turn.get("lip_conf_v")
             if lip_conf is None:
-                lip_conf = [1.0] * max(1, n_frames)
+                if require_lip_confidence:
+                    raise ValueError(
+                        f"{manifest_path}:{turn.get('turn_id', i)} has no real lip_conf_v. "
+                        "Regenerate the visual manifest or use "
+                        "--allow-missing-lip-confidence for a non-C1 diagnostic export."
+                    )
+                lip_conf = None
+            elif n_frames and len(lip_conf) != n_frames:
+                raise ValueError(
+                    f"{manifest_path}:{turn.get('turn_id', i)} lip_conf_v length "
+                    f"{len(lip_conf)} != ROI frame count {n_frames}"
+                )
             row = {
                 "utt_id": str(turn.get("turn_id", f"{manifest_path.stem}.t{i:04d}")),
                 "meeting_id": str(manifest.get("meta", {}).get("meeting_id", manifest_path.stem)),
                 "speaker_id": speaker_id,
-                "speaker_suffix": _speaker_suffix(speaker_id),
+                "speaker_suffix": turn.get("nxt_agent") or spk.get("nxt_agent") or _speaker_suffix(speaker_id),
+                "participant_id": turn.get("participant_id") or spk.get("participant_id"),
+                "session_speaker_id": turn.get("session_speaker_id") or spk.get("session_speaker_id"),
+                "nxt_agent": turn.get("nxt_agent") or spk.get("nxt_agent"),
+                "identity_scope": turn.get("identity_scope") or spk.get("identity_scope"),
                 "wav_path": wav_path,
                 "video_path": video_path,
                 "face_path": face_path,
                 "target": str(turn.get("ref_text", "")),
                 "lip_conf": lip_conf,
+                "lip_conf_source": turn.get("lip_conf_source", "missing" if lip_conf is None else "unspecified"),
                 "start": float(turn.get("start", 0.0)),
                 "end": float(turn.get("end", 0.0)),
+                "audio_source_type": turn.get("audio_source_type"),
+                "turn_boundary_source": turn.get("turn_boundary_source"),
             }
             rows.append(row)
 
-    # Deterministic in-corpus negatives for Stage-2 InfoNCE.
-    by_other_speaker: dict[str, list[dict[str, Any]]] = {}
-    for row in rows:
-        for other in rows:
-            if other["speaker_id"] != row["speaker_id"]:
-                by_other_speaker.setdefault(row["utt_id"], []).append(other)
+    # Deterministic in-corpus negatives for Stage-2 InfoNCE. Keep this O(N):
+    # the old all-pairs construction becomes impractical once AMI is uncapped.
+    by_speaker: dict[str, list[dict[str, Any]]] = {}
     for idx, row in enumerate(rows):
-        candidates = by_other_speaker.get(row["utt_id"], [])
-        if not candidates:
+        by_speaker.setdefault(row["speaker_id"], []).append(row)
+    speaker_ids = sorted(by_speaker)
+    speaker_position = {speaker_id: i for i, speaker_id in enumerate(speaker_ids)}
+    for idx, row in enumerate(rows):
+        if len(speaker_ids) < 2:
             continue
+        other_id = speaker_ids[(speaker_position[row["speaker_id"]] + 1) % len(speaker_ids)]
+        candidates = by_speaker[other_id]
         neg = candidates[idx % len(candidates)]
         row["neg_wav_path"] = neg["wav_path"]
         row["neg_face_path"] = neg["face_path"]
@@ -127,10 +158,19 @@ def main() -> int:
     p.add_argument("--manifests", nargs="*", default=None)
     p.add_argument("--out", required=True, type=Path)
     p.add_argument("--root", default=Path.cwd(), type=Path)
+    p.add_argument(
+        "--allow-missing-lip-confidence",
+        action="store_true",
+        help="Export missing confidence as null. Such rows are not suitable for C1 dual-gate training.",
+    )
     args = p.parse_args()
 
     manifest_paths = _resolve_input_paths(args)
-    rows = iter_records(manifest_paths, root=args.root)
+    rows = iter_records(
+        manifest_paths,
+        root=args.root,
+        require_lip_confidence=not args.allow_missing_lip_confidence,
+    )
     args.out.parent.mkdir(parents=True, exist_ok=True)
     with args.out.open("w", encoding="utf-8") as f:
         for row in rows:

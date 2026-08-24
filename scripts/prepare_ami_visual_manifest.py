@@ -1,10 +1,9 @@
 """Attach mouth-ROI clips to an existing AMI session manifest.
 
-This is a conservative AMI visual-prep smoke script. AMI Closeup videos are
-meeting-length camera streams, not per-utterance face videos, and the corpus
-does not make Closeup1/2/3/4 agent-specific in the filename. To avoid visual
-speaker mismatch, this script requires an explicit speaker-to-closeup mapping
-and only emits turns for mapped speakers.
+AMI Closeup videos are meeting-length camera streams, not per-utterance face
+videos.  Their speaker mapping changes between meetings, so production runs
+must use the authoritative ``corpusResources/meetings.xml`` mapping.  Manual
+``--speaker-closeup`` mappings remain available for isolated smoke tests.
 
 Example:
     python scripts/prepare_ami_visual_manifest.py \
@@ -42,6 +41,15 @@ from typing import Any
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from scripts.ami_metadata import (  # noqa: E402
+    apply_ami_speaker_metadata,
+    infer_nxt_agent,
+    load_ami_meetings,
+    meeting_closeup_map,
+)
 
 _DEFAULT_FACE_PREDICTOR = "checkpoints/shape_predictor_68_face_landmarks.dat"
 _DEFAULT_CNN_DETECTOR = "checkpoints/mmod_human_face_detector.dat"
@@ -65,6 +73,14 @@ def _parse_speaker_closeup(items: list[str]) -> dict[str, str]:
 def _speaker_suffix(ref_speaker: str) -> str:
     # AMI manifests use IDs like IS1009c_A.
     return ref_speaker.rsplit("_", 1)[-1]
+
+
+def _turn_agent(turn: dict[str, Any], meeting_id: str) -> str | None:
+    return (
+        str(turn.get("nxt_agent", "")).strip()
+        or infer_nxt_agent(turn.get("session_speaker_id"), meeting_id)
+        or infer_nxt_agent(turn.get("ref_speaker"), meeting_id)
+    )
 
 
 def _extract_meeting_id(manifest: dict[str, Any], manifest_path: Path) -> str:
@@ -177,9 +193,12 @@ def _with_enrollment_faces(
     out: list[dict[str, Any]] = []
     for speaker in speakers:
         row = dict(speaker)
-        suffix = _speaker_suffix(str(row.get("speaker_id", "")))
-        if not row.get("enrollment_face") and suffix in face_by_suffix:
-            row["enrollment_face"] = face_by_suffix[suffix]
+        agent = (
+            str(row.get("nxt_agent", "")).strip()
+            or _speaker_suffix(str(row.get("session_speaker_id") or row.get("speaker_id", "")))
+        )
+        if not row.get("enrollment_face") and agent in face_by_suffix:
+            row["enrollment_face"] = face_by_suffix[agent]
         out.append(row)
     return out
 
@@ -193,10 +212,21 @@ def main() -> int:
     p.add_argument(
         "--speaker-closeup",
         nargs="+",
-        required=True,
-        help="Explicit AMI mapping, e.g. A=Closeup1 B=Closeup2.",
+        default=None,
+        help="Manual mapping for smoke tests. Production should use --meetings-xml.",
     )
-    p.add_argument("--max-turns", type=int, default=12)
+    p.add_argument(
+        "--meetings-xml",
+        type=Path,
+        default=Path("datasets/ami/corpusResources/meetings.xml"),
+        help="Authoritative AMI speaker/camera metadata.",
+    )
+    p.add_argument(
+        "--max-turns",
+        type=int,
+        default=None,
+        help="Optional smoke-test cap. Default: process every eligible turn.",
+    )
     p.add_argument(
         "--max-turns-per-speaker",
         type=int,
@@ -220,8 +250,43 @@ def main() -> int:
     with open(args.manifest, "r", encoding="utf-8") as f:
         manifest = json.load(f)
 
-    closeup_by_speaker = _parse_speaker_closeup(args.speaker_closeup)
     meeting_id = _extract_meeting_id(manifest, args.manifest)
+    mapping_source: str
+    if args.meetings_xml.is_file():
+        all_meetings = load_ami_meetings(args.meetings_xml)
+        if meeting_id not in all_meetings:
+            raise KeyError(f"Meeting {meeting_id} is missing from {args.meetings_xml}")
+        meeting_speakers = all_meetings[meeting_id]
+        manifest = apply_ami_speaker_metadata(manifest, meeting_id, meeting_speakers)
+        official_mapping = meeting_closeup_map(meeting_speakers)
+        if args.speaker_closeup:
+            manual_mapping = _parse_speaker_closeup(args.speaker_closeup)
+            disagreements = {
+                agent: (camera, official_mapping.get(agent))
+                for agent, camera in manual_mapping.items()
+                if official_mapping.get(agent) != camera
+            }
+            if disagreements:
+                raise ValueError(
+                    f"Manual camera mapping disagrees with meetings.xml: {disagreements}"
+                )
+            closeup_by_speaker = manual_mapping
+            mapping_source = "AMI meetings.xml verified manual subset"
+        else:
+            closeup_by_speaker = official_mapping
+            mapping_source = "AMI corpusResources/meetings.xml"
+    elif args.speaker_closeup:
+        closeup_by_speaker = _parse_speaker_closeup(args.speaker_closeup)
+        mapping_source = "manual_unverified"
+        print(
+            f"[warning] {args.meetings_xml} is missing; global participant IDs are unavailable",
+            file=sys.stderr,
+        )
+    else:
+        raise FileNotFoundError(
+            f"{args.meetings_xml} is required for a verified AMI camera mapping. "
+            "Run scripts/fetch_ami_metadata.py first."
+        )
     extractor = _build_extractor(args)
 
     out_roi_dir = args.out_dir / "mouth_roi"
@@ -238,13 +303,18 @@ def main() -> int:
     skipped_duration = 0
     skipped_per_speaker_cap = 0
     turns_by_suffix: dict[str, int] = {}
+    confidence_values: list[float] = []
 
     for turn in manifest.get("turns", []):
-        if len(turns_out) >= args.max_turns:
+        if args.max_turns is not None and len(turns_out) >= args.max_turns:
             break
 
         ref_speaker = str(turn.get("ref_speaker", ""))
-        suffix = _speaker_suffix(ref_speaker)
+        suffix = _turn_agent(turn, meeting_id)
+        if not suffix:
+            print(f"[missing] local NXT agent for {turn.get('turn_id', '<unknown>')}")
+            failures += 1
+            continue
         closeup = closeup_by_speaker.get(suffix)
         if closeup is None:
             skipped_unmapped += 1
@@ -278,14 +348,22 @@ def main() -> int:
         attempts += 1
         try:
             _ffmpeg_slice_video(src_video, clip_path, start, end)
-            arr = _to_numpy(extractor.extract_from_file(str(clip_path)))
+            extracted, lip_conf = extractor.extract_with_confidence_from_file(str(clip_path))
+            arr = _to_numpy(extracted)
+            lip_conf = np.asarray(lip_conf, dtype=np.float32).reshape(-1)
             if arr.ndim != 4 or arr.shape[1:] != (1, 96, 96):
                 raise RuntimeError(f"unexpected ROI shape {arr.shape}")
+            if lip_conf.shape[0] != arr.shape[0]:
+                raise RuntimeError(
+                    f"lip confidence length {lip_conf.shape[0]} != ROI frames {arr.shape[0]}"
+                )
             np.save(roi_path, arr)
+            best_frame = int(np.argmax(lip_conf)) if lip_conf.size else 0
+            face_timestamp = min(end, start + (best_frame + 0.5) / 25.0)
             if (
                 not args.no_enrollment_faces
                 and suffix not in face_by_suffix
-                and _save_enrollment_frame(src_video, face_path, start + dur / 2.0)
+                and _save_enrollment_frame(src_video, face_path, face_timestamp)
             ):
                 face_by_suffix[suffix] = str(face_path)
             if not args.keep_clips:
@@ -303,8 +381,11 @@ def main() -> int:
         row["video_source"] = str(src_video)
         row["video_closeup"] = closeup
         row["video_speaker_map"] = f"{suffix}={closeup}"
+        row["lip_conf_v"] = lip_conf.tolist()
+        row["lip_conf_source"] = f"{args.roi_backend}_direct_detection_and_interpolation"
         row = _with_visual_speaker_fields(row, arr)
         turns_out.append(row)
+        confidence_values.extend(float(value) for value in lip_conf)
         turns_by_suffix[suffix] = turns_by_suffix.get(suffix, 0) + 1
         print(
             f"[ok] {turn_id} {suffix}->{closeup} "
@@ -323,9 +404,11 @@ def main() -> int:
         "speakers": _with_enrollment_faces(manifest.get("speakers", []), face_by_suffix),
         "turns": turns_out,
         "meta": {
+            **manifest.get("meta", {}),
             "source_manifest": str(args.manifest),
             "meeting_id": meeting_id,
             "speaker_closeup": closeup_by_speaker,
+            "speaker_closeup_source": mapping_source,
             "roi_backend": args.roi_backend,
             "visual_frontend": "ami_closeup_explicit_map_mouth_roi",
             "enrollment_faces": face_by_suffix,
@@ -336,9 +419,15 @@ def main() -> int:
             "skipped_duration": skipped_duration,
             "skipped_per_speaker_cap": skipped_per_speaker_cap,
             "turns_by_speaker_suffix": turns_by_suffix,
+            "turn_limit": args.max_turns,
+            "turn_limit_per_speaker": args.max_turns_per_speaker,
+            "lip_conf_source": f"{args.roi_backend}_direct_detection_and_interpolation",
+            "lip_conf_mean": (
+                float(np.mean(confidence_values)) if confidence_values else None
+            ),
             "note": (
-                "AMI closeup cameras are not filename-bound to speakers; "
-                "interpret AV results only for explicitly verified mappings."
+                "AMI closeup mappings and global identities must come from meetings.xml; "
+                "manual mappings are smoke-test only."
             ),
         },
     }

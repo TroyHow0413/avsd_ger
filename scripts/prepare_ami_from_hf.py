@@ -2,8 +2,7 @@
 and convert to the project's manifest JSON format.
 
 HuggingFace dataset  : edinburghcstr/ami  (config: ihm = individual headset mic)
-Output audio         : datasets/ami/audio/{MID}.Headset-{N}.wav  (full meeting WAV,
-                       reconstructed by concatenating utterances in time order)
+Output audio         : datasets/ami/audio/utterances/*.wav and enrollment/*.wav
 Output manifests     : data/ami_{split}/manifests/{MID}.json
 
 Speaker ID mapping   : microphone_id H0N → seat suffix chr(ord('A')+N)
@@ -16,12 +15,10 @@ Options:
     --splits     Which splits to process (default: train dev test)
     --out-dir    Root dir for audio output (default: datasets/ami)
     --cache-dir  HuggingFace cache dir (default: ~/.cache/huggingface)
-    --jobs       Parallel workers for WAV writing (default: 4)
     --overwrite  Overwrite existing manifest/audio files
 
 Notes:
-    • Audio stored as per-utterance WAVs under datasets/ami/audio/utterances/
-      AND merged into per-speaker meeting WAVs (Headset-N.wav) for eval pipeline.
+    • Audio is stored as per-utterance WAVs plus quality-selected enrollment WAVs.
     • Video (Closeup*.avi) is NOT in HuggingFace — download separately:
           bash scripts/download_ami.sh --train --audio-only  (skip audio flag)
       or just run download_ami.sh for video-only by editing AUDIO_ONLY=1 manually.
@@ -30,7 +27,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import re
 import sys
 from collections import defaultdict
@@ -38,6 +34,10 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from scripts.ami_metadata import apply_ami_speaker_metadata, load_ami_meetings  # noqa: E402
 
 # --------------------------------------------------------------------------- #
 # Helpers
@@ -64,53 +64,77 @@ def _save_wav(path: Path, array, sr: int) -> None:
     sf.write(str(path), arr, sr)
 
 
-def _merge_speaker_wav(
-    utt_rows: list[dict],
+def _safe_audio_id(value: Any) -> str:
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", str(value)).strip("_") or "utterance"
+
+
+def _save_utterance_wav(
+    row: dict[str, Any],
     meeting_id: str,
-    mic_id: str,
     audio_dir: Path,
     overwrite: bool,
 ) -> Path:
-    """Concatenate all utterances for one speaker into a full-meeting WAV.
+    mic_id = str(row["microphone_id"])
+    audio_id = _safe_audio_id(row.get("audio_id", "utterance"))
+    destination = audio_dir / "utterances" / f"{meeting_id}.{mic_id}.{audio_id}.wav"
+    if overwrite or not destination.exists():
+        _save_wav(
+            destination,
+            row["audio"]["array"],
+            int(row["audio"]["sampling_rate"]),
+        )
+    return destination
 
-    The merged file is written to datasets/ami/audio/{MID}.Headset-{N}.wav,
-    matching the layout expected by eval_ablations.py and prepare_ami_visual_manifest.py.
 
-    Gaps between utterances are filled with silence so begin/end times in the
-    manifest remain valid offsets into the merged file.
-    """
+def _build_quality_enrollment(
+    rows: list[dict[str, Any]],
+    destination: Path,
+    overwrite: bool,
+    target_seconds: float = 30.0,
+) -> tuple[Path, dict[str, Any]]:
+    """Concatenate high-RMS, text-bearing 3-8 s utterances for enrollment."""
     import numpy as np
-    import soundfile as sf
 
-    n = int(re.match(r"H0?(\d)", mic_id).group(1))
-    dst = audio_dir / f"{meeting_id}.Headset-{n}.wav"
-    if dst.exists() and not overwrite:
-        return dst
-
-    if not utt_rows:
-        return dst
-
-    sr = utt_rows[0]["audio"]["sampling_rate"]
-    # Sort by begin_time so the merged file is chronological
-    rows = sorted(utt_rows, key=lambda r: float(r["begin_time"]))
-
-    max_end = max(float(r["end_time"]) for r in rows)
-    total_samples = int(max_end * sr) + sr  # +1 s safety margin
-    merged = np.zeros(total_samples, dtype=np.float32)
-
+    if destination.exists() and not overwrite:
+        return destination, {"enrollment_mode": "existing_quality_enrollment"}
+    candidates: list[tuple[float, dict[str, Any]]] = []
     for row in rows:
-        start_s = float(row["begin_time"])
-        start_i = int(start_s * sr)
-        arr = np.asarray(row["audio"]["array"], dtype=np.float32)
-        end_i = start_i + len(arr)
-        if end_i > len(merged):
-            merged = np.pad(merged, (0, end_i - len(merged)))
-        merged[start_i:end_i] = arr
+        duration = float(row["end_time"]) - float(row["begin_time"])
+        text = str(row.get("text", "")).strip()
+        if not text or duration < 3.0 or duration > 8.0:
+            continue
+        samples = np.asarray(row["audio"]["array"], dtype=np.float32).reshape(-1)
+        if samples.size == 0:
+            continue
+        rms = float(np.sqrt(np.mean(np.square(samples), dtype=np.float64)))
+        candidates.append((rms, row))
+    candidates.sort(key=lambda item: item[0], reverse=True)
 
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    sf.write(str(dst), merged, sr)
-    print(f"  [wav] {dst.name}  ({len(rows)} utts, {max_end:.1f}s)")
-    return dst
+    selected: list[dict[str, Any]] = []
+    seconds = 0.0
+    for _, row in candidates:
+        selected.append(row)
+        seconds += float(row["end_time"]) - float(row["begin_time"])
+        if seconds >= target_seconds:
+            break
+    if not selected:
+        raise RuntimeError(f"No quality enrollment utterances available for {destination.stem}")
+
+    sampling_rates = {int(row["audio"]["sampling_rate"]) for row in selected}
+    if len(sampling_rates) != 1:
+        raise ValueError(f"Mixed enrollment sampling rates: {sampling_rates}")
+    sampling_rate = sampling_rates.pop()
+    merged = np.concatenate(
+        [np.asarray(row["audio"]["array"], dtype=np.float32).reshape(-1) for row in selected]
+    )
+    merged = merged[: int(target_seconds * sampling_rate)]
+    _save_wav(destination, merged, sampling_rate)
+    return destination, {
+        "enrollment_mode": "turn_quality",
+        "enrollment_target_seconds": target_seconds,
+        "enrollment_selected_seconds": float(merged.size / sampling_rate),
+        "enrollment_selected_audio_ids": [str(row.get("audio_id", "")) for row in selected],
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -122,29 +146,32 @@ def build_manifest(
     rows: list[dict],
     audio_dir: Path,
     overwrite: bool,
+    meeting_speakers: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Convert HF rows for one meeting into the project manifest schema."""
-    # Group by microphone so we can build per-speaker merged WAVs
+    # Group by microphone so we can build per-speaker enrollment WAVs.
     by_mic: dict[str, list] = defaultdict(list)
     for row in rows:
         by_mic[row["microphone_id"]].append(row)
 
-    # Build merged Headset WAVs
-    headset_paths: dict[str, Path] = {}
-    for mic_id, utt_rows in by_mic.items():
-        p = _merge_speaker_wav(utt_rows, meeting_id, mic_id, audio_dir, overwrite)
-        headset_paths[mic_id] = p
-
-    # Build speakers block (one entry per unique participant/mic)
-    # enrollment_audio = path to merged Headset WAV for that speaker
+    # Build speakers block (one entry per unique participant/mic).
     seen_speakers: dict[str, dict] = {}
     for mic_id, utt_rows in by_mic.items():
         spk_id = _speaker_id(meeting_id, mic_id)
+        enrollment_path, enrollment_meta = _build_quality_enrollment(
+            utt_rows,
+            audio_dir / "enrollment" / f"{spk_id}.wav",
+            overwrite,
+        )
         if spk_id not in seen_speakers:
             seen_speakers[spk_id] = {
                 "speaker_id": spk_id,
+                "session_speaker_id": spk_id,
+                "nxt_agent": _mic_to_suffix(mic_id),
+                "identity_scope": "meeting_local",
                 "microphone_id": mic_id,
-                "enrollment_audio": str(headset_paths[mic_id]),
+                "enrollment_audio": str(enrollment_path),
+                "meta": enrollment_meta,
                 # enrollment_face: populated later by prepare_ami_visual_manifest.py
             }
 
@@ -153,17 +180,23 @@ def build_manifest(
     for row in sorted(rows, key=lambda r: (float(r["begin_time"]), r["microphone_id"])):
         mic_id = row["microphone_id"]
         spk_id = _speaker_id(meeting_id, mic_id)
+        utterance_path = _save_utterance_wav(row, meeting_id, audio_dir, overwrite)
         turns.append({
             "turn_id": f"{meeting_id}.{row['audio_id']}",
             "start": float(row["begin_time"]),
             "end": float(row["end_time"]),
             "ref_speaker": spk_id,
+            "session_speaker_id": spk_id,
+            "nxt_agent": _mic_to_suffix(mic_id),
+            "identity_scope": "meeting_local",
             "ref_text": row["text"].strip(),
-            "audio": str(headset_paths.get(mic_id, "")),
+            "audio": str(utterance_path),
+            "audio_source_type": "individual_headset_microphone",
+            "turn_boundary_source": "oracle_reference_transcript",
             # mouth_roi, video, speaker_mask_v: populated by prepare_ami_visual_manifest.py
         })
 
-    return {
+    manifest = {
         "meeting_id": meeting_id,
         "speakers": list(seen_speakers.values()),
         "turns": turns,
@@ -171,8 +204,19 @@ def build_manifest(
             "source": "edinburghcstr/ami",
             "config": "ihm",
             "mic_to_suffix": "H0N -> chr(A+N)",
+            "audio_condition": {
+                "ami_microphone_setup": "ihm",
+                "description": "individual_headset_microphone",
+                "far_field": False,
+            },
+            "turn_boundary_source": "oracle_reference_transcript",
+            "diarization_is_system_output": False,
+            "speaker_identity_scope": "meeting_local",
         },
     }
+    if meeting_speakers is not None:
+        manifest = apply_ami_speaker_metadata(manifest, meeting_id, meeting_speakers)
+    return manifest
 
 
 # --------------------------------------------------------------------------- #
@@ -192,6 +236,21 @@ def main() -> int:
                     help="Overwrite existing manifest/audio files")
     ap.add_argument("--meeting-filter", nargs="*", default=None,
                     help="Only process these meeting IDs (default: all)")
+    ap.add_argument(
+        "--meetings-xml",
+        type=Path,
+        default=None,
+        help=(
+            "AMI corpusResources/meetings.xml. Defaults to "
+            "<out-dir>/corpusResources/meetings.xml and is required unless "
+            "--allow-meeting-local-speakers is set."
+        ),
+    )
+    ap.add_argument(
+        "--allow-meeting-local-speakers",
+        action="store_true",
+        help="Allow legacy meeting-local IDs when meetings.xml is unavailable.",
+    )
     args = ap.parse_args()
 
     try:
@@ -204,6 +263,23 @@ def main() -> int:
 
     audio_dir = Path(args.out_dir) / "audio"
     audio_dir.mkdir(parents=True, exist_ok=True)
+    meetings_xml = args.meetings_xml or (Path(args.out_dir) / "corpusResources" / "meetings.xml")
+    if meetings_xml.is_file():
+        ami_meetings = load_ami_meetings(meetings_xml)
+        print(f"[metadata] loaded {len(ami_meetings)} meetings from {meetings_xml}")
+    elif args.allow_meeting_local_speakers:
+        ami_meetings = {}
+        print(
+            f"[warning] {meetings_xml} is missing; using meeting-local speaker IDs",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            f"[error] AMI metadata missing: {meetings_xml}\n"
+            "Run scripts/fetch_ami_metadata.py or pass --allow-meeting-local-speakers.",
+            file=sys.stderr,
+        )
+        return 2
 
     # HF uses 'validation' not 'dev'
     hf_split_map = {"train": "train", "dev": "validation", "test": "test"}
@@ -244,7 +320,16 @@ def main() -> int:
                 continue
 
             print(f"[{i:3d}/{len(by_meeting)}] {mid}  ({len(rows)} utts)")
-            manifest = build_manifest(mid, rows, audio_dir, args.overwrite)
+            meeting_speakers = ami_meetings.get(mid)
+            if ami_meetings and meeting_speakers is None:
+                raise KeyError(f"Meeting {mid} is missing from {meetings_xml}")
+            manifest = build_manifest(
+                mid,
+                rows,
+                audio_dir,
+                args.overwrite,
+                meeting_speakers=meeting_speakers,
+            )
 
             with open(manifest_path, "w", encoding="utf-8") as f:
                 json.dump(manifest, f, indent=2, ensure_ascii=False)

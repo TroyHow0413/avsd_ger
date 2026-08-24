@@ -79,6 +79,27 @@ def _landmarks_interpolate(landmarks):
     return landmarks
 
 
+def _detection_confidence(detected: list[bool]) -> np.ndarray:
+    """Convert direct detector hits into an auditable tracking-quality signal.
+
+    Directly detected frames receive 1.0, gaps interpolated between detections
+    receive 0.5, and leading/trailing extrapolation receives 0.25.  An entirely
+    undetected clip receives zeros and is rejected by the extractor.
+    """
+    confidence = np.zeros(len(detected), dtype=np.float32)
+    valid = np.flatnonzero(np.asarray(detected, dtype=bool))
+    if valid.size == 0:
+        return confidence
+    confidence[valid] = 1.0
+    first, last = int(valid[0]), int(valid[-1])
+    confidence[:first] = 0.25
+    confidence[last + 1:] = 0.25
+    for index in range(first, last + 1):
+        if not detected[index]:
+            confidence[index] = 0.5
+    return confidence
+
+
 def _cut_patch(img, landmarks, height, width, threshold=5):
     """Crop a (2*height) × (2*width) patch centred on the landmark mean."""
     cx, cy = np.mean(landmarks, axis=0)
@@ -232,10 +253,15 @@ class MouthROIExtractor:
             pts[i] = (shape.part(i).x, shape.part(i).y)
         return pts
 
-    def _crop_sequence_dlib(self, frames: list[np.ndarray]) -> Optional[np.ndarray]:
+    def _crop_sequence_dlib(
+        self,
+        frames: list[np.ndarray],
+        landmarks_raw: Optional[list[Optional[np.ndarray]]] = None,
+    ) -> Optional[np.ndarray]:
         """Full av-hubert pipeline: detect → interpolate → warp → crop."""
-        landmarks_raw = [self._detect_landmarks_dlib(f) for f in frames]
-        landmarks = _landmarks_interpolate(landmarks_raw)
+        if landmarks_raw is None:
+            landmarks_raw = [self._detect_landmarks_dlib(f) for f in frames]
+        landmarks = _landmarks_interpolate(list(landmarks_raw))
         if landmarks is None:
             return None
 
@@ -312,11 +338,14 @@ class MouthROIExtractor:
         mouth_x = x + w // 2
         return float(mouth_x), float(mouth_y)
 
-    def _crop_sequence_haar(self, frames: list[np.ndarray]) -> np.ndarray:
+    def _crop_sequence_haar(
+        self,
+        frames: list[np.ndarray],
+        centres: Optional[list[Optional[tuple]]] = None,
+    ) -> np.ndarray:
         """Detect mouth per frame, smooth positions, crop & resize."""
-        centres: list[Optional[tuple]] = []
-        for f in frames:
-            centres.append(self._detect_mouth_centre_haar(f))
+        if centres is None:
+            centres = [self._detect_mouth_centre_haar(f) for f in frames]
 
         # Temporal interpolation for missed frames
         cx_arr = [c[0] if c else None for c in centres]
@@ -326,10 +355,9 @@ class MouthROIExtractor:
             arr = np.array([v if v is not None else np.nan for v in vals], dtype=float)
             nans = np.isnan(arr)
             if nans.all():
-                arr[:] = frames[0].shape[1] / 2  # fallback to frame centre
-            else:
-                ok = np.where(~nans)[0]
-                arr[nans] = np.interp(np.where(nans)[0], ok, arr[ok])
+                raise RuntimeError("haar: face detection failed on all frames")
+            ok = np.where(~nans)[0]
+            arr[nans] = np.interp(np.where(nans)[0], ok, arr[ok])
             return arr
 
         cx_arr = _interp_1d(cx_arr)
@@ -373,10 +401,15 @@ class MouthROIExtractor:
         Raises:
             RuntimeError if no frames could be read.
         """
+        roi, _ = self.extract_with_confidence_from_file(video_path)
+        return roi
+
+    def extract_with_confidence_from_file(self, video_path: str):
+        """Extract mouth ROI plus per-frame landmark/face tracking confidence."""
         frames = self._read_frames(video_path)
         if not frames:
             raise RuntimeError(f"Could not read any frames from {video_path!r}")
-        return self.extract_from_frames(frames)
+        return self.extract_with_confidence_from_frames(frames)
 
     def extract_from_frames(self, frames: list[np.ndarray]):
         """Extract mouth ROI from a list of BGR numpy frames (H×W×3 uint8).
@@ -385,19 +418,35 @@ class MouthROIExtractor:
             torch.Tensor [T, 1, 96, 96] float32 [0, 1]
             (numpy ndarray with same shape/dtype if torch is not installed).
         """
+        roi, _ = self.extract_with_confidence_from_frames(frames)
+        return roi
+
+    def extract_with_confidence_from_frames(self, frames: list[np.ndarray]):
+        """Return ``(roi, confidence)`` with one confidence value per frame."""
+        if not frames:
+            raise RuntimeError("Cannot extract mouth ROI from an empty frame sequence")
         if self.backend == "dlib":
-            grey_seq = self._crop_sequence_dlib(frames)
+            landmarks_raw = [self._detect_landmarks_dlib(frame) for frame in frames]
+            confidence = _detection_confidence([item is not None for item in landmarks_raw])
+            grey_seq = self._crop_sequence_dlib(frames, landmarks_raw=landmarks_raw)
             if grey_seq is None:
                 raise RuntimeError("dlib: landmark detection failed on all frames")
             # grey_seq is [T, 96, 96] uint8 (already greyscale via warp)
         else:
-            grey_seq = self._crop_sequence_haar(frames)   # [T, 96, 96] uint8
+            centres = [self._detect_mouth_centre_haar(frame) for frame in frames]
+            confidence = _detection_confidence([item is not None for item in centres])
+            grey_seq = self._crop_sequence_haar(frames, centres=centres)
 
         # Ensure greyscale (in case warp returned colour)
         if grey_seq.ndim == 4:      # [T, H, W, C]
             grey_seq = grey_seq.mean(axis=-1).astype(np.uint8)
 
-        return _frames_to_tensor(list(grey_seq))   # [T, 1, 96, 96]
+        roi = _frames_to_tensor(list(grey_seq))   # [T, 1, 96, 96]
+        if int(roi.shape[0]) != int(confidence.shape[0]):
+            raise RuntimeError(
+                f"ROI/confidence length mismatch: {roi.shape[0]} != {confidence.shape[0]}"
+            )
+        return roi, confidence
 
     # ──────────────────────────────────────────────────── helpers ─────────────
     @staticmethod
