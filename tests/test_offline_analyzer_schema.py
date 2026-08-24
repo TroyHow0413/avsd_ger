@@ -68,6 +68,30 @@ class OfflineAnalyzerSchemaTest(unittest.TestCase):
         self.assertEqual(aggregate["c1_raw_top1_accuracy"], 1.0)
         self.assertTrue(report["turns"][0]["debug_path"].endswith("meeting.full_model.debug.json"))
 
+    @patch("scripts.analyze_debug_outputs._edit_counts", side_effect=_score)
+    @patch(
+        "scripts.analyze_debug_outputs.normalize_text",
+        side_effect=lambda text, **kwargs: " ".join(str(text or "").lower().split()),
+    )
+    def test_wo_c2_is_not_reported_as_a_safety_fallback(self, _normalize, _edits):
+        payload = {
+            "manifest": "meeting.json", "ablation": "wo_c2",
+            "flags": {"disable_c2": True},
+            "turns": [{
+                "summary": {"ref_text": "hello", "asr_top": "hello", "final_text": "hello"},
+                "asr": {"detected_language": "en"},
+                "trace": [{"final_source": "ASR", "fallback_applied": False}],
+            }],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "debug.json"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            report = analyze([path], language="auto")
+        aggregate = next(iter(report["aggregates"].values()))
+        self.assertIsNone(aggregate["raw_ger_wer_micro"])
+        self.assertIsNone(aggregate["final_fallback_rate"])
+        self.assertEqual(aggregate["outcomes"], {"not_applicable": 1})
+
 
 if __name__ == "__main__":
     unittest.main()

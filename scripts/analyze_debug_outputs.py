@@ -174,15 +174,30 @@ def analyze(inputs: list[Path], *, language: str) -> dict[str, Any]:
                 final = str(summary.get("final_text") or (pipeline.get("final") or {}).get("text") or "")
                 lip = str(summary.get("lip_hyp") or (trace[0].get("lip_hyp") if trace else "") or "")
                 last = trace[-1] if trace else {}
-                raw_ger = str(last.get("cleaned_ger_text_before_gate") or "")
+                raw_ger = (
+                    str(last.get("cleaned_ger_text_before_gate") or "")
+                    if eligible else ""
+                )
                 asr_norm, asr_score = _text_score(ref, asr, language=resolved, detected_language=detected)
                 final_norm, final_score = _text_score(ref, final, language=resolved, detected_language=detected)
-                raw_norm, raw_score = _text_score(ref, raw_ger, language=resolved, detected_language=detected)
+                if eligible:
+                    raw_norm, raw_score = _text_score(
+                        ref, raw_ger, language=resolved, detected_language=detected
+                    )
+                else:
+                    raw_norm, raw_score = "", None
                 lip_norm, lip_score = _text_score(ref, lip, language=resolved, detected_language=detected)
                 final_source = str(last.get("final_source") or ("ASR" if last.get("fallback_applied") else "GER"))
                 accepted = eligible and final_source == "GER" and final_norm != asr_norm
-                delta = float(final_score["wer"]) - float(asr_score["wer"])
-                outcome = "improved" if delta < 0 else "harmed" if delta > 0 else "unchanged"
+                delta = (
+                    float(final_score["wer"]) - float(asr_score["wer"])
+                    if eligible else None
+                )
+                outcome = (
+                    "not_applicable" if not eligible
+                    else "improved" if delta < 0
+                    else "harmed" if delta > 0 else "unchanged"
+                )
                 c1 = pipeline.get("c1_initial") or {}
                 top_ids = c1.get("top_ids") or summary.get("top_ids") or []
                 ref_speaker = summary.get("ref_speaker") or turn_meta.get("ref_speaker")
@@ -218,11 +233,11 @@ def analyze(inputs: list[Path], *, language: str) -> dict[str, Any]:
                     "final_normalized": final_norm,
                     "lip_normalized": lip_norm,
                     "asr_wer": asr_score["wer"],
-                    "raw_ger_wer": raw_score["wer"],
+                    "raw_ger_wer": raw_score["wer"] if raw_score is not None else None,
                     "final_wer": final_score["wer"],
                     "lip_wer": lip_score["wer"],
                     "asr_edits": asr_score["edits"],
-                    "raw_ger_edits": raw_score["edits"],
+                    "raw_ger_edits": raw_score["edits"] if raw_score is not None else None,
                     "final_edits": final_score["edits"],
                     "lip_edits": lip_score["edits"],
                     "ref_words": final_score["ref_words"],
@@ -232,7 +247,9 @@ def analyze(inputs: list[Path], *, language: str) -> dict[str, Any]:
                     "ger_candidate_available": bool(raw_norm),
                     "ger_accepted": accepted,
                     "iteration_fallbacks": iteration_fallbacks,
-                    "final_fallback": final_source == "ASR" or bool(last.get("fallback_applied")),
+                    "final_fallback": (
+                        bool(last.get("fallback_applied")) if eligible else None
+                    ),
                     "final_source": final_source,
                     "iterations": len(trace),
                     "fallback_reason": last.get("fallback_reason"),
@@ -300,28 +317,39 @@ def _aggregate_rows(rows: list[dict[str, Any]], *, manifest: str, ablation: str)
     ref_words = sum(int(row["ref_words"]) for row in rows)
     eligible = sum(bool(row["ger_eligible"]) for row in rows)
     labeled_c1 = [row for row in rows if row.get("ref_speaker") is not None]
-    def micro(key: str) -> float:
-        return sum(int(row[key]) for row in rows) / ref_words if ref_words else 0.0
+    def micro(key: str, subset: list[dict[str, Any]] | None = None) -> float | None:
+        selected = rows if subset is None else subset
+        selected_ref_words = sum(int(row["ref_words"]) for row in selected)
+        if not selected:
+            return None
+        return sum(int(row[key]) for row in selected) / selected_ref_words if selected_ref_words else 0.0
     outcomes = Counter(str(row["outcome"]) for row in rows)
+    ger_rows = [row for row in rows if bool(row["ger_eligible"])]
+    raw_rows = [row for row in ger_rows if row["raw_ger_edits"] is not None]
     return {
         "manifest": manifest,
         "ablation": ablation,
         "n_turns": len(rows),
         "n_ref_words": ref_words,
         "asr_wer_micro": micro("asr_edits"),
-        "raw_ger_wer_micro": micro("raw_ger_edits"),
+        "raw_ger_wer_micro": micro("raw_ger_edits", raw_rows),
         "final_wer_micro": micro("final_edits"),
         "lip_wer_micro": micro("lip_edits"),
         "asr_wer_macro_turn": mean([float(row["asr_wer"]) for row in rows]) if rows else 0.0,
-        "raw_ger_wer_macro_turn": mean([float(row["raw_ger_wer"]) for row in rows]) if rows else 0.0,
+        "raw_ger_wer_macro_turn": (
+            mean([float(row["raw_ger_wer"]) for row in raw_rows]) if raw_rows else None
+        ),
         "final_wer_macro_turn": mean([float(row["final_wer"]) for row in rows]) if rows else 0.0,
         "outcomes": dict(outcomes),
         "ger_eligible_turns": eligible,
         "ger_candidate_coverage": sum(bool(row["ger_candidate_available"]) for row in rows) / eligible if eligible else 0.0,
         "ger_acceptance_coverage": sum(bool(row["ger_accepted"]) for row in rows) / eligible if eligible else 0.0,
         "iteration_fallbacks": sum(int(row["iteration_fallbacks"]) for row in rows),
-        "final_fallback_turns": sum(bool(row["final_fallback"]) for row in rows),
-        "final_fallback_rate": sum(bool(row["final_fallback"]) for row in rows) / len(rows) if rows else 0.0,
+        "final_fallback_turns": sum(bool(row["final_fallback"]) for row in ger_rows),
+        "final_fallback_rate": (
+            sum(bool(row["final_fallback"]) for row in ger_rows) / len(ger_rows)
+            if ger_rows else None
+        ),
         "c1_labeled_turns": len(labeled_c1),
         "c1_raw_top1_accuracy": sum(bool(row["c1_raw_top1_correct"]) for row in labeled_c1) / len(labeled_c1) if labeled_c1 else 0.0,
         "c1_known_coverage": sum(not bool(row["c1_is_unknown"]) for row in labeled_c1) / len(labeled_c1) if labeled_c1 else 0.0,
@@ -349,12 +377,18 @@ def _markdown(report: dict[str, Any]) -> str:
         "| Ablation | ASR WER | Raw GER WER | Final WER | Lip WER | GER accepted | Final fallback | C1 raw top-1 | Known coverage |",
         "|---|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
+    def percent(value: float | None) -> str:
+        return "N/A" if value is None else f"{value:.2%}"
+
+    def metric(value: float | None) -> str:
+        return "N/A" if value is None else f"{value:.4f}"
+
     for name, row in report["aggregates"].items():
         lines.append(
-            f"| {name} | {row['asr_wer_micro']:.4f} | {row['raw_ger_wer_micro']:.4f} | "
-            f"{row['final_wer_micro']:.4f} | {row['lip_wer_micro']:.4f} | "
-            f"{row['ger_acceptance_coverage']:.2%} | {row['final_fallback_rate']:.2%} | "
-            f"{row['c1_raw_top1_accuracy']:.2%} | {row['c1_known_coverage']:.2%} |"
+            f"| {name} | {metric(row['asr_wer_micro'])} | {metric(row['raw_ger_wer_micro'])} | "
+            f"{metric(row['final_wer_micro'])} | {metric(row['lip_wer_micro'])} | "
+            f"{percent(row['ger_acceptance_coverage'])} | {percent(row['final_fallback_rate'])} | "
+            f"{percent(row['c1_raw_top1_accuracy'])} | {percent(row['c1_known_coverage'])} |"
         )
     lines.extend(["", "Historical `c3_wo_conf_gate` rows are legacy update-gate-only semantics.", ""])
     return "\n".join(lines)
