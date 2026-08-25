@@ -32,6 +32,43 @@ comparison point for all later stages.
 **Implementation recipe:** See `docs/AMI_DATA_PIPELINE.md`. Rebuilt manifests
 must pass `scripts/audit_ami_manifests.py` before training starts.
 
+### Official AV-HuBERT preprocessing versus the AMI adaptation
+
+The Stage-1 visual pipeline should be described as **AV-HuBERT-style visual
+preprocessing adapted to AMI oracle-turn clips**, not as a byte-for-byte copy
+of the complete AV-HuBERT dataset preparation workflow.
+
+| Aspect | Official AV-HuBERT preparation | This project's AMI preparation |
+| --- | --- | --- |
+| Input unit | Processes each supplied video as one sequence; LRS2/LRS3 inputs are normally utterance-level clips | AMI Closeup files are meeting-length streams, so each stream is first segmented using the manifest's oracle turn boundaries |
+| Face detector | dlib frontal HOG detector, with the dlib CNN detector as fallback | Same HOG-first, CNN-fallback detector path; do not replace it with Haar or HOG-only for the production baseline |
+| Landmarks | dlib 68-point shape predictor | Same 68-point predictor |
+| Missing landmarks | Interpolation/extrapolation within the input video sequence | Same procedure, but its temporal scope is one AMI turn rather than an entire meeting stream |
+| All frames missing landmarks | The reference `align_mouth.py` resizes the complete input frames as a fallback | The current repaired pipeline rejects the visual turn and records `landmark_all_frames`; whether to adopt the reference resize fallback or retain an audio-only/zero-confidence turn must be an explicit ablation |
+| Alignment and crop | Mean-face similarity transform using stable points 33, 36, 39, 42 and 45; mouth points 48-67; 96x96 ROI; 12-frame smoothing window | Same alignment landmarks, mouth range, ROI size and smoothing rule |
+| Intermediate/output form | Landmark PKL files followed by aligned mouth-ROI videos in the reference scripts | Detection and alignment are orchestrated per turn and stored as model-ready NumPy ROI arrays |
+| Dataset-specific metadata | LRS/Vox-style file identities and manifests | Official AMI meeting-specific Closeup mapping, corpus-global participant IDs, IHM/oracle-turn declarations and enrollment metadata |
+| Confidence | The reference preparation does not provide the project's C3 confidence track | Adds an auditable per-frame detection/interpolation confidence track without changing the ROI crop algorithm |
+
+The original legacy AMI visual pipeline already used the order `slice turn ->
+detect landmarks -> align/crop mouth ROI`. The repaired `ami_full_v2` pipeline
+retains that order. It repairs the legacy turn caps, camera assumptions,
+meeting-local identities and fabricated all-ones confidence rather than
+silently changing the visual preprocessing unit.
+
+For reproducibility, production preprocessing must use the AV-HuBERT-pinned
+`dlib==19.22.1`, the official CNN detector, 68-point predictor and mean-face
+assets. The current `dlib==20.0.1` native crash is an environment compatibility
+failure, not justification for changing the detector. First verify that
+`cnn_face_detection_model_v1` loads successfully in the isolated preprocessing
+environment, then run a one-meeting smoke test before launching all splits.
+
+All Stage-1 through Stage-4 AMI comparisons must keep this preprocessing and
+the fixed AMI test protocol unchanged. A future experiment that computes
+landmarks over complete meeting streams before turn slicing is a separate
+preprocessing ablation and must use a new dataset build ID (for example,
+`ami_full_v3`) rather than overwrite `ami_full_v2`.
+
 **Required data repairs and checks:**
 
 - Remove the current 50-turn-per-meeting truncation and regenerate complete

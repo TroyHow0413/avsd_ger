@@ -6,6 +6,7 @@ from pathlib import Path
 import numpy as np
 
 from avsd_ger.frontend.mouth_roi import _detection_confidence
+from scripts.audit_ami_manifests import audit_split
 from scripts.ami_metadata import (
     apply_ami_speaker_metadata,
     load_ami_meetings,
@@ -150,6 +151,69 @@ class AmiJsonlConversionTest(unittest.TestCase):
         for row in rows:
             self.assertNotEqual(row["speaker_id"], row["neg_speaker_id"])
             self.assertEqual(row["lip_conf_source"], "test_detector")
+
+
+class AmiAuditCoverageTest(unittest.TestCase):
+    def test_audit_reports_processing_failures_with_matching_ledger(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            base_dir = root / "base"
+            visual_dir = root / "visual"
+            base_dir.mkdir()
+            visual_dir.mkdir()
+            roi = root / "roi.npy"
+            np.save(roi, np.zeros((50, 1, 96, 96), dtype=np.float32))
+            failure_log = root / "failures.jsonl"
+            failure_log.write_text(
+                json.dumps(
+                    {
+                        "schema": "ami_visual_failure_v1",
+                        "turn_id": "M1.2",
+                        "reason": "landmark_all_frames",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            base = {
+                "turns": [
+                    {"turn_id": "M1.1", "start": 0.0, "end": 2.0},
+                    {"turn_id": "M1.2", "start": 2.0, "end": 4.0},
+                ]
+            }
+            visual = {
+                "speakers": [],
+                "turns": [
+                    {
+                        "turn_id": "M1.1",
+                        "start": 0.0,
+                        "end": 2.0,
+                        "mouth_roi": str(roi),
+                        "lip_conf_v": [0.5] * 50,
+                    }
+                ],
+                "meta": {
+                    "meeting_id": "M1",
+                    "dataset_build_id": "test_build",
+                    "attempts": 2,
+                    "failures": 1,
+                    "failure_log": str(failure_log),
+                    "speaker_closeup_source": "AMI corpusResources/meetings.xml",
+                    "audio_condition": {"description": "individual_headset_microphone"},
+                    "turn_boundary_source": "oracle_reference_transcript",
+                },
+            }
+            (base_dir / "M1.json").write_text(json.dumps(base), encoding="utf-8")
+            (visual_dir / "M1.json").write_text(json.dumps(visual), encoding="utf-8")
+
+            stats, _, _, _ = audit_split(visual_dir, base_path=base_dir)
+
+        self.assertEqual(stats["processing_failures"], 1)
+        self.assertEqual(stats["failure_log_records"], 1)
+        self.assertEqual(stats["failure_reason_counts"], {"landmark_all_frames": 1})
+        self.assertEqual(stats.get("attempt_accounting_mismatch", 0), 0)
+        self.assertEqual(stats.get("manifests_with_eligible_turn_mismatch", 0), 0)
+        self.assertEqual(stats.get("short_roi_turns", 0), 0)
 
 
 if __name__ == "__main__":

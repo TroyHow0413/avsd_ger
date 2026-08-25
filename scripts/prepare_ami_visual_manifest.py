@@ -35,6 +35,7 @@ import argparse
 import json
 import subprocess
 import sys
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -54,6 +55,19 @@ from scripts.ami_metadata import (  # noqa: E402
 _DEFAULT_FACE_PREDICTOR = "checkpoints/shape_predictor_68_face_landmarks.dat"
 _DEFAULT_CNN_DETECTOR = "checkpoints/mmod_human_face_detector.dat"
 _DEFAULT_MEAN_FACE = "av_hubert/avhubert/preparation/data/20words_mean_face.npy"
+_FAILURE_LOG_SCHEMA = "ami_visual_failure_v1"
+
+
+class VideoSliceError(RuntimeError):
+    """Raised when ffmpeg cannot create a turn-level video clip."""
+
+    def __init__(self, returncode: int, output: str):
+        self.returncode = int(returncode)
+        self.output = output.strip()
+        super().__init__(
+            f"ffmpeg slice failed with exit code {self.returncode}: "
+            f"{self.output[-1000:]}"
+        )
 
 
 def _parse_speaker_closeup(items: list[str]) -> dict[str, str]:
@@ -123,7 +137,7 @@ def _build_extractor(args):
 
 def _ffmpeg_slice_video(src: Path, dst: Path, start: float, end: float) -> None:
     dst.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.run(
+    completed = subprocess.run(
         [
             "ffmpeg",
             "-y",
@@ -142,8 +156,70 @@ def _ffmpeg_slice_video(src: Path, dst: Path, start: float, end: float) -> None:
             "yuv420p",
             str(dst),
         ],
-        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
     )
+    if completed.returncode != 0:
+        raise VideoSliceError(completed.returncode, completed.stdout or "")
+
+
+def _probe_video(path: Path) -> dict[str, Any]:
+    """Return lightweight decoder evidence suitable for a failure sidecar."""
+
+    probe: dict[str, Any] = {
+        "path": str(path),
+        "exists": path.exists(),
+        "size_bytes": path.stat().st_size if path.exists() else None,
+    }
+    if not path.exists():
+        return probe
+    try:
+        import cv2
+
+        cap = cv2.VideoCapture(str(path))
+        try:
+            probe["opened"] = bool(cap.isOpened())
+            probe["reported_frames"] = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            probe["fps"] = float(cap.get(cv2.CAP_PROP_FPS))
+            if probe["fps"] > 0 and probe["reported_frames"] >= 0:
+                probe["reported_duration_seconds"] = (
+                    probe["reported_frames"] / probe["fps"]
+                )
+            ok, frame = cap.read()
+            probe["first_frame_readable"] = bool(ok and frame is not None)
+            if frame is not None:
+                probe["first_frame_shape"] = list(frame.shape)
+        finally:
+            cap.release()
+    except Exception as exc:  # Diagnostic code must never hide the real failure.
+        probe["probe_error"] = f"{type(exc).__name__}: {exc}"
+    return probe
+
+
+def _classify_failure(exc: Exception) -> tuple[str, str]:
+    message = str(exc)
+    lowered = message.lower()
+    if isinstance(exc, VideoSliceError):
+        return "ffmpeg_slice_failed", "ffmpeg_slice"
+    if "could not read any frames" in lowered:
+        return "clip_unreadable", "video_decode"
+    if "landmark detection failed on all frames" in lowered:
+        return "landmark_all_frames", "landmark_detection"
+    if "unexpected roi shape" in lowered:
+        return "unexpected_roi_shape", "roi_validation"
+    if "lip confidence length" in lowered:
+        return "confidence_length_mismatch", "roi_validation"
+    if "frame coverage" in lowered:
+        return "roi_frame_coverage", "roi_validation"
+    return "unexpected_exception", "unknown"
+
+
+def _append_failure(path: Path, record: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps(record, ensure_ascii=False) + "\n")
+        stream.flush()
 
 
 def _to_numpy(x) -> np.ndarray:
@@ -236,6 +312,12 @@ def main() -> int:
     p.add_argument("--min-turn-secs", type=float, default=1.0)
     p.add_argument("--max-turn-secs", type=float, default=12.0)
     p.add_argument("--keep-clips", action="store_true")
+    p.add_argument(
+        "--failure-log",
+        type=Path,
+        default=None,
+        help="Per-turn JSONL failure ledger. Default: OUT_DIR/failures.jsonl.",
+    )
     p.add_argument("--roi-backend", default="dlib", choices=["dlib", "haar"])
     p.add_argument("--face-predictor", default=_DEFAULT_FACE_PREDICTOR)
     p.add_argument("--cnn-detector", default=_DEFAULT_CNN_DETECTOR)
@@ -292,8 +374,11 @@ def main() -> int:
     out_roi_dir = args.out_dir / "mouth_roi"
     out_clip_dir = args.out_dir / "video_clips"
     out_face_dir = args.out_dir / "enrollment_faces"
+    failure_log_path = args.failure_log or (args.out_dir / "failures.jsonl")
     out_roi_dir.mkdir(parents=True, exist_ok=True)
     out_clip_dir.mkdir(parents=True, exist_ok=True)
+    failure_log_path.parent.mkdir(parents=True, exist_ok=True)
+    failure_log_path.write_text("", encoding="utf-8")
 
     turns_out: list[dict[str, Any]] = []
     face_by_suffix: dict[str, str] = {}
@@ -304,27 +389,109 @@ def main() -> int:
     skipped_per_speaker_cap = 0
     turns_by_suffix: dict[str, int] = {}
     confidence_values: list[float] = []
+    failure_reasons: Counter[str] = Counter()
+    source_probes: dict[Path, dict[str, Any]] = {}
+
+    def record_failure(
+        turn: dict[str, Any],
+        *,
+        reason: str,
+        stage: str,
+        message: str,
+        suffix: str | None,
+        closeup: str | None,
+        src_video: Path | None,
+        clip_path: Path | None,
+        roi_path: Path | None,
+        exception_type: str | None = None,
+        ffmpeg_output: str | None = None,
+    ) -> None:
+        nonlocal failures
+        failures += 1
+        failure_reasons[reason] += 1
+        source_probe = None
+        if src_video is not None:
+            if src_video not in source_probes:
+                source_probes[src_video] = _probe_video(src_video)
+            source_probe = source_probes[src_video]
+        record = {
+            "schema": _FAILURE_LOG_SCHEMA,
+            "dataset_build_id": manifest.get("meta", {}).get("dataset_build_id"),
+            "meeting_id": meeting_id,
+            "turn_id": str(turn.get("turn_id", "<unknown>")),
+            "reason": reason,
+            "stage": stage,
+            "exception_type": exception_type,
+            "message": message,
+            "start": turn.get("start"),
+            "end": turn.get("end"),
+            "duration_seconds": (
+                float(turn["end"]) - float(turn["start"])
+                if turn.get("start") is not None and turn.get("end") is not None
+                else None
+            ),
+            "ref_speaker": turn.get("ref_speaker"),
+            "session_speaker_id": turn.get("session_speaker_id"),
+            "participant_id": turn.get("participant_id"),
+            "nxt_agent": suffix,
+            "closeup": closeup,
+            "source_video": str(src_video) if src_video is not None else None,
+            "clip_path": str(clip_path) if clip_path is not None else None,
+            "roi_path": str(roi_path) if roi_path is not None else None,
+            "source_probe": source_probe,
+            "clip_probe": _probe_video(clip_path) if clip_path is not None else None,
+            "ffmpeg_output": ffmpeg_output[-4000:] if ffmpeg_output else None,
+        }
+        _append_failure(failure_log_path, record)
+        print(
+            f"[fail] reason={reason} stage={stage} turn={record['turn_id']} "
+            f"agent={suffix} camera={closeup}: {message}",
+            flush=True,
+        )
 
     for turn in manifest.get("turns", []):
         if args.max_turns is not None and len(turns_out) >= args.max_turns:
             break
 
-        ref_speaker = str(turn.get("ref_speaker", ""))
-        suffix = _turn_agent(turn, meeting_id)
-        if not suffix:
-            print(f"[missing] local NXT agent for {turn.get('turn_id', '<unknown>')}")
-            failures += 1
-            continue
-        closeup = closeup_by_speaker.get(suffix)
-        if closeup is None:
-            skipped_unmapped += 1
-            continue
-
+        turn_id = str(turn.get("turn_id", f"turn_{len(turns_out):04d}"))
         start = float(turn["start"])
         end = float(turn["end"])
         dur = end - start
         if dur < args.min_turn_secs or dur > args.max_turn_secs:
             skipped_duration += 1
+            continue
+
+        ref_speaker = str(turn.get("ref_speaker", ""))
+        suffix = _turn_agent(turn, meeting_id)
+        if not suffix:
+            attempts += 1
+            record_failure(
+                turn,
+                reason="missing_nxt_agent",
+                stage="metadata",
+                message="No meeting-local NXT agent could be resolved",
+                suffix=None,
+                closeup=None,
+                src_video=None,
+                clip_path=None,
+                roi_path=None,
+            )
+            continue
+        closeup = closeup_by_speaker.get(suffix)
+        if closeup is None:
+            skipped_unmapped += 1
+            attempts += 1
+            record_failure(
+                turn,
+                reason="missing_closeup_mapping",
+                stage="metadata",
+                message=f"No Closeup camera mapping for NXT agent {suffix}",
+                suffix=suffix,
+                closeup=None,
+                src_video=None,
+                clip_path=None,
+                roi_path=None,
+            )
             continue
         if (
             args.max_turns_per_speaker is not None
@@ -334,18 +501,24 @@ def main() -> int:
             continue
 
         src_video = args.ami_video_dir / f"{meeting_id}.{closeup}.avi"
-        if not src_video.exists():
-            print(f"[missing] {src_video}")
-            failures += 1
-            continue
-
-        turn_id = str(turn.get("turn_id", f"turn_{len(turns_out):04d}"))
         safe_id = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in turn_id)
         clip_path = out_clip_dir / f"{safe_id}_{closeup}.mp4"
         roi_path = out_roi_dir / f"{safe_id}_{closeup}_mouth.npy"
         face_path = out_face_dir / f"{meeting_id}_{suffix}_{closeup}.jpg"
-
         attempts += 1
+        if not src_video.exists():
+            record_failure(
+                turn,
+                reason="missing_source_video",
+                stage="source_validation",
+                message=f"Source video does not exist: {src_video}",
+                suffix=suffix,
+                closeup=closeup,
+                src_video=src_video,
+                clip_path=clip_path,
+                roi_path=roi_path,
+            )
+            continue
         try:
             _ffmpeg_slice_video(src_video, clip_path, start, end)
             extracted, lip_conf = extractor.extract_with_confidence_from_file(str(clip_path))
@@ -357,6 +530,8 @@ def main() -> int:
                 raise RuntimeError(
                     f"lip confidence length {lip_conf.shape[0]} != ROI frames {arr.shape[0]}"
                 )
+            expected_frames = max(1, int(round(dur * 25.0)))
+            frame_coverage = float(arr.shape[0]) / expected_frames
             np.save(roi_path, arr)
             best_frame = int(np.argmax(lip_conf)) if lip_conf.size else 0
             face_timestamp = min(end, start + (best_frame + 0.5) / 25.0)
@@ -372,8 +547,20 @@ def main() -> int:
                 except OSError:
                     pass
         except Exception as exc:
-            failures += 1
-            print(f"[fail] {turn_id} {suffix}->{closeup}: {exc}")
+            reason, stage = _classify_failure(exc)
+            record_failure(
+                turn,
+                reason=reason,
+                stage=stage,
+                message=str(exc),
+                suffix=suffix,
+                closeup=closeup,
+                src_video=src_video,
+                clip_path=clip_path,
+                roi_path=roi_path,
+                exception_type=type(exc).__name__,
+                ffmpeg_output=exc.output if isinstance(exc, VideoSliceError) else None,
+            )
             continue
 
         row = dict(turn)
@@ -383,6 +570,8 @@ def main() -> int:
         row["video_speaker_map"] = f"{suffix}={closeup}"
         row["lip_conf_v"] = lip_conf.tolist()
         row["lip_conf_source"] = f"{args.roi_backend}_direct_detection_and_interpolation"
+        row["video_expected_frames_25fps"] = expected_frames
+        row["video_frame_coverage"] = frame_coverage
         row = _with_visual_speaker_fields(row, arr)
         turns_out.append(row)
         confidence_values.extend(float(value) for value in lip_conf)
@@ -415,6 +604,11 @@ def main() -> int:
             "speaker_mask_v": "all_true_for_each_explicitly_mapped_closeup_turn",
             "attempts": attempts,
             "failures": failures,
+            "successful_visual_turns": len(turns_out),
+            "visual_turn_coverage": len(turns_out) / attempts if attempts else None,
+            "failure_log": str(failure_log_path),
+            "failure_log_schema": _FAILURE_LOG_SCHEMA,
+            "failure_reason_counts": dict(sorted(failure_reasons.items())),
             "skipped_unmapped": skipped_unmapped,
             "skipped_duration": skipped_duration,
             "skipped_per_speaker_cap": skipped_per_speaker_cap,
@@ -437,7 +631,9 @@ def main() -> int:
 
     print(
         f"\n[wrote] {args.out_manifest} "
-        f"({len(turns_out)} visual turns, failures={failures}, attempts={attempts})"
+        f"({len(turns_out)} visual turns, failures={failures}, attempts={attempts}, "
+        f"coverage={len(turns_out) / attempts if attempts else 0:.3f}, "
+        f"failure_log={failure_log_path})"
     )
     return 0
 

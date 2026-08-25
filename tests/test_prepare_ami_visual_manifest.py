@@ -3,12 +3,28 @@ import unittest
 import numpy as np
 
 from scripts.prepare_ami_visual_manifest import (
+    VideoSliceError,
+    _classify_failure,
     _with_enrollment_faces,
     _with_visual_speaker_fields,
 )
 
 
 class PrepareAmiVisualManifestTest(unittest.TestCase):
+    def test_failures_are_classified_for_structured_logging(self):
+        self.assertEqual(
+            _classify_failure(RuntimeError("dlib: landmark detection failed on all frames")),
+            ("landmark_all_frames", "landmark_detection"),
+        )
+        self.assertEqual(
+            _classify_failure(RuntimeError("Could not read any frames from clip.mp4")),
+            ("clip_unreadable", "video_decode"),
+        )
+        self.assertEqual(
+            _classify_failure(VideoSliceError(1, "decoder error")),
+            ("ffmpeg_slice_failed", "ffmpeg_slice"),
+        )
+
     def test_visual_turn_gets_full_speaker_mask(self):
         arr = np.zeros((7, 1, 96, 96), dtype=np.float32)
         row = _with_visual_speaker_fields({"turn_id": "IS1009c.sync.1"}, arr)

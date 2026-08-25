@@ -80,6 +80,103 @@ The extraction confidence is an auditable tracking signal:
 - `0.25`: leading/trailing frame extrapolated from the nearest detection;
 - all frames missing: reject the clip instead of using a centre crop.
 
+## Visual failure diagnosis and logging
+
+The first partial `ami_full_v2` server build reported 1,526 failed turns out of
+12,309 attempts (12.40%) across 57 completed train manifests. This is too large
+and too meeting-dependent to treat as a harmless preprocessing detail. The
+worst observed meetings included `ES2006d` (66.8%), `ES2006c` (42.1%),
+`IS1004a` (37.9%) and `ES2006a` (36.0%). These failures also occurred in
+manifests completed before the 48-worker run, so high concurrency may amplify
+decoder pressure but cannot explain the full pattern.
+
+Observed failure classes are:
+
+- `landmark_all_frames`: the generated turn clip is readable, but neither the
+  dlib HOG detector nor its CNN fallback produced landmarks on any frame;
+- `clip_unreadable`: ffmpeg returned successfully but OpenCV could not decode a
+  frame, commonly requiring checks for a zero-frame slice, source/annotation
+  duration mismatch, or excessive concurrent decoder pressure;
+- `ffmpeg_slice_failed`: ffmpeg returned non-zero; its captured diagnostic
+  output is retained;
+- `missing_source_video`, `missing_nxt_agent`, `unexpected_roi_shape`, and
+  `confidence_length_mismatch`: explicit source, metadata, or output-contract
+  failures;
+- native child-process failure such as `signal_11`: an environment/library
+  crash. The initial universal failure was dlib 20.0.1 crashing while loading
+  the CNN model; production preprocessing must use and record the verified
+  AV-HuBERT-compatible environment.
+
+Every newly processed meeting now writes:
+
+```text
+data/<build-id>/
+  logs/visual/last_invocation.json              # Python/dlib/OpenCV/ffmpeg/workers
+  logs/visual/<split>/<meeting>.log             # complete child stdout/stderr
+  logs/visual/<split>/<meeting>.result.json     # exit/signal, elapsed time, counts
+  <split>/visual/<meeting>/failures.jsonl       # one structured record per failed turn
+```
+
+Each failure record includes the turn ID, speaker/agent, camera, timestamps,
+source and clip paths, exception class/stage, ffmpeg output when applicable,
+and source/clip decoder probes. The meeting manifest stores the failure-log
+path, reason counts, attempts, successes and visual-turn coverage. Resume output
+prints these counts for pre-existing manifests instead of calling file
+existence alone a clean completion.
+
+The strict audit now fails on missing meeting manifests, base/visual eligible
+turn mismatch, processing failures, absent or inconsistent failure ledgers,
+missing/unreadable ROI files, and ROI frame coverage outside 90%-110% of
+`duration * 25`. For diagnosis only, processing failures can be reported
+without making that condition alone fatal:
+
+```bash
+python scripts/audit_ami_manifests.py \
+  --run-dir data/ami_full_v3 \
+  --allow-processing-failures
+```
+
+Do not mix already completed `ami_full_v2` manifests, which lack structured
+failure ledgers, with newly instrumented outputs and claim one homogeneous
+build. Preserve `ami_full_v2` as diagnostic evidence and create a new immutable
+build ID for the instrumented rebuild:
+
+```bash
+python scripts/rebuild_ami_base_manifests.py \
+  --run-dir data/ami_full_v3 \
+  --splits train dev test
+
+python -u scripts/build_ami_visual_manifests.py \
+  --run-dir data/ami_full_v3 \
+  --splits train dev test \
+  --jobs 6
+
+python scripts/audit_ami_manifests.py \
+  --run-dir data/ami_full_v3
+```
+
+Start with `--jobs 6`. Increase concurrency only after comparing the structured
+failure-reason distribution and unreadable-clip count on the same meetings.
+Do not silently delete failed turns or accept a passing training run as proof
+that preprocessing coverage is complete. The all-landmarks-missing policy
+(reference full-frame resize fallback versus audio-only/zero-confidence
+retention) must be selected and reported before the final Stage-1 dataset is
+frozen.
+
+Generate a read-only aggregate report at any point after one or more meetings
+finish:
+
+```bash
+python scripts/analyze_ami_visual_failures.py \
+  --run-dir data/ami_full_v3 \
+  --out data/ami_full_v3/visual_failure_report.json
+```
+
+The report groups failures by reason, stage and camera; lists the worst
+meetings; identifies unreadable/zero-byte clips and annotation timestamps past
+the probed source duration; and links native process failures to their complete
+meeting logs.
+
 ## Convert to training JSONL
 
 ```bash
