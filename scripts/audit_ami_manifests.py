@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -11,6 +12,10 @@ import numpy as np
 
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from scripts.ami_visual_policy import is_official_missing_closeup  # noqa: E402
 
 
 def _load(path: Path) -> dict[str, Any]:
@@ -85,13 +90,22 @@ def audit_split(
         meetings.add(meeting_id)
         turns = manifest.get("turns", [])
         attempts = int(meta.get("attempts", len(turns)))
+        official_exclusions = int(meta.get("official_visual_exclusions", 0))
+        eligible_turns = int(
+            meta.get("eligible_turns", attempts + official_exclusions)
+        )
         failures = int(meta.get("failures", 0))
         stats["manifests"] += 1
         stats["turns"] += len(turns)
         stats["processing_attempts"] += attempts
         stats["processing_failures"] += failures
+        stats["eligible_turns"] += eligible_turns
+        stats["official_visual_exclusions"] += official_exclusions
         stats["manifests_with_processing_failures"] += int(failures > 0)
         stats["attempt_accounting_mismatch"] += int(attempts != len(turns) + failures)
+        stats["eligible_accounting_mismatch"] += int(
+            eligible_turns != attempts + official_exclusions
+        )
         if meta.get("successful_visual_turns") is not None:
             stats["success_accounting_mismatch"] += int(
                 int(meta["successful_visual_turns"]) != len(turns)
@@ -113,7 +127,7 @@ def audit_split(
                 _load(base_manifest_path), min_turn_seconds, max_turn_seconds
             )
             stats["eligible_base_turns"] += expected
-            gap = attempts - expected
+            gap = eligible_turns - expected
             stats["eligible_turn_gap_absolute"] += abs(gap)
             stats["manifests_with_eligible_turn_mismatch"] += int(gap != 0)
 
@@ -133,6 +147,30 @@ def audit_split(
                     stats["failure_records_missing_turn_id"] += int(
                         not record.get("turn_id")
                     )
+
+        exclusion_log = _artifact_path(meta.get("official_visual_exclusion_log"))
+        if official_exclusions > 0 and exclusion_log is None:
+            stats["missing_official_exclusion_logs"] += 1
+        elif exclusion_log is not None:
+            if not exclusion_log.is_file():
+                stats["missing_official_exclusion_log_files"] += 1
+            else:
+                records, unreadable = _read_failure_log(exclusion_log)
+                stats["official_exclusion_log_records"] += len(records)
+                stats["unreadable_official_exclusion_log_records"] += unreadable
+                stats["official_exclusion_log_count_mismatch"] += int(
+                    len(records) != official_exclusions
+                )
+                for record in records:
+                    valid = (
+                        record.get("reason") == "official_missing_closeup"
+                        and bool(record.get("turn_id"))
+                        and is_official_missing_closeup(
+                            str(record.get("meeting_id", "")),
+                            str(record.get("closeup", "")),
+                        )
+                    )
+                    stats["invalid_official_exclusion_records"] += int(not valid)
 
         for speaker in manifest.get("speakers", []):
             enrollment_mode = speaker.get("meta", {}).get("enrollment_mode")
@@ -158,6 +196,9 @@ def audit_split(
                 stats["lip_conf_turns"] += 1
                 stats["all_one_lip_conf_turns"] += int(
                     values.size > 0 and bool(np.allclose(values, 1.0))
+                )
+                stats["all_zero_lip_conf_turns"] += int(
+                    values.size > 0 and bool(np.allclose(values, 0.0))
                 )
                 roi_path = _artifact_path(turn.get("mouth_roi"))
                 if roi_path is None:
@@ -246,6 +287,7 @@ def main() -> int:
             "missing_roi_files",
             "non_quality_enrollment_entries",
             "attempt_accounting_mismatch",
+            "eligible_accounting_mismatch",
             "success_accounting_mismatch",
             "manifests_with_eligible_turn_mismatch",
             "eligible_turn_gap_absolute",
@@ -255,6 +297,11 @@ def main() -> int:
             "failure_log_count_mismatch",
             "unreadable_failure_log_records",
             "failure_records_missing_turn_id",
+            "missing_official_exclusion_logs",
+            "missing_official_exclusion_log_files",
+            "official_exclusion_log_count_mismatch",
+            "unreadable_official_exclusion_log_records",
+            "invalid_official_exclusion_records",
             "short_roi_turns",
             "long_roi_turns",
         ]

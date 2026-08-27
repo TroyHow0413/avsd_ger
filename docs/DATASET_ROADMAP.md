@@ -44,11 +44,12 @@ of the complete AV-HuBERT dataset preparation workflow.
 | Face detector | dlib frontal HOG detector, with the dlib CNN detector as fallback | Same HOG-first, CNN-fallback detector path; do not replace it with Haar or HOG-only for the production baseline |
 | Landmarks | dlib 68-point shape predictor | Same 68-point predictor |
 | Missing landmarks | Interpolation/extrapolation within the input video sequence | Same procedure, but its temporal scope is one AMI turn rather than an entire meeting stream |
-| All frames missing landmarks | The reference `align_mouth.py` resizes the complete input frames as a fallback | The current repaired pipeline rejects the visual turn and records `landmark_all_frames`; whether to adopt the reference resize fallback or retain an audio-only/zero-confidence turn must be an explicit ablation |
+| All frames missing landmarks | The reference `align_mouth.py` resizes the complete input frames as a fallback | The production baseline uses the same full-frame 96x96 resize; its added confidence track is all zero so the fallback remains auditable |
 | Alignment and crop | Mean-face similarity transform using stable points 33, 36, 39, 42 and 45; mouth points 48-67; 96x96 ROI; 12-frame smoothing window | Same alignment landmarks, mouth range, ROI size and smoothing rule |
 | Intermediate/output form | Landmark PKL files followed by aligned mouth-ROI videos in the reference scripts | Detection and alignment are orchestrated per turn and stored as model-ready NumPy ROI arrays |
 | Dataset-specific metadata | LRS/Vox-style file identities and manifests | Official AMI meeting-specific Closeup mapping, corpus-global participant IDs, IHM/oracle-turn declarations and enrollment metadata |
-| Confidence | The reference preparation does not provide the project's C3 confidence track | Adds an auditable per-frame detection/interpolation confidence track without changing the ROI crop algorithm |
+| Missing source media | The reference file check writes missing audio/video IDs to `missing.list`; it does not fabricate paired samples | Official AMI corpus defects are a fixed exclusion ledger; unknown missing/corrupt media remain fatal failures |
+| Confidence | The reference preparation does not provide the project's C3 confidence track | Adds an auditable per-frame detection/interpolation confidence track; AV-HuBERT resize fallback frames receive zero |
 
 The original legacy AMI visual pipeline already used the order `slice turn ->
 detect landmarks -> align/crop mouth ROI`. The repaired `ami_full_v2` pipeline
@@ -64,10 +65,16 @@ failure, not justification for changing the detector. First verify that
 environment, then run a one-meeting smoke test before launching all splits.
 
 All Stage-1 through Stage-4 AMI comparisons must keep this preprocessing and
-the fixed AMI test protocol unchanged. A future experiment that computes
+the fixed AMI-AV-valid test protocol unchanged. AMI officially documents that
+`TS3003d` has no Closeup1, Closeup2, or Closeup3; turns requiring those streams
+are deterministically excluded rather than synthesized, while Closeup4 remains.
+Every ablation, including audio-only rows compared with the AV system, uses the
+same fixed AV-valid subset. Full official-split audio-only results may be shown
+separately and must not be compared numerically as if they used the same turns.
+A future experiment that computes
 landmarks over complete meeting streams before turn slicing is a separate
 preprocessing ablation and must use a new dataset build ID (for example,
-`ami_full_v3`) rather than overwrite `ami_full_v2`.
+`ami_full_v5`) rather than overwrite the production baseline.
 
 **Required data repairs and checks:**
 

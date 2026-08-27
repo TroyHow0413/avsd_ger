@@ -185,14 +185,19 @@ def main() -> int:
             args.run_dir / "visual_build_plan.json",
             {
                 "dataset_build_id": args.run_dir.name,
-                "pipeline": "repaired_ami_visual_v2",
+                "pipeline": "ami_avhubert_reference_v3",
                 "roi_backend": args.roi_backend,
                 "min_turn_seconds": args.min_turn_secs,
                 "max_turn_seconds": args.max_turn_secs,
                 "max_turns": args.max_turns,
                 "max_turns_per_speaker": args.max_turns_per_speaker,
                 "camera_mapping": "AMI corpusResources/meetings.xml",
-                "lip_confidence": "direct_detection_1/interpolation_0.5/extrapolation_0.25",
+                "lip_confidence": (
+                    "direct_detection_1/interpolation_0.5/extrapolation_0.25/"
+                    "all_landmarks_missing_resize_0"
+                ),
+                "all_landmarks_missing": "AV-HuBERT full-frame resize",
+                "official_missing_media": "fixed AMI corpus exclusion ledger",
             },
             dry_run=args.dry_run,
         )

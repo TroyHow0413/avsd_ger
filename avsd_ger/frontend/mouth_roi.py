@@ -83,8 +83,9 @@ def _detection_confidence(detected: list[bool]) -> np.ndarray:
     """Convert direct detector hits into an auditable tracking-quality signal.
 
     Directly detected frames receive 1.0, gaps interpolated between detections
-    receive 0.5, and leading/trailing extrapolation receives 0.25.  An entirely
-    undetected clip receives zeros and is rejected by the extractor.
+    receive 0.5, and leading/trailing extrapolation receives 0.25. An entirely
+    undetected clip receives zeros; the dlib extractor then follows the
+    AV-HuBERT full-frame resize fallback.
     """
     confidence = np.zeros(len(detected), dtype=np.float32)
     valid = np.flatnonzero(np.asarray(detected, dtype=bool))
@@ -430,7 +431,23 @@ class MouthROIExtractor:
             confidence = _detection_confidence([item is not None for item in landmarks_raw])
             grey_seq = self._crop_sequence_dlib(frames, landmarks_raw=landmarks_raw)
             if grey_seq is None:
-                raise RuntimeError("dlib: landmark detection failed on all frames")
+                # Match av_hubert/avhubert/preparation/align_mouth.py: retain
+                # every real frame by resizing the complete image when no
+                # landmarks are available. AV-HuBERT converts the resized
+                # video to grayscale while loading; the direct-NPY path does
+                # that conversion here. Zero confidence identifies fallback
+                # frames without changing the reference pixels.
+                target = self.crop_height * 2
+                grey_seq = np.asarray(
+                    [
+                        cv2.resize(
+                            cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY),
+                            (target, target),
+                        )
+                        for frame in frames
+                    ],
+                    dtype=np.uint8,
+                )
             # grey_seq is [T, 96, 96] uint8 (already greyscale via warp)
         else:
             centres = [self._detect_mouth_centre_haar(frame) for frame in frames]

@@ -51,11 +51,16 @@ from scripts.ami_metadata import (  # noqa: E402
     load_ami_meetings,
     meeting_closeup_map,
 )
+from scripts.ami_visual_policy import (  # noqa: E402
+    AMI_DATA_PROBLEMS_URL,
+    is_official_missing_closeup,
+)
 
 _DEFAULT_FACE_PREDICTOR = "checkpoints/shape_predictor_68_face_landmarks.dat"
 _DEFAULT_CNN_DETECTOR = "checkpoints/mmod_human_face_detector.dat"
 _DEFAULT_MEAN_FACE = "av_hubert/avhubert/preparation/data/20words_mean_face.npy"
 _FAILURE_LOG_SCHEMA = "ami_visual_failure_v1"
+_EXCLUSION_LOG_SCHEMA = "ami_visual_official_exclusion_v1"
 
 
 class VideoSliceError(RuntimeError):
@@ -318,6 +323,12 @@ def main() -> int:
         default=None,
         help="Per-turn JSONL failure ledger. Default: OUT_DIR/failures.jsonl.",
     )
+    p.add_argument(
+        "--exclusion-log",
+        type=Path,
+        default=None,
+        help="Official corpus-missing JSONL ledger. Default: OUT_DIR/exclusions.jsonl.",
+    )
     p.add_argument("--roi-backend", default="dlib", choices=["dlib", "haar"])
     p.add_argument("--face-predictor", default=_DEFAULT_FACE_PREDICTOR)
     p.add_argument("--cnn-detector", default=_DEFAULT_CNN_DETECTOR)
@@ -375,21 +386,27 @@ def main() -> int:
     out_clip_dir = args.out_dir / "video_clips"
     out_face_dir = args.out_dir / "enrollment_faces"
     failure_log_path = args.failure_log or (args.out_dir / "failures.jsonl")
+    exclusion_log_path = args.exclusion_log or (args.out_dir / "exclusions.jsonl")
     out_roi_dir.mkdir(parents=True, exist_ok=True)
     out_clip_dir.mkdir(parents=True, exist_ok=True)
     failure_log_path.parent.mkdir(parents=True, exist_ok=True)
     failure_log_path.write_text("", encoding="utf-8")
+    exclusion_log_path.write_text("", encoding="utf-8")
 
     turns_out: list[dict[str, Any]] = []
     face_by_suffix: dict[str, str] = {}
     attempts = 0
+    eligible_turns = 0
     failures = 0
+    official_exclusions = 0
     skipped_unmapped = 0
     skipped_duration = 0
     skipped_per_speaker_cap = 0
     turns_by_suffix: dict[str, int] = {}
     confidence_values: list[float] = []
     failure_reasons: Counter[str] = Counter()
+    official_exclusion_counts: Counter[str] = Counter()
+    avhubert_resize_fallback_turns = 0
     source_probes: dict[Path, dict[str, Any]] = {}
 
     def record_failure(
@@ -505,6 +522,30 @@ def main() -> int:
         clip_path = out_clip_dir / f"{safe_id}_{closeup}.mp4"
         roi_path = out_roi_dir / f"{safe_id}_{closeup}_mouth.npy"
         face_path = out_face_dir / f"{meeting_id}_{suffix}_{closeup}.jpg"
+        eligible_turns += 1
+        if is_official_missing_closeup(meeting_id, closeup):
+            official_exclusions += 1
+            official_exclusion_counts[f"{meeting_id}.{closeup}"] += 1
+            _append_failure(
+                exclusion_log_path,
+                {
+                    "schema": _EXCLUSION_LOG_SCHEMA,
+                    "dataset_build_id": manifest.get("meta", {}).get("dataset_build_id"),
+                    "meeting_id": meeting_id,
+                    "turn_id": turn_id,
+                    "reason": "official_missing_closeup",
+                    "nxt_agent": suffix,
+                    "closeup": closeup,
+                    "source_video": str(src_video),
+                    "source": AMI_DATA_PROBLEMS_URL,
+                },
+            )
+            print(
+                f"[exclude] reason=official_missing_closeup turn={turn_id} "
+                f"agent={suffix} camera={closeup}",
+                flush=True,
+            )
+            continue
         attempts += 1
         if not src_video.exists():
             record_failure(
@@ -569,7 +610,19 @@ def main() -> int:
         row["video_closeup"] = closeup
         row["video_speaker_map"] = f"{suffix}={closeup}"
         row["lip_conf_v"] = lip_conf.tolist()
-        row["lip_conf_source"] = f"{args.roi_backend}_direct_detection_and_interpolation"
+        used_resize_fallback = bool(
+            args.roi_backend == "dlib"
+            and lip_conf.size > 0
+            and np.allclose(lip_conf, 0.0)
+        )
+        if used_resize_fallback:
+            avhubert_resize_fallback_turns += 1
+            row["lip_conf_source"] = "avhubert_full_frame_resize_fallback"
+            row["visual_preprocessing_status"] = "all_landmarks_missing_resized"
+        else:
+            row["lip_conf_source"] = (
+                f"{args.roi_backend}_direct_detection_and_interpolation"
+            )
         row["video_expected_frames_25fps"] = expected_frames
         row["video_frame_coverage"] = frame_coverage
         row = _with_visual_speaker_fields(row, arr)
@@ -603,9 +656,20 @@ def main() -> int:
             "enrollment_faces": face_by_suffix,
             "speaker_mask_v": "all_true_for_each_explicitly_mapped_closeup_turn",
             "attempts": attempts,
+            "eligible_turns": eligible_turns,
             "failures": failures,
+            "official_visual_exclusions": official_exclusions,
+            "official_visual_exclusion_counts": dict(
+                sorted(official_exclusion_counts.items())
+            ),
+            "official_visual_exclusion_log": str(exclusion_log_path),
+            "official_visual_exclusion_log_schema": _EXCLUSION_LOG_SCHEMA,
+            "official_visual_exclusion_source": AMI_DATA_PROBLEMS_URL,
             "successful_visual_turns": len(turns_out),
             "visual_turn_coverage": len(turns_out) / attempts if attempts else None,
+            "eligible_visual_turn_coverage": (
+                len(turns_out) / eligible_turns if eligible_turns else None
+            ),
             "failure_log": str(failure_log_path),
             "failure_log_schema": _FAILURE_LOG_SCHEMA,
             "failure_reason_counts": dict(sorted(failure_reasons.items())),
@@ -616,12 +680,15 @@ def main() -> int:
             "turn_limit": args.max_turns,
             "turn_limit_per_speaker": args.max_turns_per_speaker,
             "lip_conf_source": f"{args.roi_backend}_direct_detection_and_interpolation",
+            "all_landmarks_missing_policy": "AV-HuBERT full-frame resize",
+            "avhubert_resize_fallback_turns": avhubert_resize_fallback_turns,
             "lip_conf_mean": (
                 float(np.mean(confidence_values)) if confidence_values else None
             ),
             "note": (
-                "AMI closeup mappings and global identities must come from meetings.xml; "
-                "manual mappings are smoke-test only."
+                "AMI closeup mappings and global identities come from meetings.xml; "
+                "officially missing streams are excluded, and all-landmark-missing "
+                "readable clips use the AV-HuBERT reference resize fallback."
             ),
         },
     }
@@ -632,6 +699,7 @@ def main() -> int:
     print(
         f"\n[wrote] {args.out_manifest} "
         f"({len(turns_out)} visual turns, failures={failures}, attempts={attempts}, "
+        f"official_exclusions={official_exclusions}, "
         f"coverage={len(turns_out) / attempts if attempts else 0:.3f}, "
         f"failure_log={failure_log_path})"
     )

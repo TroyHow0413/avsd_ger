@@ -210,16 +210,18 @@ _wget_one() {
     fi
 
     # --- download ---
-    wget \
+    if wget \
         --quiet \
         --tries=5 \
         --retry-connrefused \
         --timeout=60 \
         --continue \
         -O "${dst}.part" \
-        "$url" 2>&1 || true
-
-    if [[ -f "${dst}.part" && -s "${dst}.part" ]]; then
+        "$url" 2>&1 \
+        && [[ -s "${dst}.part" ]] \
+        && { [[ "$dst" != *.avi ]] || ! command -v ffprobe &>/dev/null \
+             || ffprobe -v error "${dst}.part" >/dev/null 2>&1; }
+    then
         mv "${dst}.part" "$dst"
         echo "[ok]   ${fname}"
         echo "${url}  ${dst}" >> "$log_ok"

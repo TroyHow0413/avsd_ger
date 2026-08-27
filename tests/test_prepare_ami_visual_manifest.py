@@ -8,9 +8,16 @@ from scripts.prepare_ami_visual_manifest import (
     _with_enrollment_faces,
     _with_visual_speaker_fields,
 )
+from scripts.ami_visual_policy import is_official_missing_closeup
 
 
 class PrepareAmiVisualManifestTest(unittest.TestCase):
+    def test_official_ami_missing_closeups_are_fixed_and_narrow(self):
+        self.assertTrue(is_official_missing_closeup("TS3003d", "Closeup1"))
+        self.assertTrue(is_official_missing_closeup("TS3003d", "Closeup3"))
+        self.assertFalse(is_official_missing_closeup("TS3003d", "Closeup4"))
+        self.assertFalse(is_official_missing_closeup("TS3003c", "Closeup1"))
+
     def test_failures_are_classified_for_structured_logging(self):
         self.assertEqual(
             _classify_failure(RuntimeError("dlib: landmark detection failed on all frames")),

@@ -5,7 +5,7 @@ from pathlib import Path
 
 import numpy as np
 
-from avsd_ger.frontend.mouth_roi import _detection_confidence
+from avsd_ger.frontend.mouth_roi import MouthROIExtractor, _detection_confidence
 from scripts.audit_ami_manifests import audit_split
 from scripts.ami_metadata import (
     apply_ami_speaker_metadata,
@@ -86,6 +86,22 @@ class AmiVisualConfidenceTest(unittest.TestCase):
 
     def test_all_missing_detection_is_zero_not_fake_one(self):
         np.testing.assert_array_equal(_detection_confidence([False] * 4), np.zeros(4))
+
+    def test_all_missing_landmarks_use_avhubert_full_frame_resize(self):
+        extractor = MouthROIExtractor.__new__(MouthROIExtractor)
+        extractor.backend = "dlib"
+        extractor.crop_height = 48
+        extractor.crop_width = 48
+        extractor.window_margin = 12
+        extractor.start_idx = 48
+        extractor.stop_idx = 68
+        extractor._detect_landmarks_dlib = lambda frame: None
+
+        frames = [np.full((120, 160, 3), value, dtype=np.uint8) for value in (20, 80)]
+        roi, confidence = extractor.extract_with_confidence_from_frames(frames)
+
+        self.assertEqual(tuple(roi.shape), (2, 1, 96, 96))
+        np.testing.assert_array_equal(confidence, np.zeros(2, dtype=np.float32))
 
 
 class AmiJsonlConversionTest(unittest.TestCase):
@@ -214,6 +230,64 @@ class AmiAuditCoverageTest(unittest.TestCase):
         self.assertEqual(stats.get("attempt_accounting_mismatch", 0), 0)
         self.assertEqual(stats.get("manifests_with_eligible_turn_mismatch", 0), 0)
         self.assertEqual(stats.get("short_roi_turns", 0), 0)
+
+    def test_audit_accepts_only_documented_official_visual_exclusions(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            base_dir = root / "base"
+            visual_dir = root / "visual"
+            base_dir.mkdir()
+            visual_dir.mkdir()
+            exclusion_log = root / "exclusions.jsonl"
+            exclusion_log.write_text(
+                json.dumps(
+                    {
+                        "schema": "ami_visual_official_exclusion_v1",
+                        "meeting_id": "TS3003d",
+                        "turn_id": "TS3003d.sync.1",
+                        "reason": "official_missing_closeup",
+                        "closeup": "Closeup1",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            base = {
+                "turns": [
+                    {"turn_id": "TS3003d.sync.1", "start": 0.0, "end": 2.0}
+                ]
+            }
+            visual = {
+                "speakers": [],
+                "turns": [],
+                "meta": {
+                    "meeting_id": "TS3003d",
+                    "dataset_build_id": "test_build",
+                    "attempts": 0,
+                    "eligible_turns": 1,
+                    "failures": 0,
+                    "official_visual_exclusions": 1,
+                    "official_visual_exclusion_log": str(exclusion_log),
+                    "successful_visual_turns": 0,
+                    "speaker_closeup_source": "AMI corpusResources/meetings.xml",
+                    "audio_condition": {"description": "individual_headset_microphone"},
+                    "turn_boundary_source": "oracle_reference_transcript",
+                },
+            }
+            (base_dir / "TS3003d.json").write_text(
+                json.dumps(base), encoding="utf-8"
+            )
+            (visual_dir / "TS3003d.json").write_text(
+                json.dumps(visual), encoding="utf-8"
+            )
+
+            stats, _, _, _ = audit_split(visual_dir, base_path=base_dir)
+
+        self.assertEqual(stats["official_visual_exclusions"], 1)
+        self.assertEqual(stats["official_exclusion_log_records"], 1)
+        self.assertEqual(stats.get("invalid_official_exclusion_records", 0), 0)
+        self.assertEqual(stats.get("eligible_accounting_mismatch", 0), 0)
+        self.assertEqual(stats.get("eligible_turn_gap_absolute", 0), 0)
 
 
 if __name__ == "__main__":

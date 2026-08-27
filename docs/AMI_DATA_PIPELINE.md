@@ -78,7 +78,14 @@ The extraction confidence is an auditable tracking signal:
 - `1.0`: face/landmarks detected directly on the frame;
 - `0.5`: missing frame interpolated between direct detections;
 - `0.25`: leading/trailing frame extrapolated from the nearest detection;
-- all frames missing: reject the clip instead of using a centre crop.
+- `0.0`: all landmarks missing; retain the real frames using AV-HuBERT's
+  official full-frame 96x96 resize fallback.
+
+AMI officially records that `TS3003d` has no Closeup1, Closeup2, or Closeup3.
+Those source-camera turns are written to a fixed official-exclusion ledger and
+are absent from the AMI-AV-valid subset. They are not replaced with zeros,
+another speaker's Closeup4, or an overview camera. Unknown missing/corrupt
+media remain processing failures. Source: <https://groups.inf.ed.ac.uk/ami/corpus/dataproblems.shtml>.
 
 ## Visual failure diagnosis and logging
 
@@ -115,6 +122,7 @@ data/<build-id>/
   logs/visual/<split>/<meeting>.log             # complete child stdout/stderr
   logs/visual/<split>/<meeting>.result.json     # exit/signal, elapsed time, counts
   <split>/visual/<meeting>/failures.jsonl       # one structured record per failed turn
+  <split>/visual/<meeting>/exclusions.jsonl     # official corpus-missing turns only
 ```
 
 Each failure record includes the turn ID, speaker/agent, camera, timestamps,
@@ -136,40 +144,38 @@ python scripts/audit_ami_manifests.py \
   --allow-processing-failures
 ```
 
-Do not mix already completed `ami_full_v2` manifests, which lack structured
-failure ledgers, with newly instrumented outputs and claim one homogeneous
-build. Preserve `ami_full_v2` as diagnostic evidence and create a new immutable
-build ID for the instrumented rebuild:
+Do not mix earlier outputs with the selected reference-compatible policy.
+Preserve `ami_full_v3` as diagnostic evidence and create a new immutable build
+ID for the AV-HuBERT-reference rebuild:
 
 ```bash
 python scripts/rebuild_ami_base_manifests.py \
-  --run-dir data/ami_full_v3 \
+  --run-dir data/ami_full_v4 \
   --splits train dev test
 
 python -u scripts/build_ami_visual_manifests.py \
-  --run-dir data/ami_full_v3 \
+  --run-dir data/ami_full_v4 \
   --splits train dev test \
   --jobs 6
 
 python scripts/audit_ami_manifests.py \
-  --run-dir data/ami_full_v3
+  --run-dir data/ami_full_v4
 ```
 
 Start with `--jobs 6`. Increase concurrency only after comparing the structured
 failure-reason distribution and unreadable-clip count on the same meetings.
 Do not silently delete failed turns or accept a passing training run as proof
-that preprocessing coverage is complete. The all-landmarks-missing policy
-(reference full-frame resize fallback versus audio-only/zero-confidence
-retention) must be selected and reported before the final Stage-1 dataset is
-frozen.
+that preprocessing coverage is complete. The production choice is now frozen:
+AV-HuBERT full-frame resize for readable all-landmark-missing clips, and a
+narrow official exclusion ledger only for AMI-documented absent source media.
 
 Generate a read-only aggregate report at any point after one or more meetings
 finish:
 
 ```bash
 python scripts/analyze_ami_visual_failures.py \
-  --run-dir data/ami_full_v3 \
-  --out data/ami_full_v3/visual_failure_report.json
+  --run-dir data/ami_full_v4 \
+  --out data/ami_full_v4/visual_failure_report.json
 ```
 
 The report groups failures by reason, stage and camera; lists the worst
