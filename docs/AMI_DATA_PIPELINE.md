@@ -81,11 +81,27 @@ The extraction confidence is an auditable tracking signal:
 - `0.0`: all landmarks missing; retain the real frames using AV-HuBERT's
   official full-frame 96x96 resize fallback.
 
+Speaker enrollment uses text-bearing 3--8 second IHM windows ranked by RMS.
+Long annotated speech segments are divided into non-overlapping 8-second
+windows before ranking; they are not discarded or replaced by the first 30
+seconds of a meeting. This specifically removes the legacy fallback observed
+for `ES2003a/MEE011` and `ES2005a/MEO020` without changing turn manifests.
+
 AMI officially records that `TS3003d` has no Closeup1, Closeup2, or Closeup3.
 Those source-camera turns are written to a fixed official-exclusion ledger and
 are absent from the AMI-AV-valid subset. They are not replaced with zeros,
 another speaker's Closeup4, or an overview camera. Unknown missing/corrupt
 media remain processing failures. Source: <https://groups.inf.ed.ac.uk/ami/corpus/dataproblems.shtml>.
+
+The official mirror byte sizes were also compared with every local source that
+produced an annotation overrun in `ami_full_v3`; all matched, and end-frame
+decoding succeeded for the two largest cases (`TS3011d.Closeup2` and
+`TS3007a.Closeup1`). Therefore a turn is also excluded from AMI-AV-valid when
+its requested end exceeds the probed official source duration by more than
+0.25 seconds. This deterministic media-coverage rule is evaluated before
+ffmpeg/landmark processing and recorded as `source_duration_out_of_bounds`.
+It must not be used until local/remote byte-size parity has been established; local
+download truncation remains a data error rather than an exclusion.
 
 ## Visual failure diagnosis and logging
 
@@ -166,8 +182,10 @@ Start with `--jobs 6`. Increase concurrency only after comparing the structured
 failure-reason distribution and unreadable-clip count on the same meetings.
 Do not silently delete failed turns or accept a passing training run as proof
 that preprocessing coverage is complete. The production choice is now frozen:
-AV-HuBERT full-frame resize for readable all-landmark-missing clips, and a
-narrow official exclusion ledger only for AMI-documented absent source media.
+AV-HuBERT full-frame resize for readable all-landmark-missing clips, plus a
+versioned source-exclusion ledger for AMI-documented absent media and verified
+official-source duration overruns. Unknown missing, corrupt, or undecodable
+media remain processing failures.
 
 Generate a read-only aggregate report at any point after one or more meetings
 finish:

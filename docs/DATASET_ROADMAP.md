@@ -68,6 +68,10 @@ All Stage-1 through Stage-4 AMI comparisons must keep this preprocessing and
 the fixed AMI-AV-valid test protocol unchanged. AMI officially documents that
 `TS3003d` has no Closeup1, Closeup2, or Closeup3; turns requiring those streams
 are deterministically excluded rather than synthesized, while Closeup4 remains.
+After verifying byte-for-byte size parity with the official mirror, turns whose
+annotation end lies more than 0.25 seconds beyond the real source-video duration
+are likewise excluded from the fixed AV-valid pairing instead of being passed
+to ffmpeg as partial or empty clips.
 Every ablation, including audio-only rows compared with the AV system, uses the
 same fixed AV-valid subset. Full official-split audio-only results may be shown
 separately and must not be compared numerically as if they used the same turns.

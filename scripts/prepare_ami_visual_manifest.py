@@ -60,7 +60,7 @@ _DEFAULT_FACE_PREDICTOR = "checkpoints/shape_predictor_68_face_landmarks.dat"
 _DEFAULT_CNN_DETECTOR = "checkpoints/mmod_human_face_detector.dat"
 _DEFAULT_MEAN_FACE = "av_hubert/avhubert/preparation/data/20words_mean_face.npy"
 _FAILURE_LOG_SCHEMA = "ami_visual_failure_v1"
-_EXCLUSION_LOG_SCHEMA = "ami_visual_official_exclusion_v1"
+_EXCLUSION_LOG_SCHEMA = "ami_visual_source_exclusion_v2"
 
 
 class VideoSliceError(RuntimeError):
@@ -316,6 +316,12 @@ def main() -> int:
     )
     p.add_argument("--min-turn-secs", type=float, default=1.0)
     p.add_argument("--max-turn-secs", type=float, default=12.0)
+    p.add_argument(
+        "--source-duration-tolerance",
+        type=float,
+        default=0.25,
+        help="Maximum allowed turn-end overrun beyond the probed source video.",
+    )
     p.add_argument("--keep-clips", action="store_true")
     p.add_argument(
         "--failure-log",
@@ -327,7 +333,7 @@ def main() -> int:
         "--exclusion-log",
         type=Path,
         default=None,
-        help="Official corpus-missing JSONL ledger. Default: OUT_DIR/exclusions.jsonl.",
+        help="Fixed AV-valid source-exclusion JSONL ledger. Default: OUT_DIR/exclusions.jsonl.",
     )
     p.add_argument("--roi-backend", default="dlib", choices=["dlib", "haar"])
     p.add_argument("--face-predictor", default=_DEFAULT_FACE_PREDICTOR)
@@ -398,14 +404,16 @@ def main() -> int:
     attempts = 0
     eligible_turns = 0
     failures = 0
-    official_exclusions = 0
+    source_exclusions = 0
+    official_missing_exclusions = 0
+    source_duration_exclusions = 0
     skipped_unmapped = 0
     skipped_duration = 0
     skipped_per_speaker_cap = 0
     turns_by_suffix: dict[str, int] = {}
     confidence_values: list[float] = []
     failure_reasons: Counter[str] = Counter()
-    official_exclusion_counts: Counter[str] = Counter()
+    source_exclusion_counts: Counter[str] = Counter()
     avhubert_resize_fallback_turns = 0
     source_probes: dict[Path, dict[str, Any]] = {}
 
@@ -463,6 +471,45 @@ def main() -> int:
         print(
             f"[fail] reason={reason} stage={stage} turn={record['turn_id']} "
             f"agent={suffix} camera={closeup}: {message}",
+            flush=True,
+        )
+
+    def record_source_exclusion(
+        turn: dict[str, Any],
+        *,
+        reason: str,
+        suffix: str,
+        closeup: str,
+        src_video: Path,
+        source_probe: dict[str, Any] | None,
+    ) -> None:
+        nonlocal source_exclusions
+        source_exclusions += 1
+        source_exclusion_counts[f"{reason}|{meeting_id}.{closeup}"] += 1
+        _append_failure(
+            exclusion_log_path,
+            {
+                "schema": _EXCLUSION_LOG_SCHEMA,
+                "dataset_build_id": manifest.get("meta", {}).get("dataset_build_id"),
+                "meeting_id": meeting_id,
+                "turn_id": str(turn.get("turn_id", "<unknown>")),
+                "reason": reason,
+                "start": turn.get("start"),
+                "end": turn.get("end"),
+                "nxt_agent": suffix,
+                "closeup": closeup,
+                "source_video": str(src_video),
+                "source_probe": source_probe,
+                "evidence": (
+                    AMI_DATA_PROBLEMS_URL
+                    if reason == "official_missing_closeup"
+                    else "official AMI mirror byte-size parity plus local ffprobe duration"
+                ),
+            },
+        )
+        print(
+            f"[exclude] reason={reason} turn={turn.get('turn_id')} "
+            f"agent={suffix} camera={closeup}",
             flush=True,
         )
 
@@ -524,30 +571,18 @@ def main() -> int:
         face_path = out_face_dir / f"{meeting_id}_{suffix}_{closeup}.jpg"
         eligible_turns += 1
         if is_official_missing_closeup(meeting_id, closeup):
-            official_exclusions += 1
-            official_exclusion_counts[f"{meeting_id}.{closeup}"] += 1
-            _append_failure(
-                exclusion_log_path,
-                {
-                    "schema": _EXCLUSION_LOG_SCHEMA,
-                    "dataset_build_id": manifest.get("meta", {}).get("dataset_build_id"),
-                    "meeting_id": meeting_id,
-                    "turn_id": turn_id,
-                    "reason": "official_missing_closeup",
-                    "nxt_agent": suffix,
-                    "closeup": closeup,
-                    "source_video": str(src_video),
-                    "source": AMI_DATA_PROBLEMS_URL,
-                },
-            )
-            print(
-                f"[exclude] reason=official_missing_closeup turn={turn_id} "
-                f"agent={suffix} camera={closeup}",
-                flush=True,
+            official_missing_exclusions += 1
+            record_source_exclusion(
+                turn,
+                reason="official_missing_closeup",
+                suffix=suffix,
+                closeup=closeup,
+                src_video=src_video,
+                source_probe=None,
             )
             continue
-        attempts += 1
         if not src_video.exists():
+            attempts += 1
             record_failure(
                 turn,
                 reason="missing_source_video",
@@ -560,6 +595,26 @@ def main() -> int:
                 roi_path=roi_path,
             )
             continue
+        if src_video not in source_probes:
+            source_probes[src_video] = _probe_video(src_video)
+        source_probe = source_probes[src_video]
+        source_duration = source_probe.get("reported_duration_seconds")
+        if (
+            source_probe.get("opened") is True
+            and source_duration is not None
+            and end > float(source_duration) + args.source_duration_tolerance
+        ):
+            source_duration_exclusions += 1
+            record_source_exclusion(
+                turn,
+                reason="source_duration_out_of_bounds",
+                suffix=suffix,
+                closeup=closeup,
+                src_video=src_video,
+                source_probe=source_probe,
+            )
+            continue
+        attempts += 1
         try:
             _ffmpeg_slice_video(src_video, clip_path, start, end)
             extracted, lip_conf = extractor.extract_with_confidence_from_file(str(clip_path))
@@ -658,13 +713,16 @@ def main() -> int:
             "attempts": attempts,
             "eligible_turns": eligible_turns,
             "failures": failures,
-            "official_visual_exclusions": official_exclusions,
-            "official_visual_exclusion_counts": dict(
-                sorted(official_exclusion_counts.items())
+            "visual_source_exclusions": source_exclusions,
+            "official_visual_exclusions": official_missing_exclusions,
+            "source_duration_exclusions": source_duration_exclusions,
+            "visual_source_exclusion_counts": dict(
+                sorted(source_exclusion_counts.items())
             ),
-            "official_visual_exclusion_log": str(exclusion_log_path),
-            "official_visual_exclusion_log_schema": _EXCLUSION_LOG_SCHEMA,
+            "visual_source_exclusion_log": str(exclusion_log_path),
+            "visual_source_exclusion_log_schema": _EXCLUSION_LOG_SCHEMA,
             "official_visual_exclusion_source": AMI_DATA_PROBLEMS_URL,
+            "source_duration_tolerance_seconds": args.source_duration_tolerance,
             "successful_visual_turns": len(turns_out),
             "visual_turn_coverage": len(turns_out) / attempts if attempts else None,
             "eligible_visual_turn_coverage": (
@@ -699,7 +757,7 @@ def main() -> int:
     print(
         f"\n[wrote] {args.out_manifest} "
         f"({len(turns_out)} visual turns, failures={failures}, attempts={attempts}, "
-        f"official_exclusions={official_exclusions}, "
+        f"source_exclusions={source_exclusions}, "
         f"coverage={len(turns_out) / attempts if attempts else 0:.3f}, "
         f"failure_log={failure_log_path})"
     )

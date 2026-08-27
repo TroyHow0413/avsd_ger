@@ -208,6 +208,31 @@ def segment_rms_dbfs(src: Path, start: float, end: float, sr: int = 16000) -> fl
         return -math.inf
 
 
+def _enrollment_windows(seg: dict, min_secs: float, max_secs: float) -> list[dict]:
+    """Return non-overlapping enrollment windows without discarding long turns."""
+    start = float(seg["start"])
+    end = float(seg["end"])
+    duration = end - start
+    if duration < min_secs:
+        return []
+    if duration <= max_secs:
+        return [dict(seg)]
+
+    windows: list[dict] = []
+    cursor = start
+    index = 1
+    while end - cursor >= min_secs:
+        window_end = min(cursor + max_secs, end)
+        item = dict(seg)
+        item["start"] = cursor
+        item["end"] = window_end
+        item["id"] = f"{seg.get('id', 'segment')}.window{index}"
+        windows.append(item)
+        cursor = window_end
+        index += 1
+    return windows
+
+
 def select_enrollment_segments(
     src_wav: Path,
     segs: list[dict],
@@ -219,14 +244,13 @@ def select_enrollment_segments(
     """Pick high-RMS, text-bearing turns for speaker enrollment."""
     candidates: list[dict] = []
     for seg in segs:
-        dur = float(seg["end"]) - float(seg["start"])
-        if dur < min_secs or dur > max_secs:
-            continue
-        if not ref_text_for_segment(words, float(seg["start"]), float(seg["end"])):
-            continue
-        item = dict(seg)
-        item["rms_dbfs"] = segment_rms_dbfs(src_wav, float(seg["start"]), float(seg["end"]))
-        candidates.append(item)
+        for item in _enrollment_windows(seg, min_secs, max_secs):
+            start = float(item["start"])
+            end = float(item["end"])
+            if not ref_text_for_segment(words, start, end):
+                continue
+            item["rms_dbfs"] = segment_rms_dbfs(src_wav, start, end)
+            candidates.append(item)
 
     candidates.sort(key=lambda x: x["rms_dbfs"], reverse=True)
     selected: list[dict] = []

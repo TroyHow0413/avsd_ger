@@ -65,6 +65,8 @@ def _command(args: argparse.Namespace, split: str, manifest: Path) -> list[str]:
         str(args.min_turn_secs),
         "--max-turn-secs",
         str(args.max_turn_secs),
+        "--source-duration-tolerance",
+        str(args.source_duration_tolerance),
         "--roi-backend",
         args.roi_backend,
     ]
@@ -157,6 +159,7 @@ def main() -> int:
     parser.add_argument("--jobs", type=int, default=2)
     parser.add_argument("--min-turn-secs", type=float, default=1.0)
     parser.add_argument("--max-turn-secs", type=float, default=12.0)
+    parser.add_argument("--source-duration-tolerance", type=float, default=0.25)
     parser.add_argument("--max-turns", type=int, default=None, help="Smoke-test cap only.")
     parser.add_argument("--max-turns-per-speaker", type=int, default=None, help="Smoke-test cap only.")
     parser.add_argument("--roi-backend", choices=["dlib", "haar"], default="dlib")
@@ -198,6 +201,7 @@ def main() -> int:
                 ),
                 "all_landmarks_missing": "AV-HuBERT full-frame resize",
                 "official_missing_media": "fixed AMI corpus exclusion ledger",
+                "source_duration_tolerance_seconds": args.source_duration_tolerance,
             },
             dry_run=args.dry_run,
         )

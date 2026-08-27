@@ -252,9 +252,28 @@ class AmiAuditCoverageTest(unittest.TestCase):
                 + "\n",
                 encoding="utf-8",
             )
+            with exclusion_log.open("a", encoding="utf-8") as stream:
+                stream.write(
+                    json.dumps(
+                        {
+                            "schema": "ami_visual_source_exclusion_v2",
+                            "meeting_id": "TS3003d",
+                            "turn_id": "TS3003d.sync.2",
+                            "reason": "source_duration_out_of_bounds",
+                            "closeup": "Closeup4",
+                            "end": 11.0,
+                            "source_probe": {
+                                "opened": True,
+                                "reported_duration_seconds": 10.0,
+                            },
+                        }
+                    )
+                    + "\n"
+                )
             base = {
                 "turns": [
-                    {"turn_id": "TS3003d.sync.1", "start": 0.0, "end": 2.0}
+                    {"turn_id": "TS3003d.sync.1", "start": 0.0, "end": 2.0},
+                    {"turn_id": "TS3003d.sync.2", "start": 9.0, "end": 11.0},
                 ]
             }
             visual = {
@@ -264,10 +283,13 @@ class AmiAuditCoverageTest(unittest.TestCase):
                     "meeting_id": "TS3003d",
                     "dataset_build_id": "test_build",
                     "attempts": 0,
-                    "eligible_turns": 1,
+                    "eligible_turns": 2,
                     "failures": 0,
+                    "visual_source_exclusions": 2,
                     "official_visual_exclusions": 1,
-                    "official_visual_exclusion_log": str(exclusion_log),
+                    "source_duration_exclusions": 1,
+                    "visual_source_exclusion_log": str(exclusion_log),
+                    "source_duration_tolerance_seconds": 0.25,
                     "successful_visual_turns": 0,
                     "speaker_closeup_source": "AMI corpusResources/meetings.xml",
                     "audio_condition": {"description": "individual_headset_microphone"},
@@ -283,9 +305,11 @@ class AmiAuditCoverageTest(unittest.TestCase):
 
             stats, _, _, _ = audit_split(visual_dir, base_path=base_dir)
 
+        self.assertEqual(stats["visual_source_exclusions"], 2)
         self.assertEqual(stats["official_visual_exclusions"], 1)
-        self.assertEqual(stats["official_exclusion_log_records"], 1)
-        self.assertEqual(stats.get("invalid_official_exclusion_records", 0), 0)
+        self.assertEqual(stats["source_duration_exclusions"], 1)
+        self.assertEqual(stats["source_exclusion_log_records"], 2)
+        self.assertEqual(stats.get("invalid_source_exclusion_records", 0), 0)
         self.assertEqual(stats.get("eligible_accounting_mismatch", 0), 0)
         self.assertEqual(stats.get("eligible_turn_gap_absolute", 0), 0)
 

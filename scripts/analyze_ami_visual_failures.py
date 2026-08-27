@@ -46,12 +46,18 @@ def build_report(run_dir: Path, *, top: int = 20) -> dict[str, Any]:
             attempts = int(meta.get("attempts", len(manifest.get("turns", []))))
             failures = int(meta.get("failures", 0))
             official_exclusions = int(meta.get("official_visual_exclusions", 0))
+            source_exclusions = int(
+                meta.get("visual_source_exclusions", official_exclusions)
+            )
+            duration_exclusions = int(meta.get("source_duration_exclusions", 0))
             successes = len(manifest.get("turns", []))
             split_stats[split]["manifests"] += 1
             split_stats[split]["attempts"] += attempts
             split_stats[split]["successes"] += successes
             split_stats[split]["failures"] += failures
+            split_stats[split]["visual_source_exclusions"] += source_exclusions
             split_stats[split]["official_visual_exclusions"] += official_exclusions
+            split_stats[split]["source_duration_exclusions"] += duration_exclusions
             meetings.append(
                 {
                     "split": split,

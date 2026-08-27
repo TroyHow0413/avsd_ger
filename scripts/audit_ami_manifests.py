@@ -91,8 +91,12 @@ def audit_split(
         turns = manifest.get("turns", [])
         attempts = int(meta.get("attempts", len(turns)))
         official_exclusions = int(meta.get("official_visual_exclusions", 0))
+        duration_exclusions = int(meta.get("source_duration_exclusions", 0))
+        source_exclusions = int(
+            meta.get("visual_source_exclusions", official_exclusions)
+        )
         eligible_turns = int(
-            meta.get("eligible_turns", attempts + official_exclusions)
+            meta.get("eligible_turns", attempts + source_exclusions)
         )
         failures = int(meta.get("failures", 0))
         stats["manifests"] += 1
@@ -100,11 +104,16 @@ def audit_split(
         stats["processing_attempts"] += attempts
         stats["processing_failures"] += failures
         stats["eligible_turns"] += eligible_turns
+        stats["visual_source_exclusions"] += source_exclusions
         stats["official_visual_exclusions"] += official_exclusions
+        stats["source_duration_exclusions"] += duration_exclusions
         stats["manifests_with_processing_failures"] += int(failures > 0)
         stats["attempt_accounting_mismatch"] += int(attempts != len(turns) + failures)
         stats["eligible_accounting_mismatch"] += int(
-            eligible_turns != attempts + official_exclusions
+            eligible_turns != attempts + source_exclusions
+        )
+        stats["source_exclusion_subtotal_mismatch"] += int(
+            source_exclusions != official_exclusions + duration_exclusions
         )
         if meta.get("successful_visual_turns") is not None:
             stats["success_accounting_mismatch"] += int(
@@ -148,29 +157,49 @@ def audit_split(
                         not record.get("turn_id")
                     )
 
-        exclusion_log = _artifact_path(meta.get("official_visual_exclusion_log"))
-        if official_exclusions > 0 and exclusion_log is None:
-            stats["missing_official_exclusion_logs"] += 1
+        exclusion_log = _artifact_path(
+            meta.get("visual_source_exclusion_log")
+            or meta.get("official_visual_exclusion_log")
+        )
+        if source_exclusions > 0 and exclusion_log is None:
+            stats["missing_source_exclusion_logs"] += 1
         elif exclusion_log is not None:
             if not exclusion_log.is_file():
-                stats["missing_official_exclusion_log_files"] += 1
+                stats["missing_source_exclusion_log_files"] += 1
             else:
                 records, unreadable = _read_failure_log(exclusion_log)
-                stats["official_exclusion_log_records"] += len(records)
-                stats["unreadable_official_exclusion_log_records"] += unreadable
-                stats["official_exclusion_log_count_mismatch"] += int(
-                    len(records) != official_exclusions
+                stats["source_exclusion_log_records"] += len(records)
+                stats["unreadable_source_exclusion_log_records"] += unreadable
+                stats["source_exclusion_log_count_mismatch"] += int(
+                    len(records) != source_exclusions
                 )
                 for record in records:
-                    valid = (
-                        record.get("reason") == "official_missing_closeup"
+                    reason = record.get("reason")
+                    official_valid = (
+                        reason == "official_missing_closeup"
                         and bool(record.get("turn_id"))
                         and is_official_missing_closeup(
                             str(record.get("meeting_id", "")),
                             str(record.get("closeup", "")),
                         )
                     )
-                    stats["invalid_official_exclusion_records"] += int(not valid)
+                    source_probe = record.get("source_probe") or {}
+                    source_duration = source_probe.get("reported_duration_seconds")
+                    end = record.get("end")
+                    tolerance = float(
+                        meta.get("source_duration_tolerance_seconds", 0.25)
+                    )
+                    duration_valid = (
+                        reason == "source_duration_out_of_bounds"
+                        and bool(record.get("turn_id"))
+                        and source_probe.get("opened") is True
+                        and source_duration is not None
+                        and end is not None
+                        and float(end) > float(source_duration) + tolerance
+                    )
+                    stats["invalid_source_exclusion_records"] += int(
+                        not (official_valid or duration_valid)
+                    )
 
         for speaker in manifest.get("speakers", []):
             enrollment_mode = speaker.get("meta", {}).get("enrollment_mode")
@@ -288,6 +317,7 @@ def main() -> int:
             "non_quality_enrollment_entries",
             "attempt_accounting_mismatch",
             "eligible_accounting_mismatch",
+            "source_exclusion_subtotal_mismatch",
             "success_accounting_mismatch",
             "manifests_with_eligible_turn_mismatch",
             "eligible_turn_gap_absolute",
@@ -297,11 +327,11 @@ def main() -> int:
             "failure_log_count_mismatch",
             "unreadable_failure_log_records",
             "failure_records_missing_turn_id",
-            "missing_official_exclusion_logs",
-            "missing_official_exclusion_log_files",
-            "official_exclusion_log_count_mismatch",
-            "unreadable_official_exclusion_log_records",
-            "invalid_official_exclusion_records",
+            "missing_source_exclusion_logs",
+            "missing_source_exclusion_log_files",
+            "source_exclusion_log_count_mismatch",
+            "unreadable_source_exclusion_log_records",
+            "invalid_source_exclusion_records",
             "short_roi_turns",
             "long_roi_turns",
         ]
