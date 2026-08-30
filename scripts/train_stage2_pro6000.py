@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import gc
 import hashlib
+import inspect
 import json
 from pathlib import Path
 import subprocess
@@ -43,11 +44,11 @@ CACHE_VERSION = 3
 QUALITY_SCHEMA_VERSION = 2
 
 _FEATURE_SOURCE_FILES = (
-    "scripts/train_stage2.py",
-    "scripts/train_stage2_pro6000.py",
-    "avsd_ger/training/quality.py",
     "avsd_ger/backbones/asr_whisper.py",
     "avsd_ger/backbones/vsr_avhubert.py",
+    "avsd_ger/c1_identity/voice_encoder.py",
+    "avsd_ger/c1_identity/face_encoder.py",
+    "avsd_ger/training/quality.py",
 )
 
 
@@ -110,6 +111,19 @@ def _feature_source_fingerprint() -> str:
         path = _ROOT / relative
         digest.update(relative.encode("utf-8"))
         digest.update(_sha256_file(path).encode("ascii") if path.is_file() else b"missing")
+    # Hash only the trainer functions that construct frozen records. Training,
+    # CTC, GER and checkpoint-loop edits must not invalidate ASR/VSR features.
+    for function in (
+        base._load_record,
+        pool_encoder_to_tokens,
+        resample_quality_track,
+        token_snr_scores,
+        _extract_cached_record,
+        _validate_cached_record,
+    ):
+        digest.update(function.__module__.encode("utf-8"))
+        digest.update(function.__qualname__.encode("utf-8"))
+        digest.update(inspect.getsource(function).encode("utf-8"))
     return digest.hexdigest()
 
 
