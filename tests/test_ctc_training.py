@@ -6,6 +6,17 @@ from avsd_ger.training.ctc_loss import CTCHead
 
 
 class CTCTrainingTest(unittest.TestCase):
+    def test_default_expansion_accepts_more_than_sixteen_steps_per_token(self):
+        head = CTCHead(d_align=8)
+        features = torch.randn(1, 8, requires_grad=True)
+
+        report = head(features, targets=["abcdefghijklmnopqrst"])
+
+        self.assertEqual(report.expansion, 20)
+        self.assertTrue(torch.isfinite(report.loss))
+        report.loss.backward()
+        self.assertIsNotNone(features.grad)
+
     def test_minimum_steps_counts_adjacent_repeats(self):
         head = CTCHead(d_align=8)
         ids = head.vocab.encode("book")

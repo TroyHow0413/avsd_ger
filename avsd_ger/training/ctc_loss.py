@@ -89,7 +89,7 @@ class CTCHead(nn.Module):
         d_align: int,
         vocab_size: int | None = None,
         min_expansion: int = 8,
-        max_expansion: int = 16,
+        max_expansion: int = 32,
     ):
         super().__init__()
         self.vocab = CharVocab()

@@ -128,6 +128,8 @@ alignment:
   align_granularity: token_level # pool ASR encoder frames into word tokens
   low_conf_handling: soft_gating # attention * min(SNR, lip_conf)
   snr_soft_scale_db: 4.0
+  ctc_min_expansion: 8
+  ctc_max_expansion: 32
   dropout: 0.1
 
 ger:

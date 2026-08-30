@@ -154,7 +154,11 @@ def train(
         else None
     )
 
-    ctc = CTCHead(d_align=cfg["alignment"]["d_model"]).to(device)
+    ctc = CTCHead(
+        d_align=cfg["alignment"]["d_model"],
+        min_expansion=int(cfg["alignment"].get("ctc_min_expansion", 8)),
+        max_expansion=int(cfg["alignment"].get("ctc_max_expansion", 32)),
+    ).to(device)
     ger_ce = GERCrossEntropy(ger) if ger is not None else None
     info = BidirectionalInfoNCE(cfg["training"]["infonce"]).to(device)
     if aligner_checkpoint:

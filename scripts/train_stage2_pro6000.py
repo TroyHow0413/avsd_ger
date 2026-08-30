@@ -559,7 +559,11 @@ def train_cached(
         d_asr=WhisperASR.ENCODER_DIM,
         d_vsr=AVHubertVSR.FEATURE_DIM,
     ).to(device)
-    ctc = CTCHead(d_align=cfg["alignment"]["d_model"]).to(device)
+    ctc = CTCHead(
+        d_align=cfg["alignment"]["d_model"],
+        min_expansion=int(cfg["alignment"].get("ctc_min_expansion", 8)),
+        max_expansion=int(cfg["alignment"].get("ctc_max_expansion", 32)),
+    ).to(device)
     needs_ger = warmup in {"joint", "ger_lora", "ger_qformer"}
     ger = (
         GERHead(cfg["ger"], z_dim=cfg["identity"]["fused_dim"], d_align=cfg["alignment"]["d_model"], stub=stub, device=device)
