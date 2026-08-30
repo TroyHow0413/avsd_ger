@@ -43,13 +43,15 @@ class InfoNCEReport:
     loss_va: torch.Tensor
     acc_av: float     # top-1 retrieval accuracy A→V
     acc_va: float     # top-1 retrieval accuracy V→A
+    mean_positives: float
 
 
 def info_nce(
     query: torch.Tensor,
     key: torch.Tensor,
     temperature: float = 0.07,
-) -> tuple[torch.Tensor, float]:
+    labels: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, float, float]:
     """One-direction InfoNCE.
 
     Args:
@@ -62,11 +64,33 @@ def info_nce(
     """
     # Since both are L2-normalised, query @ key.T is the cosine-sim matrix.
     logits = query @ key.t() / temperature
-    targets = torch.arange(query.size(0), device=query.device)
-    loss = F.cross_entropy(logits, targets)
+    if labels is None:
+        targets = torch.arange(query.size(0), device=query.device)
+        loss = F.cross_entropy(logits, targets)
+        with torch.no_grad():
+            acc = float((logits.argmax(dim=-1) == targets).float().mean().item())
+        return loss, acc, 1.0
+
+    labels = labels.to(query.device).reshape(-1)
+    if labels.numel() != query.size(0):
+        raise ValueError(
+            f"labels must contain {query.size(0)} entries, got {labels.numel()}"
+        )
+    positive = labels.view(-1, 1).eq(labels.view(1, -1))
+    if not bool(positive.any(dim=-1).all().item()):
+        raise ValueError("every contrastive anchor must have at least one positive")
+    positive_logits = logits.masked_fill(~positive, float("-inf"))
+    loss = -(
+        torch.logsumexp(positive_logits, dim=-1)
+        - torch.logsumexp(logits, dim=-1)
+    ).mean()
     with torch.no_grad():
-        acc = float((logits.argmax(dim=-1) == targets).float().mean().item())
-    return loss, acc
+        predicted = logits.argmax(dim=-1)
+        acc = float(
+            labels[predicted].eq(labels).float().mean().item()
+        )
+        mean_positives = float(positive.sum(dim=-1).float().mean().item())
+    return loss, acc, mean_positives
 
 
 class BidirectionalInfoNCE(nn.Module):
@@ -84,16 +108,25 @@ class BidirectionalInfoNCE(nn.Module):
         self.temperature = float(cfg.get("temperature", 0.07))
         self.bidirectional = bool(cfg.get("bidirectional", True))
 
-    def forward(self, a: torch.Tensor, v: torch.Tensor) -> InfoNCEReport:
+    def forward(
+        self,
+        a: torch.Tensor,
+        v: torch.Tensor,
+        speaker_labels: torch.Tensor | None = None,
+    ) -> InfoNCEReport:
         if a.ndim != 2 or v.ndim != 2 or a.shape != v.shape:
             raise ValueError(f"a, v must be [N,D] and equal shape, got {a.shape} vs {v.shape}")
 
         a = F.normalize(a, dim=-1)
         v = F.normalize(v, dim=-1)
 
-        loss_av, acc_av = info_nce(a, v, self.temperature)
+        loss_av, acc_av, mean_positives = info_nce(
+            a, v, self.temperature, speaker_labels
+        )
         if self.bidirectional:
-            loss_va, acc_va = info_nce(v, a, self.temperature)
+            loss_va, acc_va, _ = info_nce(
+                v, a, self.temperature, speaker_labels
+            )
             total = loss_av + loss_va
         else:
             # Diagnostic-only; spec mandates bidirectional for production.
@@ -104,4 +137,5 @@ class BidirectionalInfoNCE(nn.Module):
         return InfoNCEReport(
             loss=total, loss_av=loss_av, loss_va=loss_va,
             acc_av=acc_av, acc_va=acc_va,
+            mean_positives=mean_positives,
         )

@@ -1,0 +1,17 @@
+defaults:
+  - config_real_en
+
+ger:
+  model_family: qwen2.5-7b-instruct
+  model_id: Qwen/Qwen2.5-7B-Instruct
+  model_path: checkpoints/Qwen2.5-7B-Instruct
+  allow_download: false
+  dtype: bf16
+  bridge:
+    n_queries: 16
+    n_heads: 8
+  lora:
+    r: 16
+    alpha: 32
+    dropout: 0.05
+    target_modules: auto

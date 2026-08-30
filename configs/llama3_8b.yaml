@@ -1,0 +1,10 @@
+# Main English GER foundation model. Shared settings inherit the common base.
+defaults:
+  - default
+
+ger:
+  model_family: llama-3-8b-instruct
+  model_id: meta-llama/Meta-Llama-3-8B-Instruct
+  model_path: checkpoints/Meta-Llama-3-8B-Instruct
+  allow_download: false
+  dtype: bf16

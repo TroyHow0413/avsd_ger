@@ -35,9 +35,11 @@ if str(_ROOT) not in sys.path:
 from avsd_ger.backbones import AVHubertVSR, WhisperASR
 from avsd_ger.c1_identity import FaceEncoder, IdentityPool, VoiceEncoder
 from avsd_ger.c2_alignment import GERHead, IDConditionedAligner
+from avsd_ger.c2_alignment.model_backend import supported_model_families
 from avsd_ger.training import BidirectionalInfoNCE
 from avsd_ger.training.ctc_loss import CTCHead
 from avsd_ger.training.ger_loss import GERCrossEntropy
+from avsd_ger.training.quality import resample_quality_track, token_snr_scores
 from avsd_ger.utils import load_config, pool_encoder_to_tokens, resolve_device, seed_all
 from avsd_ger.wandb_logger import WandbLogger, add_wandb_args
 
@@ -74,6 +76,8 @@ def _stub_batch(cfg, device) -> dict[str, torch.Tensor]:
         "target":       "the quick brown fox jumps over the lazy dog",
         "voice_pair":   torch.randn(cfg["identity"]["voice_dim"]),
         "face_pair":    torch.randn(cfg["identity"]["face_dim"]),
+        "lip_conf":     torch.ones(75),
+        "lip_conf_source": "stub_all_one",
     }
 
 
@@ -267,10 +271,30 @@ def train(
             if warmup == "ger_lora":
                 f_align = torch.empty(0, cfg["alignment"]["d_model"], device=device)
             else:
+                lip_conf_v = resample_quality_track(
+                    batch.get("lip_conf"), int(vsr_out["vsr_features"].shape[0])
+                ).to(device)
+                snr_per_tok = token_snr_scores(
+                    batch["audio"],
+                    asr_out.words,
+                    int(asr_tok.shape[0]),
+                    tau_snr_db=float(cfg["identity"]["dual_gate"]["tau_a_snr_db"]),
+                    soft_scale_db=float(
+                        cfg["alignment"].get("snr_soft_scale_db", 4.0)
+                    ),
+                ).to(device)
+                speaker_mask_v = torch.ones(
+                    int(vsr_out["vsr_features"].shape[0]),
+                    dtype=torch.bool,
+                    device=device,
+                )
                 f_align = aligner(
                     asr_tok_feats=asr_tok,
                     vsr_feats=vsr_out["vsr_features"].to(device),
                     e_id=z_id,
+                    speaker_mask_v=speaker_mask_v,
+                    snr_per_tok=snr_per_tok,
+                    lip_conf_v=lip_conf_v,
                 )
 
             # ---- losses --------------------------------------------------
@@ -326,7 +350,9 @@ def train(
             }
             finite_parts = {name: bool(torch.isfinite(val.detach()).item()) for name, val in loss_parts.items()}
             target_chars = len(ctc.vocab.encode(batch["target"]))
-            ctc_input_len = int(ctc_report.log_probs.shape[1]) if ctc_report is not None else 0
+            ctc_input_len = int(ctc_report.input_lengths.max()) if ctc_report is not None else 0
+            ctc_minimum = int(ctc_report.minimum_steps.max()) if ctc_report is not None else 0
+            ctc_expansion = int(ctc_report.expansion) if ctc_report is not None else 0
             should_debug = debug_loss_every > 0 and (step == 0 or (step + 1) % debug_loss_every == 0)
             if should_debug:
                 loss_text = " ".join(
@@ -336,6 +362,9 @@ def train(
                 print(
                     f"[stage2-debug] step={step + 1} epoch={epoch + 1} "
                     f"ctc_input_len={ctc_input_len} ctc_target_chars={target_chars} "
+                    f"ctc_minimum_steps={ctc_minimum} ctc_expansion={ctc_expansion} "
+                    f"ctc_zero={ctc_report.zero_loss_count if ctc_report is not None else 0} "
+                    f"ctc_nonfinite={ctc_report.nonfinite_count if ctc_report is not None else 0} "
                     f"ger_target_tokens={ger_report.n_target_tokens if ger_report is not None else 0} "
                     f"{loss_text}"
                 )
@@ -421,11 +450,18 @@ def _load_record(rec: dict[str, Any]) -> dict[str, Any]:
         raise ValueError(f"Missing target/ref_text for record {rec.get('utt_id', '<unknown>')}")
 
     out: dict[str, Any] = {
+        "utt_id": str(rec.get("utt_id") or rec.get("turn_id") or "unknown"),
+        "start": float(rec.get("start", 0.0)),
+        "end": float(rec.get("end", rec.get("duration", 0.0))),
         "audio": audio,
         "video": video,
         "face": face,
         "target": target,
         "speaker_id": rec.get("speaker_id") or rec.get("ref_speaker"),
+        "participant_id": rec.get("participant_id"),
+        "dataset_build_id": rec.get("dataset_build_id", "unknown"),
+        "lip_conf": torch.as_tensor(rec.get("lip_conf") or [], dtype=torch.float32),
+        "lip_conf_source": str(rec.get("lip_conf_source", "missing")),
         "voice_pair": torch.zeros(192),
         "face_pair": torch.zeros(512),
     }
@@ -571,7 +607,7 @@ def main() -> None:
     )
     ap.add_argument(
         "--model-family",
-        choices=["qwen2.5-3b-instruct", "llama-3.2-3b-instruct"],
+        choices=supported_model_families(),
         default=None,
     )
     ap.add_argument(

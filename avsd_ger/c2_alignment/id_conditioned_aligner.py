@@ -70,24 +70,44 @@ class SoftGatedCrossAttention(nn.Module):
     ) -> torch.Tensor:
         N, D = q.shape
         M = kv.shape[0]
+        if M == 0:
+            return torch.zeros_like(q)
         qh = self.q_proj(q).view(N, self.h, self.d_h).transpose(0, 1)  # [h,N,d]
         kh = self.k_proj(kv).view(M, self.h, self.d_h).transpose(0, 1)  # [h,M,d]
         vh = self.v_proj(kv).view(M, self.h, self.d_h).transpose(0, 1)
 
         logits = torch.matmul(qh, kh.transpose(-1, -2)) / math.sqrt(self.d_h)  # [h,N,M]
 
+        valid_keys = torch.ones(M, dtype=torch.bool, device=q.device)
         if key_padding_mask is not None:
-            logits = logits.masked_fill(key_padding_mask.view(1, 1, M), float("-inf"))
+            valid_keys = ~key_padding_mask.to(q.device).bool()
+            if not bool(valid_keys.any().item()):
+                return torch.zeros_like(q)
+            logits = logits.masked_fill(
+                (~valid_keys).view(1, 1, M), float("-inf")
+            )
 
+        residual_strength = torch.ones(N, device=q.device, dtype=q.dtype)
         if soft_gate is not None:
             # additive log-bias: attn_weight *= gate  =>  logits += log(gate + eps)
-            logits = logits + torch.log(soft_gate.clamp_min(1e-4)).unsqueeze(0)
+            gate = soft_gate.to(device=q.device, dtype=q.dtype).clamp(0.0, 1.0)
+            if gate.shape != (N, M):
+                raise ValueError(
+                    f"soft_gate must be [{N},{M}], received {tuple(gate.shape)}"
+                )
+            gate = gate * valid_keys.to(gate.dtype).view(1, M)
+            residual_strength = gate.max(dim=-1).values
+            logits = logits + torch.log(gate.clamp_min(1e-6)).unsqueeze(0)
 
         attn = torch.softmax(logits, dim=-1)
         attn = self.drop(attn)
         out = torch.matmul(attn, vh)                                      # [h,N,d]
         out = out.transpose(0, 1).contiguous().view(N, D)
-        return self.out(out)
+        # A logit bias alone cannot suppress a constant all-zero gate because
+        # softmax cancels constants. Scale the residual itself so unavailable
+        # visual evidence contributes exactly zero while the audio query
+        # residual remains intact.
+        return self.out(out) * residual_strength.unsqueeze(-1)
 
 
 class IDConditionedAligner(nn.Module):

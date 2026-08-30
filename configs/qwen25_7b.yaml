@@ -1,0 +1,10 @@
+# Multilingual GER comparison reserved for best-recipe/MISP evaluation.
+defaults:
+  - default
+
+ger:
+  model_family: qwen2.5-7b-instruct
+  model_id: Qwen/Qwen2.5-7B-Instruct
+  model_path: checkpoints/Qwen2.5-7B-Instruct
+  allow_download: false
+  dtype: bf16

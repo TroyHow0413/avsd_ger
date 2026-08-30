@@ -41,7 +41,30 @@ MODEL_PROFILES: dict[str, ModelProfile] = {
             "gate_proj", "up_proj", "down_proj",
         ),
     ),
+    "llama-3-8b-instruct": ModelProfile(
+        family="llama-3-8b-instruct",
+        hidden_size=4096,
+        hf_model_types=("llama",),
+        lora_target_modules=(
+            "q_proj", "k_proj", "v_proj", "o_proj",
+            "gate_proj", "up_proj", "down_proj",
+        ),
+    ),
+    "qwen2.5-7b-instruct": ModelProfile(
+        family="qwen2.5-7b-instruct",
+        hidden_size=3584,
+        hf_model_types=("qwen2",),
+        lora_target_modules=(
+            "q_proj", "k_proj", "v_proj", "o_proj",
+            "gate_proj", "up_proj", "down_proj",
+        ),
+    ),
 }
+
+
+def supported_model_families() -> tuple[str, ...]:
+    """Canonical GER family keys accepted by configs and CLIs."""
+    return tuple(sorted(MODEL_PROFILES))
 
 
 def get_model_profile(cfg: dict[str, Any]) -> ModelProfile:

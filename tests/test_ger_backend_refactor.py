@@ -47,6 +47,21 @@ class GERBackendRefactorTest(unittest.TestCase):
         self.assertIn("gate_proj", get_model_profile(qwen.cfg).lora_target_modules)
         self.assertIn("down_proj", get_model_profile(llama.cfg).lora_target_modules)
 
+        llama8 = GERHead(
+            ger_config("llama-3-8b-instruct"),
+            z_dim=8,
+            d_align=16,
+            stub=True,
+        )
+        qwen7 = GERHead(
+            ger_config("qwen2.5-7b-instruct"),
+            z_dim=8,
+            d_align=16,
+            stub=True,
+        )
+        self.assertEqual(llama8.id_proj.out_features, 4096)
+        self.assertEqual(qwen7.id_proj.out_features, 3584)
+
     def test_prompt_uses_tokenizer_chat_template_and_preserves_placeholder(self):
         head = GERHead(ger_config(), z_dim=8, d_align=16, stub=True)
 
@@ -180,6 +195,15 @@ class GERBackendRefactorTest(unittest.TestCase):
         self.assertFalse(llama["allow_download"])
         self.assertEqual(qwen["lora"]["target_modules"], "auto")
         self.assertEqual(llama["lora"]["target_modules"], "auto")
+
+        llama8 = load_config("configs/llama3_8b.yaml")["ger"]
+        qwen7 = load_config("configs/qwen25_7b.yaml")["ger"]
+        self.assertEqual(llama8["model_family"], "llama-3-8b-instruct")
+        self.assertEqual(qwen7["model_family"], "qwen2.5-7b-instruct")
+        self.assertEqual(llama8["dtype"], "bf16")
+        self.assertEqual(qwen7["dtype"], "bf16")
+        self.assertFalse(llama8["allow_download"])
+        self.assertFalse(qwen7["allow_download"])
 
 
 if __name__ == "__main__":

@@ -73,6 +73,12 @@ def iter_records(
             for spk in manifest.get("speakers", [])
             if spk.get("speaker_id")
         }
+        manifest_meta = manifest.get("meta", {})
+        dataset_build_id = str(
+            manifest_meta.get("dataset_build_id")
+            or manifest_meta.get("version")
+            or "unknown"
+        )
         for i, turn in enumerate(manifest.get("turns", [])):
             speaker_id = str(turn.get("ref_speaker", ""))
             spk = speakers.get(speaker_id, {})
@@ -102,6 +108,7 @@ def iter_records(
             row = {
                 "utt_id": str(turn.get("turn_id", f"{manifest_path.stem}.t{i:04d}")),
                 "meeting_id": str(manifest.get("meta", {}).get("meeting_id", manifest_path.stem)),
+                "dataset_build_id": dataset_build_id,
                 "speaker_id": speaker_id,
                 "speaker_suffix": turn.get("nxt_agent") or spk.get("nxt_agent") or _speaker_suffix(speaker_id),
                 "participant_id": turn.get("participant_id") or spk.get("participant_id"),

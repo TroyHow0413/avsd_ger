@@ -22,6 +22,62 @@ the named modules are combined in the same system.
   raw VoxCeleb2 samples to task-specific training. State this distinction in
   all experiment descriptions.
 
+## GER foundation-model policy
+
+The primary English GER foundation model is
+`checkpoints/Meta-Llama-3-8B-Instruct`. The project will run the 8B system
+first; a 3B system will be trained later as a controlled model-scale and
+efficiency baseline. The 3B result is not a prerequisite for beginning the 8B
+AMI experiment. A 27B-class model is outside the core experiment matrix and
+may be evaluated only after the best 8B recipe is frozen and the required
+compute remains available.
+
+This ordering is deliberate. Published GER systems relevant to this project
+mostly use 7B-13B foundation models, so an 8B main system is closer in scale to
+AVGER, Whispering-LLaMA, MMGER, and related GER baselines than the current 3B
+configuration. Model scale alone does not guarantee lower WER: all systems
+must still be evaluated for over-correction, hallucination, and preservation
+of names, acronyms, disfluencies, and speaker-attributed content.
+
+Literature scale anchors used for this decision are:
+
+| Related system | Reported foundation model | Relevance to this roadmap |
+| --- | --- | --- |
+| [AVGER](https://arxiv.org/pdf/2501.04038) | LLaMA-7B with rank-32 LoRA | Closest audio-visual GER comparison |
+| [Whispering-LLaMA](https://arxiv.org/pdf/2310.06434) | LLaMA/Alpaca-7B | Cross-modal audio-text GER comparison |
+| [Code-switching GER](https://arxiv.org/pdf/2310.13013) | Chinese-LLaMA2-7B with LoRA | Low-resource GER and later bilingual context |
+| [HyPoradise](https://arxiv.org/pdf/2309.15701) | LLaMA-13B selected for H2T-LoRA | Textual N-best GER baseline and model-scale evidence |
+| [MMGER](https://arxiv.org/pdf/2405.03152) | Frozen Qwen-7B | Multimodal GER comparison |
+| [RobustGER](https://arxiv.org/pdf/2401.10446) | LLaMA/LLaMA2/Falcon 7B and LLaMA2-13B | Reports stronger results from 13B than the tested 7B models, while still requiring task-specific evaluation |
+
+The controlled comparison is:
+
+| Role | Foundation model | When it is run | Required interpretation |
+| --- | --- | --- | --- |
+| Main English system | Meta-Llama-3-8B-Instruct | First, after all v4 training-repair gates pass | Primary AMI and later LRS2-to-AMI GER result |
+| Scale/efficiency baseline | A supported 3B instruct model | After the 8B recipe and hyperparameters are frozen | Measures quality, memory, throughput, and convergence differences; it must not be used to retune the 8B result on test |
+| Optional upper bound | One 27B-class instruct model | Only if time and compute remain | Run only the best recipe; it is not required for the core thesis |
+
+For the 8B-versus-3B comparison, keep the dataset build, train/dev/test splits,
+prompt, N-best hypotheses, C1/C2/C3 modules, decoding policy, evaluation
+normalization, and random seeds fixed. Record trainable parameter count, peak
+GPU memory, wall-clock time, WER/SA-WER, GER relative WER reduction, and the
+over-correction rate. If the models come from different families, describe the
+result as a **foundation-model comparison**, not a pure scaling law.
+
+Stage 1 identity training and the align/CTC-only warm-up do not require the LLM
+to be loaded. The 8B model is introduced only in GER-enabled Stage 2/joint
+training and inference. This prevents the main foundation model decision from
+unnecessarily increasing the cost of C1 and C2-only runs.
+
+The current code does not yet support this decision by configuration alone.
+`avsd_ger/c2_alignment/model_backend.py` only registers
+`qwen2.5-3b-instruct` and `llama-3.2-3b-instruct`, whereas the local Llama-3
+8B checkpoint reports `model_type=llama` and `hidden_size=4096`. The required
+backend, configuration, cache-isolation, memory-smoke, and test changes are
+specified in `docs/AMI_FULL_V4_TRAINING_REPAIR.md`. Do not start a full 8B run
+until those checks and the existing AMI v4 P0 repairs pass.
+
 ## Stage 1: Complete AMI baseline
 
 **Goal:** Establish the trustworthy English meeting baseline and the fixed
@@ -31,6 +87,12 @@ comparison point for all later stages.
 
 **Implementation recipe:** See `docs/AMI_DATA_PIPELINE.md`. Rebuilt manifests
 must pass `scripts/audit_ami_manifests.py` before training starts.
+
+The completed `ami_full_v4` data audit does not by itself certify the legacy
+trainers. The evidence, repair contract, expected positive/adverse outcomes,
+and exact differences from earlier runs are frozen in
+`docs/AMI_FULL_V4_TRAINING_REPAIR.md`. Full v4 training must not begin until
+that document's P0 gates pass a new real-backbone smoke test.
 
 ### Official AV-HuBERT preprocessing versus the AMI adaptation
 

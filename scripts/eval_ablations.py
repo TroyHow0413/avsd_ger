@@ -42,6 +42,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from avsd_ger.pipeline import AVSDGERPipeline            # noqa: E402
+from avsd_ger.c2_alignment.model_backend import supported_model_families  # noqa: E402
 from avsd_ger.c3_statistics import c3_cluster_bootstrap_spec_check  # noqa: E402
 from avsd_ger.eval.session import SessionRunner, SessionTurn  # noqa: E402
 from avsd_ger.eval.metrics import evaluate_session, MetricsReport  # noqa: E402
@@ -738,7 +739,7 @@ def main() -> int:
     )
     p.add_argument(
         "--model-family",
-        choices=["qwen2.5-3b-instruct", "llama-3.2-3b-instruct"],
+        choices=supported_model_families(),
         default=None,
     )
     p.add_argument(

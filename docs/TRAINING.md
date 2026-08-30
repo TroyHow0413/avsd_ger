@@ -8,7 +8,10 @@ This project currently trains through concrete scripts, not Phase A-G labels.
 | Stage-2 multi-task training | `scripts/train_stage2.py` | `identity_pool_stage2.pt`, `aligner_stage2.pt`, `ctc_head_stage2.pt`, `ger/` |
 | Optional wrapper | `one_go/train.py` | Calls Stage-1 and/or Stage-2 with a generated config under `one_go/runs/` |
 
-`configs/default.yaml` defaults to `stub_backbones: true`, so both trainers can run a wiring rehearsal without downloading the real backbones. For real training, set `stub_backbones: false`, use `device: cuda`, and make sure the backbone weights in the README are available.
+`configs/default.yaml` is a real-backbone configuration (`stub_backbones:
+false`). Synthetic rehearsal is exercised by the test suite. For AMI full v4,
+use the versioned real configuration and commands in
+`docs/AMI_FULL_V4_TRAINING_REPAIR.md`.
 
 ---
 
@@ -22,6 +25,7 @@ Basic run:
 python scripts/train_identity.py \
     --config configs/default.yaml \
     --manifest data/your_real_train_manifest.jsonl \
+    --dev-manifest data/your_real_dev_manifest.jsonl \
     --out checkpoints/stage1/ \
     --epochs 5 \
     --wandb-project avsd-ger \
@@ -43,6 +47,7 @@ Important arguments:
 |---|---|
 | `--config` | YAML config path. Defaults to `configs/default.yaml`. |
 | `--manifest` | JSONL training manifest, one utterance per line. |
+| `--dev-manifest` | Independent validation JSONL used for best-checkpoint selection; required in real mode. |
 | `--manifest-dir` | Directory of AMI visual per-meeting manifests. The script resolves the sibling `<dir>.jsonl`. |
 | `--out` | Output directory. Defaults to `checkpoints/stage1/`. |
 | `--epochs` | Overrides `training.stage1.epochs`. |
@@ -56,14 +61,16 @@ Expected JSONL fields:
 | `wav_path` | Real mode: yes | Audio path. Relative paths are resolved from the repo root. |
 | `face_path` | Real mode: yes | Face crop or enrollment image path. |
 | `lip_conf` | Recommended | Per-frame lip confidence for the dual gate. |
-| `speaker_id` / `ref_speaker` | Optional | Used for bookkeeping; cold-start pseudo-labels still drive Stage-1 training. |
+| `participant_id` / `speaker_id` | AMI: required | Drives supervised multi-positive identity training; cold start is a separate explicit mode. |
 
 If `--manifest` points to a missing file, the script falls back to 8 synthetic records. That is useful for stub checks, but it is not real training.
 
-Output:
+Outputs include resumable dev-selected state:
 
 ```text
 checkpoints/stage1/identity_pool_stage1.pt
+checkpoints/stage1/best.pt
+checkpoints/stage1/last.pt
 ```
 
 ---

@@ -127,6 +127,7 @@ alignment:
   id_injection: concat_linear   # spec choice -- NOT FiLM (see Appendix Table 1)
   align_granularity: token_level # pool ASR encoder frames into word tokens
   low_conf_handling: soft_gating # attention * min(SNR, lip_conf)
+  snr_soft_scale_db: 4.0
   dropout: 0.1
 
 ger:
@@ -197,6 +198,9 @@ training:
     epochs: 20
     lr: 0.001
     warmup_steps: 500
+    identity_supervision: auto
+    speakers_per_batch: 16
+    turns_per_speaker: 4
     freeze:
       - asr_encoder
       - vsr_encoder

@@ -112,6 +112,9 @@ training:
     epochs: 20
     lr: 0.001
     warmup_steps: 500
+    identity_supervision: participant
+    speakers_per_batch: 16
+    turns_per_speaker: 4
     freeze:
     - asr_encoder
     - vsr_encoder
