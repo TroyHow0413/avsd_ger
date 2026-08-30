@@ -66,6 +66,9 @@ ger:
   max_new_tokens: 64
   speaker_special_token: '[Speaker: ID_i]'
   dtype: auto
+  bridge:
+    n_queries: 16
+    n_heads: 8
   lora:
     r: 16
     alpha: 32

@@ -45,6 +45,18 @@ class ConfigLoadingTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "cycle detected"):
                 load_config(root / "a.yaml")
 
+    def test_real_ger_configs_keep_explicit_sixteen_soft_tokens(self):
+        expected = {
+            "one_go/runs/config_real_en_llama3_8b.yaml": "llama-3-8b-instruct",
+            "one_go/runs/config_real_en_qwen25_7b.yaml": "qwen2.5-7b-instruct",
+        }
+        for path, family in expected.items():
+            with self.subTest(path=path):
+                cfg = load_config(path)
+                self.assertEqual(cfg["ger"]["model_family"], family)
+                self.assertEqual(cfg["ger"]["bridge"]["n_queries"], 16)
+                self.assertEqual(cfg["ger"]["bridge"]["n_heads"], 8)
+
 
 if __name__ == "__main__":
     unittest.main()
