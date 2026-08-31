@@ -41,10 +41,14 @@ def main() -> None:
                 })
     if not rows:
         raise SystemExit("No cached records found")
+    empty = [row for row in rows if row["target_chars"] == 0]
     bad = [row for row in rows if row["required_expansion"] > args.limit]
     print(f"records={len(rows)}")
     print(f"max_required_expansion={max(row['required_expansion'] for row in rows)}")
+    print(f"empty_after_normalization={len(empty)}")
     print(f"above_limit_{args.limit}={len(bad)}")
+    for row in empty:
+        print({"empty_after_normalization": row})
     for row in sorted(bad, key=lambda item: item["required_expansion"], reverse=True):
         print(row)
 

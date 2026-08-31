@@ -6,8 +6,10 @@ import torch
 
 from scripts.train_stage2_pro6000 import (
     _cache_signature,
+    _ctc_target_eligibility,
     _validate_cached_record,
 )
+from avsd_ger.training.ctc_loss import CTCHead
 
 
 def valid_record():
@@ -30,6 +32,20 @@ def valid_record():
 
 
 class FeatureCacheSchemaTest(unittest.TestCase):
+    def test_ctc_eligibility_accounts_for_empty_and_infeasible_targets(self):
+        ctc = CTCHead(d_align=8, max_expansion=32)
+        self.assertEqual(
+            _ctc_target_eligibility(ctc, ".", 4)[1],
+            "empty_after_normalization",
+        )
+        eligible, reason, minimum, required = _ctc_target_eligibility(
+            ctc, "Yeah , yeah , maybe . Yeah , maybe .", 1
+        )
+        self.assertFalse(eligible)
+        self.assertEqual(reason, "infeasible_expansion")
+        self.assertEqual(minimum, 35)
+        self.assertEqual(required, 35)
+
     def test_record_schema_accepts_aligned_quality_tracks(self):
         _validate_cached_record(valid_record())
 

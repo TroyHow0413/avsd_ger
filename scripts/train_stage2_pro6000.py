@@ -417,6 +417,21 @@ def _checkpoint_modules(
     return modules
 
 
+def _ctc_target_eligibility(
+    ctc: CTCHead, target: str, aligned_tokens: int
+) -> tuple[bool, str | None, int, int]:
+    ids = ctc.vocab.encode(target)
+    if not ids:
+        return False, "empty_after_normalization", 0, 0
+    minimum_steps = ctc.minimum_ctc_steps(ids)
+    required_expansion = (
+        minimum_steps + aligned_tokens - 1
+    ) // max(1, aligned_tokens)
+    if required_expansion > ctc.max_expansion:
+        return False, "infeasible_expansion", minimum_steps, required_expansion
+    return True, None, minimum_steps, required_expansion
+
+
 @torch.no_grad()
 def _evaluate_cached(
     cfg: dict[str, Any],
@@ -441,7 +456,11 @@ def _evaluate_cached(
 
     ctc_total = 0.0
     ger_total = 0.0
-    n = 0
+    n_records = 0
+    n_ctc = 0
+    n_ger = 0
+    skipped_empty = 0
+    skipped_infeasible = 0
     turns: list[SessionTurnResult] = []
     try:
         for batch in iter_cached_records(index_path):
@@ -472,9 +491,18 @@ def _evaluate_cached(
                     lip_conf_v=batch["lip_conf_v"].to(device),
                 )
             )
-            if warmup in {"joint", "align_ctc"}:
+            ctc_eligible, ctc_reason, _, _ = _ctc_target_eligibility(
+                ctc, str(batch["target"]), int(f_align.shape[0])
+            ) if warmup != "ger_lora" else (False, None, 0, 0)
+            lexical_target = bool(ctc.vocab.encode(str(batch["target"])))
+            if ctc_reason == "empty_after_normalization":
+                skipped_empty += 1
+            elif ctc_reason == "infeasible_expansion":
+                skipped_infeasible += 1
+            if warmup in {"joint", "align_ctc"} and ctc_eligible:
                 ctc_total += float(ctc(f_align, targets=[batch["target"]]).loss)
-            if ger is not None and ger_ce is not None:
+                n_ctc += 1
+            if ger is not None and ger_ce is not None and lexical_target:
                 lip_hyp = base._format_nbest(batch.get("lip_nbest")) or batch.get("lip_hyp", "")
                 ger_total += float(ger_ce(
                     z_id=z_id,
@@ -508,17 +536,26 @@ def _evaluate_cached(
                     ref_text=str(batch["target"]),
                     ref_speaker=batch.get("participant_id") or batch.get("speaker_id"),
                 ))
-            n += 1
+                n_ger += 1
+            n_records += 1
     finally:
         for module, was_training in zip(modules, previous):
             module.train(was_training)
 
-    if n == 0:
+    if n_records == 0:
         raise RuntimeError("Dev feature cache contains no records")
     result: dict[str, float | str] = {
-        "ctc_loss": ctc_total / n,
-        "ger_loss": ger_total / n,
+        "ctc_loss": ctc_total / max(1, n_ctc),
+        "ger_loss": ger_total / max(1, n_ger),
+        "ctc_records": float(n_ctc),
+        "ger_records": float(n_ger),
+        "skipped_empty_targets": float(skipped_empty),
+        "skipped_infeasible_ctc": float(skipped_infeasible),
     }
+    if warmup == "align_ctc" and n_ctc == 0:
+        raise RuntimeError("Dev cache has no CTC-eligible records")
+    if ger is not None and n_ger == 0:
+        raise RuntimeError("Dev cache has no GER-eligible records")
     if turns:
         language = str(cfg.get("language") or cfg.get("asr", {}).get("language", "en"))
         sa_wer, details = compute_sa_wer(turns, language=language)
@@ -684,7 +721,12 @@ def train_cached(
         print(f"[resume] {resume_path}: next_epoch={start_epoch + 1} step={step}")
 
     for epoch in range(start_epoch, int(stage2_cfg["epochs"])):
-        running = {"ctc": 0.0, "ger": 0.0, "info": 0.0, "n": 0, "ctc_zero": 0}
+        running = {
+            "ctc": 0.0, "ger": 0.0, "info": 0.0, "n": 0,
+            "n_ctc": 0, "n_ger": 0, "ctc_zero": 0,
+            "ctc_skipped_empty": 0, "ctc_skipped_infeasible": 0,
+            "ger_skipped_empty": 0,
+        }
         for batch in iter_cached_records(index_path):
             asr_tok = batch["asr_tok"].to(device, non_blocking=True)
             vsr_features = batch["vsr_features"].to(device, non_blocking=True)
@@ -713,10 +755,21 @@ def train_cached(
                     lip_conf_v=batch["lip_conf_v"].to(device),
                 )
             )
-            ctc_report = ctc(f_align, targets=[batch["target"]]) if w_ctc else None
+            lexical_target = bool(ctc.vocab.encode(str(batch["target"])))
+            ctc_eligible, ctc_reason, _, _ = _ctc_target_eligibility(
+                ctc, str(batch["target"]), int(f_align.shape[0])
+            ) if w_ctc else (False, None, 0, 0)
+            if ctc_reason == "empty_after_normalization":
+                running["ctc_skipped_empty"] += 1
+            elif ctc_reason == "infeasible_expansion":
+                running["ctc_skipped_infeasible"] += 1
+            ctc_report = (
+                ctc(f_align, targets=[batch["target"]])
+                if w_ctc and ctc_eligible else None
+            )
             l_ctc = ctc_report.loss if ctc_report is not None else torch.zeros((), device=device)
 
-            if w_ger:
+            if w_ger and lexical_target:
                 assert ger_ce is not None
                 lip_hyp = base._format_nbest(batch.get("lip_nbest")) or batch.get("lip_hyp", "")
                 ger_report = ger_ce(
@@ -733,6 +786,8 @@ def train_cached(
             else:
                 ger_report = None
                 l_ger = torch.zeros((), device=device)
+                if w_ger and not lexical_target:
+                    running["ger_skipped_empty"] += 1
 
             if w_info:
                 neg_voice = batch.get("neg_voice_emb")
@@ -746,6 +801,10 @@ def train_cached(
                 l_info = torch.zeros((), device=device)
 
             loss = w_ctc * l_ctc + w_ger * l_ger + w_info * l_info
+            if not loss.requires_grad:
+                # align_ctc/GER-only records with no eligible text objective
+                # are explicitly accounted above and do not create an update.
+                continue
             parts = {"ctc": l_ctc, "ger": l_ger, "info": l_info, "total": loss}
             finite = {name: bool(torch.isfinite(value.detach()).item()) for name, value in parts.items()}
             should_debug = debug_loss_every > 0 and (step == 0 or (step + 1) % debug_loss_every == 0)
@@ -776,6 +835,8 @@ def train_cached(
             running["ger"] += float(l_ger.detach())
             running["info"] += float(l_info.detach())
             running["n"] += 1
+            running["n_ctc"] += int(ctc_report is not None)
+            running["n_ger"] += int(ger_report is not None)
             running["ctc_zero"] += ctc_report.zero_loss_count if ctc_report is not None else 0
             wb.log(
                 {
@@ -791,9 +852,13 @@ def train_cached(
 
         n = max(1, running["n"])
         print(
-            f"[epoch {epoch + 1:02d}] ctc={running['ctc'] / n:.4f} "
-            f"ger={running['ger'] / n:.4f} info={running['info'] / n:.4f} "
-            f"ctc_exact_zero={running['ctc_zero']}"
+            f"[epoch {epoch + 1:02d}] "
+            f"ctc={running['ctc'] / max(1, running['n_ctc']):.4f} "
+            f"ger={running['ger'] / max(1, running['n_ger']):.4f} "
+            f"info={running['info'] / n:.4f} ctc_exact_zero={running['ctc_zero']} "
+            f"ctc_skipped_empty={running['ctc_skipped_empty']} "
+            f"ctc_skipped_infeasible={running['ctc_skipped_infeasible']} "
+            f"ger_skipped_empty={running['ger_skipped_empty']}"
         )
 
         dev = _evaluate_cached(
@@ -817,7 +882,11 @@ def train_cached(
             best_epoch = epoch
         print(
             f"[dev {epoch + 1:02d}] {dev['selection_name']}={selection_value:.4f} "
-            f"best={-best_metric:.4f}@{best_epoch + 1}"
+            f"best={-best_metric:.4f}@{best_epoch + 1} "
+            f"ctc_records={int(float(dev['ctc_records']))} "
+            f"ger_records={int(float(dev['ger_records']))} "
+            f"skipped_empty={int(float(dev['skipped_empty_targets']))} "
+            f"skipped_infeasible={int(float(dev['skipped_infeasible_ctc']))}"
         )
         ger_dir = out / "ger"
         if ger is not None and not stub and ger._llm is not None:
