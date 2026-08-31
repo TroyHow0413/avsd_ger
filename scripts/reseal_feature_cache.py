@@ -7,12 +7,12 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime, timezone
-import hashlib
 import json
 import os
 from pathlib import Path
 import sys
 from typing import Any
+from itertools import zip_longest
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -28,21 +28,13 @@ def _resolved_index_manifest(index: dict[str, Any]) -> Path:
     return path.resolve() if path.is_absolute() else (ROOT / path).resolve()
 
 
-def _legacy_signature(cfg: dict[str, Any], manifest: Path, git_commit: str) -> str:
-    payload = trainer._cache_signature_payload(cfg, manifest)
-    payload.pop("signature_policy", None)
-    payload["git_commit"] = git_commit
-    encoded = json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
-
-
 def reseal_one(
     *,
     cfg: dict[str, Any],
     manifest: Path,
     cache_dir: Path,
     reason: str,
-    legacy_git_commit: str,
+    expected_legacy_signature: str,
 ) -> None:
     manifest = manifest.resolve()
     cache_dir = cache_dir.resolve()
@@ -62,30 +54,56 @@ def reseal_one(
         raise RuntimeError(
             f"Index belongs to a different manifest: {indexed_manifest} != {manifest}"
         )
+    old_signature = str(index.get("signature", ""))
+    if old_signature != expected_legacy_signature:
+        raise RuntimeError(
+            "Saved signature is not the explicitly expected legacy signature; "
+            f"saved={old_signature}, expected={expected_legacy_signature}"
+        )
 
     missing = [name for name in index.get("shards", []) if not (cache_dir / name).is_file()]
     if missing:
         raise FileNotFoundError(f"Cache is incomplete; missing shards: {missing[:3]}")
 
-    print(f"[validate] {cache_dir}: loading and validating all frozen records", flush=True)
-    count = sum(1 for _ in trainer.iter_cached_records(index_path))
+    print(
+        f"[validate] {cache_dir}: validating all frozen records against the manifest",
+        flush=True,
+    )
+    identity_fields = (
+        "utt_id", "target", "dataset_build_id", "participant_id", "speaker_id",
+        "lip_conf_source",
+    )
+    count = 0
+    cached_records = trainer.iter_cached_records(index_path)
+    source_records = trainer.base.iter_manifest(manifest)
+    for row_number, (cached, source) in enumerate(
+        zip_longest(cached_records, source_records), start=1
+    ):
+        if cached is None or source is None:
+            raise RuntimeError(
+                f"Manifest/cache length mismatch at row {row_number}: {cache_dir}"
+            )
+        for field in identity_fields:
+            if cached.get(field) != source.get(field):
+                raise RuntimeError(
+                    f"Manifest/cache mismatch at row {row_number}, field={field}: "
+                    f"cached={cached.get(field)!r}, manifest={source.get(field)!r}"
+                )
+        for field in ("start", "end"):
+            if abs(float(cached.get(field)) - float(source.get(field))) > 1e-6:
+                raise RuntimeError(
+                    f"Manifest/cache mismatch at row {row_number}, field={field}: "
+                    f"cached={cached.get(field)!r}, manifest={source.get(field)!r}"
+                )
+        count += 1
     if count != int(index.get("records", -1)):
         raise RuntimeError(f"Record count mismatch: validated={count}, index={index.get('records')}")
 
     new_payload = trainer._cache_signature_payload(cfg, manifest)
     new_signature = trainer._cache_signature(cfg, manifest)
-    old_signature = str(index.get("signature", ""))
     if old_signature == new_signature:
         print(f"[unchanged] {cache_dir}: signature already current ({count} records)")
         return
-
-    expected_legacy_signature = _legacy_signature(cfg, manifest, legacy_git_commit)
-    if old_signature != expected_legacy_signature:
-        raise RuntimeError(
-            "Legacy signature verification failed; refusing to reseal. "
-            f"saved={old_signature}, expected={expected_legacy_signature}, "
-            f"legacy_git_commit={legacy_git_commit}"
-        )
 
     history = list(index.get("signature_history", []))
     history.append({
@@ -100,7 +118,6 @@ def reseal_one(
         "signature_payload": new_payload,
         "signature_history": history,
         "last_resealed_git_commit": trainer._git_commit(),
-        "legacy_build_git_commit": legacy_git_commit,
         "last_resealed_reason": reason,
     })
 
@@ -118,23 +135,19 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", required=True)
     parser.add_argument(
-        "--pair", action="append", nargs=2, metavar=("MANIFEST", "CACHE_DIR"), required=True,
+        "--pair", action="append", nargs=3,
+        metavar=("MANIFEST", "CACHE_DIR", "EXPECTED_LEGACY_SIGNATURE"), required=True,
     )
     parser.add_argument("--reason", required=True)
-    parser.add_argument(
-        "--legacy-git-commit",
-        required=True,
-        help="Exact repository commit used to build the legacy cache",
-    )
     args = parser.parse_args()
     cfg = load_config(args.config)
-    for manifest_raw, cache_raw in args.pair:
+    for manifest_raw, cache_raw, expected_signature in args.pair:
         reseal_one(
             cfg=cfg,
             manifest=Path(manifest_raw),
             cache_dir=Path(cache_raw),
             reason=args.reason,
-            legacy_git_commit=args.legacy_git_commit,
+            expected_legacy_signature=expected_signature,
         )
 
 
