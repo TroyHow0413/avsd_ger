@@ -4,6 +4,7 @@ from pathlib import Path
 
 import torch
 
+import scripts.train_stage2_pro6000 as cache_trainer
 from scripts.train_stage2_pro6000 import (
     _cache_signature,
     _ctc_target_eligibility,
@@ -32,6 +33,27 @@ def valid_record():
 
 
 class FeatureCacheSchemaTest(unittest.TestCase):
+    def test_feature_fingerprint_is_independent_of_python_entry_mode(self):
+        functions = (
+            cache_trainer.base._load_record,
+            cache_trainer.pool_encoder_to_tokens,
+            cache_trainer.resample_quality_track,
+            cache_trainer.token_snr_scores,
+            cache_trainer._extract_cached_record,
+            cache_trainer._validate_cached_record,
+        )
+        imported = cache_trainer._feature_source_fingerprint()
+        original_modules = [function.__module__ for function in functions]
+        try:
+            for function in functions:
+                function.__module__ = "__main__"
+            executed = cache_trainer._feature_source_fingerprint()
+        finally:
+            for function, module_name in zip(functions, original_modules):
+                function.__module__ = module_name
+
+        self.assertEqual(imported, executed)
+
     def test_ctc_eligibility_accounts_for_empty_and_infeasible_targets(self):
         ctc = CTCHead(d_align=8, max_expansion=32)
         self.assertEqual(

@@ -42,7 +42,7 @@ from scripts import train_stage2 as base
 
 CACHE_VERSION = 3
 QUALITY_SCHEMA_VERSION = 2
-CACHE_SIGNATURE_POLICY = "feature-inputs-v2"
+CACHE_SIGNATURE_POLICY = "feature-inputs-v3-canonical-functions"
 
 _FEATURE_SOURCE_FILES = (
     "avsd_ger/backbones/asr_whisper.py",
@@ -114,16 +114,18 @@ def _feature_source_fingerprint() -> str:
         digest.update(_sha256_file(path).encode("ascii") if path.is_file() else b"missing")
     # Hash only the trainer functions that construct frozen records. Training,
     # CTC, GER and checkpoint-loop edits must not invalidate ASR/VSR features.
-    for function in (
-        base._load_record,
-        pool_encoder_to_tokens,
-        resample_quality_track,
-        token_snr_scores,
-        _extract_cached_record,
-        _validate_cached_record,
+    for label, function in (
+        ("load_record", base._load_record),
+        ("pool_encoder_to_tokens", pool_encoder_to_tokens),
+        ("resample_quality_track", resample_quality_track),
+        ("token_snr_scores", token_snr_scores),
+        ("extract_cached_record", _extract_cached_record),
+        ("validate_cached_record", _validate_cached_record),
     ):
-        digest.update(function.__module__.encode("utf-8"))
-        digest.update(function.__qualname__.encode("utf-8"))
+        # ``__module__`` is ``__main__`` when this file is executed directly
+        # but ``scripts.train_stage2_pro6000`` when imported by cache tools.
+        # A stable logical label keeps both entry paths signature-equivalent.
+        digest.update(label.encode("utf-8"))
         digest.update(inspect.getsource(function).encode("utf-8"))
     return digest.hexdigest()
 
@@ -283,7 +285,11 @@ def build_feature_cache(
         if index.get("signature") != signature:
             raise RuntimeError(
                 f"Feature cache does not match the current manifest/config: {cache_path}. "
-                "Use --rebuild-cache or choose a new --cache-dir."
+                f"saved_signature={index.get('signature')}, current_signature={signature}, "
+                f"saved_policy={index.get('signature_policy', 'legacy')}, "
+                f"current_policy={CACHE_SIGNATURE_POLICY}. "
+                "Use --rebuild-cache, choose a new --cache-dir, or run the validated "
+                "cache-signature migration when only the signature policy changed."
             )
         if index.get("version") != CACHE_VERSION:
             raise RuntimeError(
