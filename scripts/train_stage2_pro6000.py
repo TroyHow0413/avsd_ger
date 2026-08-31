@@ -42,6 +42,7 @@ from scripts import train_stage2 as base
 
 CACHE_VERSION = 3
 QUALITY_SCHEMA_VERSION = 2
+CACHE_SIGNATURE_POLICY = "feature-inputs-v2"
 
 _FEATURE_SOURCE_FILES = (
     "avsd_ger/backbones/asr_whisper.py",
@@ -133,14 +134,14 @@ def _cpu_tensor(value: torch.Tensor | None) -> torch.Tensor | None:
     return value.detach().to(device="cpu").contiguous()
 
 
-def _cache_signature(cfg: dict[str, Any], manifest: Path) -> str:
+def _cache_signature_payload(cfg: dict[str, Any], manifest: Path) -> dict[str, Any]:
     manifest_digest = _sha256_file(manifest) if manifest.is_file() else None
-    payload = {
+    return {
         "version": CACHE_VERSION,
+        "signature_policy": CACHE_SIGNATURE_POLICY,
         "quality_schema_version": QUALITY_SCHEMA_VERSION,
         "manifest": str(manifest.resolve()) if manifest.exists() else str(manifest),
         "manifest_sha256": manifest_digest,
-        "git_commit": _git_commit(),
         "feature_source_fingerprint": _feature_source_fingerprint(),
         "stub_backbones": bool(cfg.get("stub_backbones", True)),
         "asr": cfg.get("asr", {}),
@@ -157,6 +158,10 @@ def _cache_signature(cfg: dict[str, Any], manifest: Path) -> str:
             "snr_frame_hz": 100.0,
         },
     }
+
+
+def _cache_signature(cfg: dict[str, Any], manifest: Path) -> str:
+    payload = _cache_signature_payload(cfg, manifest)
     encoded = json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
 
@@ -334,6 +339,9 @@ def build_feature_cache(
     index = {
         "version": CACHE_VERSION,
         "signature": signature,
+        "signature_policy": CACHE_SIGNATURE_POLICY,
+        "signature_payload": _cache_signature_payload(cfg, manifest_path),
+        "build_git_commit": _git_commit(),
         "manifest": str(manifest_path),
         "records": len(records),
         "shard_size": shard_size,
