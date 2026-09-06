@@ -112,6 +112,9 @@ def curate(
 def _init_worker(config: dict[str, Any]) -> None:
     global _WORKER
     _WORKER = config
+    import cv2
+
+    cv2.setNumThreads(config["opencv_threads"])
 
 
 def _output_paths(item: VoxItem) -> tuple[Path, Path]:
@@ -215,6 +218,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--log-every", type=int, default=500)
     parser.add_argument("--ffmpeg", default="ffmpeg")
     parser.add_argument("--ffmpeg-threads", type=int, default=1)
+    parser.add_argument("--opencv-threads", type=int, default=1)
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--absolute-paths", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
@@ -225,8 +229,15 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.workers < 1:
         raise ValueError("--workers must be >= 1")
-    if args.log_every < 1 or args.face_size < 1 or args.ffmpeg_threads < 1:
-        raise ValueError("--log-every, --face-size and --ffmpeg-threads must be >= 1")
+    if (
+        args.log_every < 1
+        or args.face_size < 1
+        or args.ffmpeg_threads < 1
+        or args.opencv_threads < 1
+    ):
+        raise ValueError(
+            "--log-every, --face-size, --ffmpeg-threads and --opencv-threads must be >= 1"
+        )
     if not 0 <= args.val_speaker_percent < 100:
         raise ValueError("--val-speaker-percent must be in [0, 100)")
     if args.min_duration <= 0 or args.max_duration < args.min_duration:
@@ -291,6 +302,7 @@ def main(argv: list[str] | None = None) -> int:
         "face_size": args.face_size,
         "ffmpeg": args.ffmpeg,
         "ffmpeg_threads": args.ffmpeg_threads,
+        "opencv_threads": args.opencv_threads,
         "overwrite": args.overwrite,
         "absolute_paths": args.absolute_paths,
         "dry_run": args.dry_run,

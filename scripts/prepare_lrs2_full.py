@@ -89,6 +89,9 @@ def read_transcript(path: Path) -> str:
 def _init_worker(config: dict[str, Any]) -> None:
     global _WORKER, _EXTRACTOR
     _WORKER = config
+    import cv2
+
+    cv2.setNumThreads(config["opencv_threads"])
     if config["dry_run"]:
         return
     from avsd_ger.frontend.mouth_roi import MouthROIExtractor
@@ -244,6 +247,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mean-face", type=Path, default=DEFAULT_MODELS["mean_face"])
     parser.add_argument("--ffmpeg", default="ffmpeg")
     parser.add_argument("--ffmpeg-threads", type=int, default=1)
+    parser.add_argument("--opencv-threads", type=int, default=1)
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--absolute-paths", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
@@ -254,8 +258,15 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.workers < 1:
         raise ValueError("--workers must be >= 1")
-    if args.log_every < 1 or args.face_size < 1 or args.ffmpeg_threads < 1:
-        raise ValueError("--log-every, --face-size and --ffmpeg-threads must be >= 1")
+    if (
+        args.log_every < 1
+        or args.face_size < 1
+        or args.ffmpeg_threads < 1
+        or args.opencv_threads < 1
+    ):
+        raise ValueError(
+            "--log-every, --face-size, --ffmpeg-threads and --opencv-threads must be >= 1"
+        )
     if args.max_items is not None and args.max_items < 0:
         raise ValueError("--max-items must be >= 0")
     args.lrs2_root = args.lrs2_root.resolve()
@@ -275,6 +286,7 @@ def main(argv: list[str] | None = None) -> int:
         "mean_face": str(args.mean_face.resolve()),
         "ffmpeg": args.ffmpeg,
         "ffmpeg_threads": args.ffmpeg_threads,
+        "opencv_threads": args.opencv_threads,
         "overwrite": args.overwrite,
         "absolute_paths": args.absolute_paths,
         "dry_run": args.dry_run,

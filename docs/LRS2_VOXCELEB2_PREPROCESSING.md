@@ -60,15 +60,17 @@ pipeline smoke test and must not be used for the reported production result.
 
 Recommended starting points (benchmark 100 clips before increasing them):
 
-- CPU-only, NVMe SSD: `--workers 8 --ffmpeg-threads 1`; try 12 or 16 only if
-  CPU utilisation scales and I/O wait remains low;
+- CPU-only, NVMe SSD: `--workers 8 --ffmpeg-threads 1 --opencv-threads 1`;
+  increase only while throughput scales and I/O wait remains low;
 - CPU-only, HDD/network disk: start with 4 workers;
 - CUDA-enabled dlib: start with 1 worker, then at most 2 after checking VRAM;
 - VoxCeleb2 ffmpeg-only C1 extraction: normally 8-16 workers on NVMe.
 
 Giving every ffmpeg process multiple internal threads while also using many
 workers oversubscribes the host and is commonly slower. The default therefore
-keeps `--ffmpeg-threads 1`.
+keeps both `--ffmpeg-threads 1` and `--opencv-threads 1`. This is especially
+important on large dual-socket machines where OpenCV may otherwise default to
+all visible logical CPUs inside every worker process.
 
 Outputs:
 
