@@ -103,6 +103,7 @@ ger:
 feedback:
   max_iters: 3
   tau_update: 0.55
+  enable_pool_update: false
   confidence_low: 0.35
   confidence_mid: 0.55
   ger_fallback_min_conf: 0.2

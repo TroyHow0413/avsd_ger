@@ -1,0 +1,6 @@
+defaults:
+  - config_real_en_llama3_8b
+
+feedback:
+  enable_pool_update: true
+  tau_update: 0.55
