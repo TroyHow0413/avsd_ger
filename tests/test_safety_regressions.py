@@ -166,6 +166,35 @@ class AttentionAndGenerationTest(unittest.TestCase):
         self.assertEqual(backend.model.kwargs["attention_mask"].shape,
                          backend.model.kwargs["inputs_embeds"].shape[:2])
 
+    def test_training_appends_eos_to_the_supervised_target(self):
+        from avsd_ger.training.ger_loss import GERCrossEntropy
+        cfg = ger_cfg()
+        backend = CapturingBackend(cfg)
+        head = GERHead(cfg, z_dim=8, d_align=16, backend=backend)
+        target = "hello"
+
+        with patch(
+            "avsd_ger.training.ger_loss.F.cross_entropy",
+            wraps=torch.nn.functional.cross_entropy,
+        ) as cross_entropy:
+            report = GERCrossEntropy(head)(
+                torch.zeros(8), torch.zeros(3, 16), ["helo"], "", target
+            )
+
+        lexical_count = backend.tokenizer(
+            target, return_tensors="pt", add_special_tokens=False
+        ).input_ids.shape[1]
+        self.assertEqual(report.n_target_tokens, lexical_count + 1)
+        eos_embedding = backend.model.get_input_embeddings().weight[
+            backend.tokenizer.eos_token_id
+        ]
+        final_input = backend.model.kwargs["inputs_embeds"][0, -1]
+        self.assertTrue(torch.equal(final_input, eos_embedding))
+        supervised_labels = cross_entropy.call_args.args[1]
+        self.assertEqual(
+            int(supervised_labels[-1]), backend.tokenizer.eos_token_id
+        )
+
 
 class CheckpointAndDtypeTest(unittest.TestCase):
     def test_strict_metadata_and_legacy_opt_in(self):

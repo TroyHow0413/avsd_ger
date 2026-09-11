@@ -687,6 +687,24 @@ def train_cached(
 
     stage1_lr = float(cfg["training"]["stage1"]["lr"])
     stage2_cfg = cfg["training"]["stage2"]
+    max_epochs = int(stage2_cfg["epochs"])
+    early_stopping_patience = int(
+        stage2_cfg.get("early_stopping_patience", 2)
+    )
+    early_stopping_min_epochs = int(
+        stage2_cfg.get("early_stopping_min_epochs", 3)
+    )
+    early_stopping_min_delta = float(
+        stage2_cfg.get("early_stopping_min_delta", 1e-4)
+    )
+    if max_epochs <= 0:
+        raise ValueError("training.stage2.epochs must be positive")
+    if early_stopping_patience < 0:
+        raise ValueError("training.stage2.early_stopping_patience must be >= 0")
+    if early_stopping_min_epochs <= 0:
+        raise ValueError("training.stage2.early_stopping_min_epochs must be positive")
+    if early_stopping_min_delta < 0:
+        raise ValueError("training.stage2.early_stopping_min_delta must be >= 0")
     lr = float(stage2_cfg["lr"])
     expected = stage1_lr * float(stage2_cfg.get("lr_ratio_to_stage1", 0.1))
     if abs(lr - expected) > 1e-9:
@@ -734,7 +752,14 @@ def train_cached(
         best_epoch = int(state["best_epoch"])
         print(f"[resume] {resume_path}: next_epoch={start_epoch + 1} step={step}")
 
-    for epoch in range(start_epoch, int(stage2_cfg["epochs"])):
+    print(
+        "[early-stop] "
+        f"max_epochs={max_epochs} patience={early_stopping_patience} "
+        f"min_epochs={early_stopping_min_epochs} "
+        f"min_delta={early_stopping_min_delta:g} "
+        f"enabled={early_stopping_patience > 0}"
+    )
+    for epoch in range(start_epoch, max_epochs):
         running = {
             "ctc": 0.0, "ger": 0.0, "info": 0.0, "n": 0,
             "n_ctc": 0, "n_ger": 0, "ctc_zero": 0,
@@ -890,13 +915,20 @@ def train_cached(
         )
         selection_value = float(dev["selection_value"])
         selection_metric = -selection_value
-        improved = selection_metric > best_metric
+        improved = selection_metric > best_metric + early_stopping_min_delta
         if improved:
             best_metric = selection_metric
             best_epoch = epoch
+        epochs_without_improvement = max(0, epoch - best_epoch)
+        early_stop_triggered = (
+            early_stopping_patience > 0
+            and epoch + 1 >= early_stopping_min_epochs
+            and epochs_without_improvement >= early_stopping_patience
+        )
         print(
             f"[dev {epoch + 1:02d}] {dev['selection_name']}={selection_value:.4f} "
             f"best={-best_metric:.4f}@{best_epoch + 1} "
+            f"bad_epochs={epochs_without_improvement}/{early_stopping_patience} "
             f"ctc_records={int(float(dev['ctc_records']))} "
             f"ger_records={int(float(dev['ger_records']))} "
             f"skipped_empty={int(float(dev['skipped_empty_targets']))} "
@@ -936,8 +968,18 @@ def train_cached(
             "stage2/dev/ger_loss": float(dev["ger_loss"]),
             "stage2/dev/selection_value": selection_value,
             "stage2/dev/is_best": int(improved),
+            "stage2/dev/epochs_without_improvement": epochs_without_improvement,
+            "stage2/dev/early_stop_triggered": int(early_stop_triggered),
             **({"stage2/dev/wer": float(dev["wer"]), "stage2/dev/sa_wer": float(dev["sa_wer"])} if "wer" in dev else {}),
         }, step=step)
+        if early_stop_triggered:
+            print(
+                f"[early-stop] stopping after epoch {epoch + 1}: "
+                f"{dev['selection_name']} did not improve by at least "
+                f"{early_stopping_min_delta:g} for "
+                f"{epochs_without_improvement} consecutive epochs"
+            )
+            break
 
     best_path = out / "best.pt"
     if not best_path.exists():
@@ -975,6 +1017,24 @@ def _build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--cache-shard-size", type=int, default=128)
     ap.add_argument("--warmup", choices=["joint", "align_ctc", "ger_lora", "ger_qformer"], default="joint")
     ap.add_argument("--epochs", type=int, default=None)
+    ap.add_argument(
+        "--early-stopping-patience",
+        type=int,
+        default=None,
+        help="Stop after this many non-improving dev epochs; 0 disables early stopping.",
+    )
+    ap.add_argument(
+        "--early-stopping-min-epochs",
+        type=int,
+        default=None,
+        help="Minimum completed epochs before early stopping may trigger.",
+    )
+    ap.add_argument(
+        "--early-stopping-min-delta",
+        type=float,
+        default=None,
+        help="Minimum dev-metric improvement required to reset patience.",
+    )
     ap.add_argument("--lr", type=float, default=None)
     ap.add_argument("--stage1-pool", default=None)
     ap.add_argument("--aligner-checkpoint", default=None)
@@ -1007,6 +1067,12 @@ def _apply_overrides(cfg: dict[str, Any], args: argparse.Namespace) -> None:
         stage2["stage1_pool"] = args.stage1_pool
     if args.epochs is not None:
         stage2["epochs"] = args.epochs
+    if args.early_stopping_patience is not None:
+        stage2["early_stopping_patience"] = args.early_stopping_patience
+    if args.early_stopping_min_epochs is not None:
+        stage2["early_stopping_min_epochs"] = args.early_stopping_min_epochs
+    if args.early_stopping_min_delta is not None:
+        stage2["early_stopping_min_delta"] = args.early_stopping_min_delta
     if args.lr is not None:
         stage2["lr"] = args.lr
         stage1_lr = float(cfg["training"].setdefault("stage1", {}).get("lr", 0.001))

@@ -69,8 +69,30 @@ class GERCrossEntropy(nn.Module):
             z_id, f_align, text, use_av_context=use_av_context
         )   # [1, P, H]
 
-        # Tokenise target and build target embeddings + labels.
-        tgt_ids = tok(target, return_tensors="pt", add_special_tokens=False).input_ids.to(prompt_embeds.device)
+        # Tokenise the transcript and explicitly supervise its end boundary.
+        # ``add_special_tokens=False`` is intentional because the prompt already
+        # carries the model's chat framing, but it also means tokenizers do not
+        # append EOS/EOT for us. Without this label the LoRA learns the words of
+        # the correction but never learns when to stop, which encourages filler
+        # and repeated continuations until ``max_new_tokens`` is reached.
+        tgt_ids = tok(
+            target, return_tensors="pt", add_special_tokens=False
+        ).input_ids.to(prompt_embeds.device)
+        eos_token_id = getattr(tok, "eos_token_id", None)
+        if eos_token_id is None:
+            raise ValueError(
+                "GER tokenizer has no eos_token_id; cannot supervise the "
+                "end of the corrected transcript"
+            )
+        eos_token_id = int(eos_token_id)
+        if tgt_ids.shape[1] == 0 or int(tgt_ids[0, -1]) != eos_token_id:
+            eos = torch.full(
+                (tgt_ids.shape[0], 1),
+                eos_token_id,
+                dtype=tgt_ids.dtype,
+                device=tgt_ids.device,
+            )
+            tgt_ids = torch.cat([tgt_ids, eos], dim=1)
         emb = self.ger._llm.get_input_embeddings()
         tgt_embeds = emb(tgt_ids).to(prompt_embeds.dtype)              # [1, T, H]
         full = torch.cat([prompt_embeds, tgt_embeds], dim=1)           # [1, P+T, H]
