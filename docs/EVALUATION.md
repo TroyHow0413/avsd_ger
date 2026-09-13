@@ -94,6 +94,51 @@ print(report.energy_wh, report.avg_power_w, report.degraded)
 
 `scripts/eval_ablations.py` runs the spec §10 Table 2 rows in one shot:
 
+### Public-library appendix metrics
+
+Each evaluation now records a `standard_metrics` block in both the meeting
+result and its `*.debug.json` sidecar.  These scores use public packages rather
+than the project's backwards-compatible metric implementations:
+
+* **JiWER 4.0.0**: WER, MER, WIL, WIP, CER, hits, substitutions, deletions,
+  insertions, and reference/hypothesis lengths.
+* **MeetEval 0.4.3+**: SISO-WER, cpWER, ORC-WER, tcpWER, tcORC-WER, greedy
+  ORC/tcORC, DI-cpWER, MIMO-WER, and tcMIMO-WER when supported by the installed
+  version.  Time-constrained scores use a recorded 5-second collar and
+  MeetEval's character-based pseudo-word timing.
+* **scikit-learn**: meeting-mapped speaker accuracy, balanced accuracy,
+  macro/weighted F1, macro precision/recall, MCC, Cohen's kappa, plus Brier,
+  log loss, ROC-AUC and average precision for C3 confidence against exact
+  normalized turn correctness.
+* **pyannote.metrics 3.2.1**: DER and JER with 0 and 0.25 second collars,
+  overlap included.  These are explicitly labelled `oracle_turns` because this
+  evaluator receives reference turn boundaries rather than detecting segments.
+
+Missing or incompatible optional scorers are represented by
+`status: unavailable/failed` with the exception message.  They never discard a
+completed model inference.  The debug sidecars retain every reference,
+hypothesis, speaker, time boundary and confidence required for offline
+rescoring.
+
+For already completed runs, add or refresh public scores without loading the
+LLM, checkpoints, audio, or video:
+
+```bash
+python scripts/rescore_standard_metrics.py \
+  out/ami_full_v4_llama3_8b_dev \
+  --language en \
+  --in-place
+```
+
+The scorer is pinned to pyannote.metrics 3.2.1/core<6 because pyannote 4.x/core
+6.x requires NumPy 2.x while this project's AV stack pins NumPy below 2.  This
+is an environment-compatibility pin, and every result records the actual scorer
+version.  A separate NumPy-2 scoring environment can rescore the retained debug
+sidecars later without model inference.  Do not compare these oracle-turn
+DER/JER values with end-to-end
+diarization results unless the segmentation protocol, collar and overlap policy
+are identical.
+
 ```bash
 python scripts/eval_ablations.py \
     --config configs/default.yaml \
@@ -207,6 +252,50 @@ python scripts\eval_ablations.py `
 
 When multiple manifests are matched, `--out` is treated as an output directory
 and the script writes one report per manifest plus `summary.json`.
+
+## Formal artifact bundle
+
+Formal artifacts are enabled by default. With `--out out/ami_test.json`, the
+legacy JSON remains at that path and the reproducible bundle is written under
+`out/ami_test/`:
+
+```text
+ami_test/
+├── run_manifest.json
+├── records.schema.json
+├── records/<ablation>.jsonl
+├── metrics/
+│   ├── main_table.json
+│   ├── appendix_sdi.json
+│   ├── appendix_correction.json
+│   ├── appendix_sid.json
+│   ├── appendix_calibration.json
+│   ├── per_ablation/<ablation>.json
+│   ├── per_meeting/<ablation>.jsonl
+│   ├── groups/{by_snr,by_lip_conf,by_turn_length,by_duration,by_visual_availability}.json
+│   └── scoring_protocol.json
+├── scoring_inputs/
+│   ├── reference/{reference.stm,reference.rttm,reference.seglst.json}
+│   └── hypothesis/<ablation>/{hypothesis.stm,hypothesis.rttm,hypothesis.seglst.json}
+├── profiles/{efficiency.json,power.json,latency_per_turn.jsonl}
+└── debug/<ablation>/<meeting>.debug.json
+```
+
+`run_manifest.json` is the authoritative ablation list and records canonical
+IDs, legacy IDs, flags, source/checkpoint hashes, Git state, package versions,
+seed and timestamps. The internal compatibility ID `c3_wo_conf_gates` is
+written as canonical `c3_wo_confidence_gates` in the formal bundle.
+
+Each JSONL turn includes the reference, ASR hypothesis, raw/clean/final GER
+hypotheses, fallback metadata, Top-5 identity ranking, confidence signals,
+raw estimated SNR dB, normalized SNR score, visual quality, synchronized
+latency and memory observations. C1 still makes decisions with Top-3; Top-5
+is logging-only. CUDA peak memory is reset once per ablation, not per turn.
+
+The scoring protocol fixes the text normalizer, public scorer versions,
+diarization collars, aggregation rules, group bins and definitions of the few
+project-specific metrics. Use `--no-formal-artifacts` only when a lightweight
+legacy/debug run is explicitly desired.
 
 ## Offline canonical debug audit
 

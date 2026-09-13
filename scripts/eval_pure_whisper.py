@@ -39,6 +39,7 @@ sys.path.insert(0, str(ROOT))
 
 from avsd_ger.wandb_logger import WandbLogger, add_wandb_args  # noqa: E402
 from avsd_ger.eval.metrics import compute_sa_wer, compute_scr  # noqa: E402
+from avsd_ger.eval.standard_metrics import compute_standard_metrics  # noqa: E402
 from avsd_ger.eval.session import SessionTurnResult  # noqa: E402
 
 
@@ -321,20 +322,20 @@ def main() -> int:
                 n_ins=n_ins,
                 wer=wer,
             ))
-            if args.diarization_source != "none":
-                speaker_turns.append(SessionTurnResult(
-                    turn_id=_row_id(row, i),
-                    start=float(row.get("start", seen)),
-                    end=float(row.get("end", seen + 1)),
-                    hyp_text=hyp_text,
-                    hyp_speaker=str(hyp_speaker) if hyp_speaker is not None else None,
-                    confidence=0.0,
-                    s_acoustic=None,
-                    iterations=1,
-                    pool_updated=False,
-                    ref_text=ref_text,
-                    ref_speaker=str(ref_speaker) if ref_speaker is not None else None,
-                ))
+            speaker_turns.append(SessionTurnResult(
+                turn_id=_row_id(row, i),
+                start=float(row.get("start", seen)),
+                end=float(row.get("end", seen + 1)),
+                hyp_text=hyp_text,
+                hyp_speaker=str(hyp_speaker) if hyp_speaker is not None else None,
+                confidence=0.0,
+                s_acoustic=None,
+                iterations=1,
+                pool_updated=False,
+                asr_language=args.language,
+                ref_text=ref_text,
+                ref_speaker=str(ref_speaker) if ref_speaker is not None else None,
+            ))
             total_ref += n_ref
             total_sub += n_sub
             total_del += n_del
@@ -375,6 +376,9 @@ def main() -> int:
                 "scr": scr_details,
             },
         }
+    standard_metrics = compute_standard_metrics(
+        speaker_turns, language=args.language or "en"
+    )
 
     payload = {
         "backend": args.backend,
@@ -398,6 +402,7 @@ def main() -> int:
             **{k: v for k, v in speaker_metrics.items() if k != "details"},
         },
         "speaker_metrics": speaker_metrics,
+        "standard_metrics": standard_metrics,
         "utterances": [asdict(x) for x in results],
     }
 

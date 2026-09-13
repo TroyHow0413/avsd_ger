@@ -8,6 +8,8 @@ import torch
 from avsd_ger.c1_identity.identity_pool import IdentityPool
 from avsd_ger.c3_feedback.closed_loop import ClosedLoopController, LoopAction
 from avsd_ger.eval.metrics import compute_sa_wer
+from avsd_ger.eval.standard_metrics import compute_jiwer_metrics
+from avsd_ger.eval.formal_artifacts import write_formal_artifacts
 from avsd_ger.text_normalization import (
     LanguageResolutionError,
     normalize_text,
@@ -59,6 +61,16 @@ class CanonicalWERTest(unittest.TestCase):
         result = _edit_counts("one two three", "one four three five")
         self.assertEqual(result["edits"], 2)
         self.assertEqual(result["ref_words"], 3)
+
+    def test_public_jiwer_payload_retains_full_error_family(self):
+        result = compute_jiwer_metrics(
+            [_turn("hello world", "hello duck")], language="en"
+        )
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["wer"], 0.5)
+        self.assertEqual(result["substitutions"], 1)
+        for key in ("mer", "wil", "wip", "cer", "hits"):
+            self.assertIn(key, result)
 
 
 class C3SemanticsTest(unittest.TestCase):
@@ -170,6 +182,69 @@ class OfflineAnalyzerTest(unittest.TestCase):
         self.assertEqual(aggregate["ger_acceptance_coverage"], 1.0)
         self.assertEqual(aggregate["outcomes"], {"improved": 1})
         self.assertEqual(aggregate["c1_raw_top1_accuracy"], 1.0)
+
+
+class FormalArtifactTest(unittest.TestCase):
+    def test_formal_tree_and_canonical_ablation_name(self):
+        turn = {
+            "summary": {
+                "turn_id": "t1", "start": 0.0, "end": 1.0,
+                "ref_text": "hello world", "ref_speaker": "alice",
+                "hyp_speaker": "pool_a", "asr_top": "hello word",
+                "final_text": "hello world", "confidence": 0.9,
+                "speaker_hyp_top5": ["pool_a", "pool_b"],
+                "c1_similarity_top5": [0.9, 0.2],
+                "av_consistency_raw": 0.9, "has_visual": True,
+                "lip_conf_mean": 0.8, "snr_estimate_db_mean": 12.0,
+                "wall_time_ms": 100.0, "gpu_memory_allocated_mb": 200.0,
+            },
+            "trace": [{
+                "text": "hello world", "asr_top": "hello word",
+                "cleaned_ger_text_before_gate": "hello world",
+                "fallback_applied": False, "final_source": "GER",
+            }],
+            "turn": {"manifest_row": {}},
+        }
+        result = {
+            "ablation": "c3_wo_conf_gates", "flags": {},
+            "metrics": {"wer": 0.0}, "standard_metrics": {},
+            "metric_details": {"av_sid": {"mapping": {"pool_a": "alice"}}},
+            "trace_summary": {}, "profile": {
+                "wall_time_s": 0.1, "audio_duration_s": 1.0,
+            }, "power": None, "turn_debug": [turn],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest_path = root / "meeting.json"
+            manifest_path.write_text("{}", encoding="utf-8")
+            output = root / "eval"
+            write_formal_artifacts(
+                output,
+                [{"manifest": str(manifest_path), "results": [result]}],
+                repo_root=Path(__file__).resolve().parents[1],
+                config_path=str(manifest_path), config={"asr": {"language": "en"}},
+                pool_path=None, aligner_ckpt=None, ger_ckpt=None,
+                seed=42, started_at="2026-01-01T00:00:00+00:00",
+            )
+            expected = [
+                "run_manifest.json", "records.schema.json",
+                "records/c3_wo_confidence_gates.jsonl",
+                "metrics/main_table.json",
+                "metrics/per_ablation/c3_wo_confidence_gates.json",
+                "metrics/per_meeting/c3_wo_confidence_gates.jsonl",
+                "metrics/groups/by_visual_availability.json",
+                "scoring_inputs/reference/reference.stm",
+                "scoring_inputs/hypothesis/c3_wo_confidence_gates/hypothesis.stm",
+                "profiles/latency_per_turn.jsonl",
+                "debug/c3_wo_confidence_gates/meeting.debug.json",
+            ]
+            for relative in expected:
+                self.assertTrue((output / relative).exists(), relative)
+            run_manifest = json.loads((output / "run_manifest.json").read_text())
+            self.assertEqual(
+                run_manifest["ablations"][0]["id"],
+                "c3_wo_confidence_gates",
+            )
 
 
 if __name__ == "__main__":

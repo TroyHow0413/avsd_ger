@@ -67,6 +67,11 @@ dependencies:
       - faster-whisper>=1.0.0     # CTranslate2 Whisper-large-v3
       - openai-whisper>=20231117  # canonical multilingual text normalizers
       - jiwer==4.0.0              # independent canonical WER cross-check
+      - meeteval>=0.4.3           # public meeting-ASR WER family (cp/orc/tcp)
+      - scikit-learn>=1.3,<2.0    # public classification/calibration metrics
+      - pyannote.metrics==3.2.1   # standard DER/JER, retained for NumPy<2 compatibility
+      - pyannote.core>=4.5,<6     # pyannote 6.x requires NumPy>=2
+      - pyannote.database>=4,<6
       - transformers>=4.49,<4.55   # torch 2.6 satisfies the >=2.4 requirement that 4.49 added; cap <4.55 to avoid bleeding-edge breakage
       - tokenizers>=0.21,<0.22     # transformers 4.49+ mandates this exact range
       - huggingface_hub>=0.34,<1.0    # 0.34+ provides the `hf` CLI; keep <1.0 for transformers compatibility

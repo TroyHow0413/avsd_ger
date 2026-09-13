@@ -44,6 +44,8 @@ class IdentityQueryResult:
     z_id: torch.Tensor
     is_unknown: bool
     evidence_mode: str = "audio_visual"
+    logged_top_ids: list[str] = field(default_factory=list)
+    logged_top_scores: list[float] = field(default_factory=list)
 
 
 class IdentityFuser(nn.Module):
@@ -72,6 +74,9 @@ class IdentityPool(nn.Module):
         self.cfg = cfg
         self.device = torch.device(device)
         self.top_k = int(cfg["top_k"])
+        # Keep the model decision at top_k (normally 3), while retaining a
+        # wider ranking for appendix Top-1/3/5 identity metrics.
+        self.log_top_k = max(self.top_k, int(cfg.get("log_top_k", 5)))
         self.min_av = float(cfg["min_av_consistency"])
 
         self.fuser = IdentityFuser(
@@ -174,6 +179,7 @@ class IdentityPool(nn.Module):
             scored.append((sid, float(cosine_sim(z_query, z_spk).item())))
         scored.sort(key=lambda x: x[1], reverse=True)
         top = scored[: self.top_k]
+        logged_top = scored[: self.log_top_k]
 
         av_consistency = top[0][1] if top else 0.0
         is_unknown = av_consistency < self.min_av
@@ -197,6 +203,8 @@ class IdentityPool(nn.Module):
             z_id=z_id,
             is_unknown=is_unknown,
             evidence_mode=evidence_mode,
+            logged_top_ids=[sid for sid, _ in logged_top],
+            logged_top_scores=[s for _, s in logged_top],
         )
 
     # -------------------------------------------------------------- i/o

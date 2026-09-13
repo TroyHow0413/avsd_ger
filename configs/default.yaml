@@ -102,6 +102,7 @@ identity:
   face_dim: 512
   fused_dim: 256
   top_k: 3
+  log_top_k: 5              # reporting only; top_k=3 still controls decisions
   min_av_consistency: 0.35
 
   # Dual-gate filtering (spec section 8 step 2)

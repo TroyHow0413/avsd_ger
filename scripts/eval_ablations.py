@@ -30,6 +30,8 @@ import glob
 import json
 import hashlib
 import sys
+import time
+from datetime import datetime, timezone
 from collections import Counter
 from dataclasses import asdict
 from pathlib import Path
@@ -42,10 +44,13 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from avsd_ger.pipeline import AVSDGERPipeline            # noqa: E402
+from avsd_ger.c1_identity.gate import estimate_frame_snr  # noqa: E402
 from avsd_ger.c2_alignment.model_backend import supported_model_families  # noqa: E402
 from avsd_ger.c3_statistics import c3_cluster_bootstrap_spec_check  # noqa: E402
 from avsd_ger.eval.session import SessionRunner, SessionTurn  # noqa: E402
 from avsd_ger.eval.metrics import evaluate_session, MetricsReport  # noqa: E402
+from avsd_ger.eval.standard_metrics import compute_standard_metrics  # noqa: E402
+from avsd_ger.eval.formal_artifacts import write_formal_artifacts  # noqa: E402
 from avsd_ger.eval.power import PowerMonitor             # noqa: E402
 from avsd_ger.frontend import get_frontend_profile, list_frontend_profiles  # noqa: E402
 from avsd_ger.utils import load_config                   # noqa: E402
@@ -62,6 +67,17 @@ ABLATION_MATRIX = [
         "disable_c3_update_gate": True,
     }),
 ]
+
+
+def _flatten_numeric(value: Any, prefix: str) -> dict[str, float]:
+    """Flatten only scalar public metrics for W&B; keep metadata in JSON."""
+    out: dict[str, float] = {}
+    if isinstance(value, dict):
+        for key, child in value.items():
+            out.update(_flatten_numeric(child, f"{prefix}/{key}"))
+    elif isinstance(value, (int, float)) and not isinstance(value, bool):
+        out[prefix] = float(value)
+    return out
 
 
 def _config_audit(cfg: dict[str, Any]) -> dict[str, Any]:
@@ -247,15 +263,22 @@ def _load_turns(manifest: dict[str, Any], *, allow_synthetic_audio: bool = False
     turns: list[SessionTurn] = []
     for i, row in enumerate(manifest.get("turns", manifest.get("utterances", []))):
         video_frames, has_visual = _load_video(row.get("mouth_roi") or row.get("video"))
+        audio = _load_audio(
+            row.get("audio"),
+            kind=f"turn audio for {row.get('turn_id', row.get('utt_id', f't{i:04d}'))}",
+            allow_synthetic_audio=allow_synthetic_audio,
+        )
+        raw_snr_db = row.get("snr_estimate_db_mean", row.get("snr_estimate_db"))
+        if raw_snr_db is None:
+            try:
+                raw_snr_db = float(np.mean(estimate_frame_snr(audio, sr=16000)))
+            except Exception:
+                raw_snr_db = None
         turns.append(SessionTurn(
             turn_id=str(row.get("turn_id", row.get("utt_id", f"t{i:04d}"))),
             start=float(row.get("start", i)),
             end=float(row.get("end", i + 1)),
-            audio_wav=_load_audio(
-                row.get("audio"),
-                kind=f"turn audio for {row.get('turn_id', row.get('utt_id', f't{i:04d}'))}",
-                allow_synthetic_audio=allow_synthetic_audio,
-            ),
+            audio_wav=audio,
             video_frames=video_frames,
             has_visual=has_visual,
             face_image=None,
@@ -268,6 +291,7 @@ def _load_turns(manifest: dict[str, Any], *, allow_synthetic_audio: bool = False
             mouth_roi_path=row.get("mouth_roi"),
             video_path=row.get("video"),
             manifest_row=dict(row),
+            snr_estimate_db_mean=(float(raw_snr_db) if raw_snr_db is not None else None),
         ))
     return turns
 
@@ -421,6 +445,10 @@ def _run_one(
     turns = _load_turns(manifest, allow_synthetic_audio=allow_synthetic_audio)
     runner = SessionRunner(pipe)
 
+    if pipe.device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(pipe.device)
+    run_started = time.perf_counter()
+
     if monitor is not None:
         with monitor.measure(ablation_name):
             session = runner.run(turns)
@@ -428,9 +456,43 @@ def _run_one(
     else:
         session = runner.run(turns)
         pwr = None
+    wall_time_s = time.perf_counter() - run_started
+    latencies = np.asarray(
+        [t.wall_time_ms for t in session.turns if t.wall_time_ms is not None],
+        dtype=np.float64,
+    )
+    audio_duration_s = sum(max(0.0, t.end - t.start) for t in session.turns)
+    profile = {
+        "wall_time_s": wall_time_s,
+        "audio_duration_s": audio_duration_s,
+        "rtf": wall_time_s / audio_duration_s if audio_duration_s > 0 else None,
+        "latency_ms_mean": float(latencies.mean()) if latencies.size else None,
+        "latency_ms_p50": float(np.percentile(latencies, 50)) if latencies.size else None,
+        "latency_ms_p95": float(np.percentile(latencies, 95)) if latencies.size else None,
+        "latency_ms_p99": float(np.percentile(latencies, 99)) if latencies.size else None,
+        "gpu_peak_allocated_mb": (
+            float(torch.cuda.max_memory_allocated(pipe.device)) / (1024.0 ** 2)
+            if pipe.device.type == "cuda" else None
+        ),
+        "gpu_peak_reserved_mb": (
+            float(torch.cuda.max_memory_reserved(pipe.device)) / (1024.0 ** 2)
+            if pipe.device.type == "cuda" else None
+        ),
+        "parameters_total": sum(
+            p.numel() for module in (pipe.pool, pipe.aligner, pipe.ger)
+            for p in module.parameters()
+        ),
+        "parameters_trainable": sum(
+            p.numel() for module in (pipe.pool, pipe.aligner, pipe.ger)
+            for p in module.parameters() if p.requires_grad
+        ),
+    }
 
     metric_language = cfg_run.get("asr", {}).get("language") or "auto"
     report = evaluate_session(session.turns, language=metric_language)
+    standard_metrics = compute_standard_metrics(
+        session.turns, language=metric_language
+    )
     frontend_meta = _frontend_meta_from_cfg(cfg_run)
     trace_summary = _summarize_traces(session.turns)
 
@@ -451,6 +513,9 @@ def _run_one(
             "normalizer_version": report.details["sa_wer"].get("normalizer_version"),
             "metric_language": metric_language,
         },
+        "standard_metrics": standard_metrics,
+        "metric_details": report.details,
+        "profile": profile,
         "power": ({
             "label": pwr.label,
             "duration_s": pwr.duration_s,
@@ -479,6 +544,7 @@ def _build_turn_debug(turns) -> list[dict[str, Any]]:
         asr_dbg = pipe_dbg.get("asr", {}) or {}
         visual_dbg = pipe_dbg.get("visual", {}) or {}
         c1_dbg = pipe_dbg.get("c1_effective", {}) or {}
+        input_dbg = pipe_dbg.get("input", {}) or {}
         last_trace = turn.trace[-1] if turn.trace else {}
         rows.append({
             "summary": {
@@ -507,8 +573,23 @@ def _build_turn_debug(turns) -> list[dict[str, Any]]:
                 "has_visual": last_trace.get("has_visual", visual_dbg.get("has_visual")),
                 "top_ids": c1_dbg.get("top_ids"),
                 "top_scores": c1_dbg.get("top_scores"),
+                "speaker_hyp_top5": c1_dbg.get("logged_top_ids", c1_dbg.get("top_ids")),
+                "c1_similarity_top5": c1_dbg.get("logged_top_scores", c1_dbg.get("top_scores")),
                 "av_consistency_raw": c1_dbg.get("av_consistency_raw"),
                 "is_unknown": c1_dbg.get("is_unknown"),
+                "snr_estimate_db_mean": turn.snr_estimate_db_mean,
+                "snr_score_mean": (
+                    float((input_dbg.get("snr_per_tok") or {}).get("mean"))
+                    if (input_dbg.get("snr_per_tok") or {}).get("mean") is not None
+                    else None
+                ),
+                "lip_conf_mean": (
+                    float((input_dbg.get("lip_conf_v") or {}).get("mean"))
+                    if (input_dbg.get("lip_conf_v") or {}).get("mean") is not None
+                    else None
+                ),
+                "wall_time_ms": turn.wall_time_ms,
+                "gpu_memory_allocated_mb": turn.gpu_memory_allocated_mb,
             },
             "turn": dbg.get("turn", {}),
             "input": pipe_dbg.get("input", {}),
@@ -594,6 +675,9 @@ def _write_debug_sidecars(
                 "flags": r["flags"],
                 "frontend": r["frontend"],
                 "metrics": r["metrics"],
+                "standard_metrics": r.get("standard_metrics", {}),
+                "metric_details": r.get("metric_details", {}),
+                "profile": r.get("profile", {}),
                 "trace_summary": r["trace_summary"],
                 "config_audit": r["config_audit"],
                 "speaker_order": r["speaker_order"],
@@ -673,6 +757,10 @@ def _run_manifest(
             f"{metric_prefix}/pool_updates/{manifest_path.stem}": r["trace_summary"]["pool_updates"],
             **({f"{prefix}/energy_wh": r["power"]["energy_wh"],
                 f"{prefix}/avg_power_w": r["power"]["avg_power_w"]} if r["power"] else {}),
+            **_flatten_numeric(
+                r.get("standard_metrics", {}),
+                f"{prefix}/standard",
+            ),
         }, step=step_offset + i)
 
     return results, None
@@ -714,6 +802,11 @@ def main() -> int:
         ),
     )
     p.add_argument("--out", default=str(ROOT / "out/ablation_report.json"))
+    p.add_argument(
+        "--no-formal-artifacts",
+        action="store_true",
+        help="Write only the legacy JSON/debug outputs (formal artifacts are on by default).",
+    )
     p.add_argument("--no-power", action="store_true", help="skip PowerMonitor")
     p.add_argument("--idle-calibrate-s", type=float, default=1.0)
     p.add_argument(
@@ -864,7 +957,9 @@ def main() -> int:
         monitor = PowerMonitor()
         monitor.calibrate_idle(duration_s=args.idle_calibrate_s)
 
+    evaluation_started_at = datetime.now(timezone.utc).isoformat()
     all_runs: list[dict[str, Any]] = []
+    raw_runs: list[dict[str, Any]] = []
     ablations_per_manifest = len(args.only) if args.only is not None else len(ABLATION_MATRIX)
     # The 3B backend and immutable checkpoints are loaded once for the entire
     # 12x5 batch. _run_one resets gallery and ablation flags on every run.
@@ -890,6 +985,7 @@ def main() -> int:
         )
         out_path = _output_path_for_manifest(args.out, manifest_path, multi=multi)
         out_path.parent.mkdir(parents=True, exist_ok=True)
+        raw_runs.append({"manifest": str(manifest_path), "results": results})
         results_for_payload = _write_debug_sidecars(results, out_path, manifest_path)
         payload = {
             "manifest": str(manifest_path),
@@ -899,12 +995,32 @@ def main() -> int:
         payload["c3_spec_check"] = c3_cluster_bootstrap_spec_check(
             [payload],
             samples=args.spec_bootstrap_samples,
-            seed=args.spec_bootstrap_seed,
+            seed=int(cfg.get("seed", 1337)),
         )
         with open(out_path, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2)
         print(f"\n[wrote] {out_path}")
         all_runs.append(payload)
+
+    if not args.no_formal_artifacts:
+        requested_out = Path(args.out)
+        artifact_root = (
+            requested_out.parent / requested_out.stem
+            if requested_out.suffix.lower() == ".json" else requested_out
+        )
+        written_root = write_formal_artifacts(
+            artifact_root,
+            raw_runs,
+            repo_root=ROOT,
+            config_path=args.config,
+            config=cfg,
+            pool_path=args.pool,
+            aligner_ckpt=args.aligner_ckpt,
+            ger_ckpt=args.ger_ckpt,
+            seed=args.spec_bootstrap_seed,
+            started_at=evaluation_started_at,
+        )
+        print(f"\n[formal-artifacts] wrote {written_root}")
 
     c3_spec_check = c3_cluster_bootstrap_spec_check(
         all_runs,
@@ -936,6 +1052,10 @@ def main() -> int:
             for k, v in r["metrics"].items():
                 summary[f"summary/{stem}/{r['ablation']}/{k}"] = v
                 summary[f"summary_metric/{r['ablation']}/{k}/{stem}"] = v
+            summary.update(_flatten_numeric(
+                r.get("standard_metrics", {}),
+                f"summary/{stem}/{r['ablation']}/standard",
+            ))
             ts = r.get("trace_summary", {}) or {}
             for k in ("fallback_rate", "fallback_turns", "pool_updates", "mean_iterations"):
                 if k in ts:

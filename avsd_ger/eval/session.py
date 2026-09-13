@@ -21,6 +21,7 @@ attribution, given segmentation).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import time
 from typing import Any, Iterable
 
 import numpy as np
@@ -68,6 +69,7 @@ class SessionTurn:
     mouth_roi_path: str | None = None
     video_path: str | None = None
     manifest_row: dict[str, Any] = field(default_factory=dict)
+    snr_estimate_db_mean: float | None = None
 
 
 @dataclass
@@ -90,6 +92,9 @@ class SessionTurnResult:
     # Passthrough ground truth so metrics don't need the original SessionTurn.
     ref_text: str | None = None
     ref_speaker: str | None = None
+    wall_time_ms: float | None = None
+    gpu_memory_allocated_mb: float | None = None
+    snr_estimate_db_mean: float | None = None
 
 
 @dataclass
@@ -132,6 +137,10 @@ class SessionRunner:
         transcript_lines: list[str] = []
 
         for turn in turns:
+            device = torch.device(getattr(self.pipeline, "device", "cpu"))
+            if device.type == "cuda":
+                torch.cuda.synchronize(device)
+            started = time.perf_counter()
             out = self.pipeline.run(
                 audio_wav=turn.audio_wav,
                 video_frames=turn.video_frames,
@@ -140,6 +149,13 @@ class SessionRunner:
                 speaker_mask_v=turn.speaker_mask_v,
                 snr_per_tok=turn.snr_per_tok,
                 lip_conf_v=turn.lip_conf_v,
+            )
+            if device.type == "cuda":
+                torch.cuda.synchronize(device)
+            wall_time_ms = (time.perf_counter() - started) * 1000.0
+            gpu_memory_mb = (
+                float(torch.cuda.memory_allocated(device)) / (1024.0 ** 2)
+                if device.type == "cuda" else None
             )
             hyp_text = out.get("text", "") or ""
             hyp_speaker = out.get("speaker_id")
@@ -168,12 +184,18 @@ class SessionRunner:
                         "mouth_roi_path": turn.mouth_roi_path,
                         "video_path": turn.video_path,
                         "has_visual_flag": turn.has_visual,
+                        "snr_estimate_db_mean": turn.snr_estimate_db_mean,
+                        "wall_time_ms": wall_time_ms,
+                        "gpu_memory_allocated_mb": gpu_memory_mb,
                         "manifest_row": turn.manifest_row,
                     },
                     "pipeline": dict(out.get("debug", {}) or {}),
                 },
                 ref_text=turn.ref_text,
                 ref_speaker=turn.ref_speaker,
+                wall_time_ms=wall_time_ms,
+                gpu_memory_allocated_mb=gpu_memory_mb,
+                snr_estimate_db_mean=turn.snr_estimate_db_mean,
             )
             results.append(tr)
 
@@ -218,5 +240,6 @@ class SessionRunner:
                 mouth_roi_path=row.get("mouth_roi"),
                 video_path=row.get("video"),
                 manifest_row=dict(row),
+                snr_estimate_db_mean=row.get("snr_estimate_db_mean", row.get("snr_estimate_db")),
             ))
         return turns
