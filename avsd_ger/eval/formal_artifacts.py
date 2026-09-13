@@ -145,6 +145,17 @@ def records_schema() -> dict[str, Any]:
         "start_time": {"type": "number"},
         "end_time": {"type": "number"},
         "duration_s": {"type": "number", "minimum": 0},
+        "gpu_peak_mb": {
+            "type": ["number", "null"],
+            "description": (
+                "Meeting-ablation run-level CUDA peak allocated memory, "
+                "repeated on every turn for self-contained records."
+            ),
+        },
+        "gpu_memory_allocated_mb": {
+            "type": ["number", "null"],
+            "description": "Instantaneous CUDA allocated memory sampled after this turn.",
+        },
     })
     return {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -166,11 +177,20 @@ def _visual_availability(row: dict[str, Any], ablation: str) -> str:
     summary = row.get("summary", {}) or {}
     turn = row.get("turn", {}) or {}
     manifest = turn.get("manifest_row", {}) or {}
-    if summary.get("has_visual") and (_last_trace(row).get("ger_mode") == "audio_only"):
-        return "audio_only_by_ablation"
     if manifest.get("official_visual_exclusion") or manifest.get("source_duration_exclusion"):
         return "source_video_excluded"
-    if not summary.get("has_visual"):
+    input_debug = row.get("input", {}) or {}
+    if "has_visual_flag" in input_debug:
+        visual_available = bool(input_debug.get("has_visual_flag"))
+    else:
+        # Backward-compatible fallback for debug files written before the
+        # explicit input availability flag was retained.
+        visual_available = bool(manifest.get("mouth_roi") or manifest.get("video"))
+    pipeline_used_visual = bool(summary.get("has_visual"))
+    effective_mode = _last_trace(row).get("ger_mode")
+    if visual_available and not pipeline_used_visual and effective_mode == "audio_only":
+        return "audio_only_by_ablation"
+    if not visual_available or not pipeline_used_visual:
         return "missing_mouth_roi"
     lip = summary.get("lip_conf_mean")
     if lip is not None and float(lip) < 0.5:
@@ -211,7 +231,7 @@ def _record(row: dict[str, Any], meeting_id: str, ablation: str) -> dict[str, An
         "final_source": last.get("final_source"),
         "ger_confidence": summary.get("confidence"),
         "acoustic_confidence": last.get("s_acoustic_conf"),
-        "c1_similarity": summary.get("av_consistency_raw"),
+        "c1_similarity": last.get("av_consistency_raw", summary.get("av_consistency_raw")),
         "c1_confidence": components.get("id") if isinstance(components, dict) else None,
         "lip_conf_mean": summary.get("lip_conf_mean"),
         "snr_estimate_db": summary.get("snr_estimate_db_mean"),
@@ -358,6 +378,109 @@ def _topk_sid(records: list[dict[str, Any]], mappings: dict[str, dict[str, str]]
     return scores
 
 
+def _binary_confidence_diagnostics(
+    labels: list[int],
+    probabilities: list[float],
+    *,
+    target: str,
+    probability_definition: str,
+) -> dict[str, Any]:
+    """Calibration/selective-risk diagnostics with fixed, auditable rules."""
+    if not labels:
+        return {
+            "status": "unavailable", "target": target,
+            "probability_definition": probability_definition,
+            "reason": "no labeled records",
+        }
+    probabilities = [min(1.0, max(0.0, float(value))) for value in probabilities]
+    n_bins = 15
+    ece = 0.0
+    bins: list[dict[str, Any]] = []
+    for index in range(n_bins):
+        lower = index / n_bins
+        upper = (index + 1) / n_bins
+        members = [
+            i for i, value in enumerate(probabilities)
+            if lower <= value < upper or (index == n_bins - 1 and value == 1.0)
+        ]
+        if not members:
+            bins.append({
+                "lower_inclusive": lower, "upper_exclusive": upper,
+                "n": 0, "accuracy": None, "mean_confidence": None,
+            })
+            continue
+        accuracy = sum(labels[i] for i in members) / len(members)
+        mean_confidence = sum(probabilities[i] for i in members) / len(members)
+        ece += len(members) / len(labels) * abs(accuracy - mean_confidence)
+        bins.append({
+            "lower_inclusive": lower, "upper_exclusive": upper,
+            "n": len(members), "accuracy": accuracy,
+            "mean_confidence": mean_confidence,
+        })
+
+    order = sorted(range(len(probabilities)), key=lambda i: probabilities[i], reverse=True)
+    cumulative_errors = 0
+    risks: list[float] = []
+    for rank, row_index in enumerate(order, start=1):
+        cumulative_errors += 1 - labels[row_index]
+        risks.append(cumulative_errors / rank)
+
+    payload: dict[str, Any] = {
+        "status": "ok", "target": target,
+        "probability_definition": probability_definition,
+        "n": len(labels), "n_positive": sum(labels),
+        "expected_calibration_error_15_bins": ece,
+        "area_under_risk_coverage_curve": sum(risks) / len(risks),
+        "bins": bins,
+    }
+    try:
+        from sklearn.metrics import (
+            average_precision_score, brier_score_loss, log_loss, roc_auc_score,
+        )
+        payload.update({
+            "library": "scikit-learn",
+            "brier_score": float(brier_score_loss(labels, probabilities)),
+            "log_loss": float(log_loss(labels, probabilities, labels=[0, 1])),
+            "auroc": (
+                float(roc_auc_score(labels, probabilities))
+                if len(set(labels)) == 2 else None
+            ),
+            "average_precision": (
+                float(average_precision_score(labels, probabilities))
+                if len(set(labels)) == 2 else None
+            ),
+        })
+    except Exception as exc:
+        payload["library_error"] = f"{type(exc).__name__}: {exc}"
+    return payload
+
+
+def _c1_calibration(
+    records: list[dict[str, Any]],
+    mappings: dict[str, dict[str, str]],
+) -> dict[str, Any]:
+    labels: list[int] = []
+    probabilities: list[float] = []
+    for row in records:
+        reference = row.get("speaker_ref")
+        hypothesis = row.get("speaker_hyp")
+        similarity = row.get("c1_similarity")
+        if reference is None or similarity is None:
+            continue
+        mapped = mappings.get(row["meeting_id"], {}).get(hypothesis, hypothesis)
+        labels.append(int(hypothesis is not None and mapped == reference))
+        # av_consistency_raw is cosine similarity rather than a learned
+        # probability. Clipping follows the model's existing [0,1]-threshold
+        # interpretation and is recorded explicitly in scoring_protocol.json.
+        probabilities.append(min(1.0, max(0.0, float(similarity))))
+    return _binary_confidence_diagnostics(
+        labels,
+        probabilities,
+        target="meeting-level Hungarian-mapped top-1 speaker correctness",
+        probability_definition="clip(av_consistency_raw cosine similarity, 0, 1)",
+    )
+
+
 def _bucket(value: float | None, bins: list[tuple[str, float | None, float | None]]) -> str:
     if value is None:
         return "unavailable"
@@ -473,6 +596,20 @@ def _scoring_protocol(language: str) -> dict[str, Any]:
         ),
         "aggregation": "micro-aggregate by concatenated turns with meeting-prefixed speaker namespaces; per-meeting rows are retained",
         "efficiency": "CUDA synchronized per turn; peak memory reset once per ablation; RTF=wall_time/audio_duration",
+        "memory_semantics": {
+            "gpu_peak_mb": (
+                "meeting-ablation run-level CUDA peak allocated memory; repeated "
+                "on each turn to keep records self-contained"
+            ),
+            "gpu_memory_allocated_mb": (
+                "instantaneous CUDA allocated memory sampled after that turn"
+            ),
+        },
+        "c1_calibration": {
+            "target": "meeting-level Hungarian-mapped top-1 speaker correctness",
+            "probability": "clip(av_consistency_raw cosine similarity, 0, 1)",
+            "warning": "diagnostic confidence proxy, not a learned calibrated probability",
+        },
     }
 
 
@@ -568,7 +705,10 @@ def write_formal_artifacts(
         scored = _score_records(rows, language)
         correction[ablation] = _correction_metrics(rows, language)
         sid[ablation] = _topk_sid(rows, mappings[ablation])
-        calibration[ablation] = scored["standard_metrics"].get("sklearn", {}).get("confidence_quality", {})
+        calibration[ablation] = {
+            "ger": scored["standard_metrics"].get("sklearn", {}).get("confidence_quality", {}),
+            "c1": _c1_calibration(rows, mappings[ablation]),
+        }
         per_ablation_metrics[ablation] = {
             **scored,
             "correction": correction[ablation],

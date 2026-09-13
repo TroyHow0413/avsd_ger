@@ -291,6 +291,15 @@ hypotheses, fallback metadata, Top-5 identity ranking, confidence signals,
 raw estimated SNR dB, normalized SNR score, visual quality, synchronized
 latency and memory observations. C1 still makes decisions with Top-3; Top-5
 is logging-only. CUDA peak memory is reset once per ablation, not per turn.
+`gpu_peak_mb` is therefore a meeting-ablation run-level peak repeated on each
+turn, while `gpu_memory_allocated_mb` is the instantaneous allocation sampled
+after that turn.
+
+`appendix_calibration.json` keeps GER confidence calibration and C1 identity
+calibration separately. C1 correctness uses the meeting-level Hungarian label
+mapping. Because `av_consistency_raw` is a cosine similarity rather than a
+learned probability, ECE/Brier use `clip(av_consistency_raw, 0, 1)` as an
+explicitly documented diagnostic proxy; ranking metrics retain the raw score.
 
 The scoring protocol fixes the text normalizer, public scorer versions,
 diarization collars, aggregation rules, group bins and definitions of the few

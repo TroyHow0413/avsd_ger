@@ -9,7 +9,7 @@ from avsd_ger.c1_identity.identity_pool import IdentityPool
 from avsd_ger.c3_feedback.closed_loop import ClosedLoopController, LoopAction
 from avsd_ger.eval.metrics import compute_sa_wer
 from avsd_ger.eval.standard_metrics import compute_jiwer_metrics
-from avsd_ger.eval.formal_artifacts import write_formal_artifacts
+from avsd_ger.eval.formal_artifacts import _visual_availability, write_formal_artifacts
 from avsd_ger.text_normalization import (
     LanguageResolutionError,
     normalize_text,
@@ -185,6 +185,28 @@ class OfflineAnalyzerTest(unittest.TestCase):
 
 
 class FormalArtifactTest(unittest.TestCase):
+    def test_visual_availability_uses_input_availability_not_effective_mode(self):
+        audio_only = {
+            "summary": {"has_visual": False},
+            "input": {"has_visual_flag": True},
+            "turn": {"manifest_row": {"mouth_roi": "mouth.npy"}},
+            "trace": [{"ger_mode": "audio_only"}],
+        }
+        self.assertEqual(
+            _visual_availability(audio_only, "full_model"),
+            "audio_only_by_ablation",
+        )
+        wo_c2_still_uses_visual = {
+            "summary": {"has_visual": True, "lip_conf_mean": 0.9},
+            "input": {"has_visual_flag": True},
+            "turn": {"manifest_row": {"mouth_roi": "mouth.npy"}},
+            "trace": [{"ger_mode": "av"}],
+        }
+        self.assertEqual(
+            _visual_availability(wo_c2_still_uses_visual, "wo_c2"),
+            "real_visual",
+        )
+
     def test_formal_tree_and_canonical_ablation_name(self):
         turn = {
             "summary": {
@@ -194,7 +216,7 @@ class FormalArtifactTest(unittest.TestCase):
                 "final_text": "hello world", "confidence": 0.9,
                 "speaker_hyp_top5": ["pool_a", "pool_b"],
                 "c1_similarity_top5": [0.9, 0.2],
-                "av_consistency_raw": 0.9, "has_visual": True,
+                "av_consistency_raw": 0.1, "has_visual": True,
                 "lip_conf_mean": 0.8, "snr_estimate_db_mean": 12.0,
                 "wall_time_ms": 100.0, "gpu_memory_allocated_mb": 200.0,
             },
@@ -202,8 +224,10 @@ class FormalArtifactTest(unittest.TestCase):
                 "text": "hello world", "asr_top": "hello word",
                 "cleaned_ger_text_before_gate": "hello world",
                 "fallback_applied": False, "final_source": "GER",
+                "av_consistency_raw": 0.9,
             }],
             "turn": {"manifest_row": {}},
+            "input": {"has_visual_flag": True},
         }
         result = {
             "ablation": "c3_wo_conf_gates", "flags": {},
@@ -245,6 +269,17 @@ class FormalArtifactTest(unittest.TestCase):
                 run_manifest["ablations"][0]["id"],
                 "c3_wo_confidence_gates",
             )
+            calibration = json.loads(
+                (output / "metrics/appendix_calibration.json").read_text()
+            )
+            c1 = calibration["c3_wo_confidence_gates"]["c1"]
+            self.assertEqual(c1["status"], "ok")
+            self.assertEqual(c1["n_positive"], 1)
+            self.assertAlmostEqual(c1["brier_score"], 0.01)
+            protocol = json.loads(
+                (output / "metrics/scoring_protocol.json").read_text()
+            )
+            self.assertIn("memory_semantics", protocol)
 
 
 if __name__ == "__main__":
