@@ -143,6 +143,69 @@ class IdentityPool(nn.Module):
         return updated
 
     # -------------------------------------------------------------- query
+    def _query_embedding(
+        self,
+        voice_emb: torch.Tensor,
+        face_emb: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, str]:
+        voice_emb = voice_emb.to(self.device)
+        face_emb = face_emb.to(self.device) if face_emb is not None else None
+        if face_emb is None:
+            return (
+                F.normalize(
+                    self.fuser.voice_proj(voice_emb.unsqueeze(0)), dim=-1
+                ).squeeze(0),
+                "voice_only",
+            )
+        return (
+            self.fuser(voice_emb.unsqueeze(0), face_emb.unsqueeze(0)).squeeze(0),
+            "audio_visual",
+        )
+
+    def _speaker_embedding(
+        self,
+        speaker_id: str,
+        *,
+        voice_only: bool,
+    ) -> torch.Tensor:
+        if speaker_id not in self._speakers:
+            raise KeyError(f"Speaker {speaker_id!r} is not enrolled")
+        speaker = self._speakers[speaker_id]
+        if voice_only:
+            return F.normalize(
+                self.fuser.voice_proj(speaker.voice_emb.unsqueeze(0)), dim=-1
+            ).squeeze(0)
+        return self.fuser(
+            speaker.voice_emb.unsqueeze(0), speaker.face_emb.unsqueeze(0)
+        ).squeeze(0)
+
+    def conditioning_vector_for_speaker(
+        self,
+        voice_emb: torch.Tensor,
+        face_emb: torch.Tensor | None,
+        speaker_id: str,
+    ) -> torch.Tensor:
+        """Build the normal C1 conditioning vector for an explicit gallery ID.
+
+        This is used by the deterministic shuffled-z causal intervention. It
+        changes only the vector supplied to C2/GER; retrieval scores, labels,
+        confidence, and speaker hints remain those of the original query.
+        """
+        z_query, evidence_mode = self._query_embedding(voice_emb, face_emb)
+        z_speaker = self._speaker_embedding(
+            speaker_id, voice_only=evidence_mode == "voice_only",
+        )
+        return F.normalize(0.5 * z_query + 0.5 * z_speaker, dim=-1)
+
+    def deterministic_derangement(self) -> dict[str, str]:
+        """Map every sorted gallery ID to the next ID (cyclic, no self-map)."""
+        ids = sorted(self._speakers)
+        if len(ids) < 2:
+            raise ValueError(
+                "shuffled_z_id requires at least two enrolled speakers"
+            )
+        return {speaker_id: ids[(index + 1) % len(ids)] for index, speaker_id in enumerate(ids)}
+
     def query(
         self,
         voice_emb: torch.Tensor,
@@ -156,26 +219,13 @@ class IdentityPool(nn.Module):
         # Voice and face live in different native dims (192 vs 512); they can
         # only be compared after the learnable fuser projects both into
         # `fused_dim` space.
-        if face_emb is None:
-            z_query = F.normalize(
-                self.fuser.voice_proj(voice_emb.unsqueeze(0)), dim=-1
-            ).squeeze(0)
-            evidence_mode = "voice_only"
-        else:
-            z_query = self.fuser(
-                voice_emb.unsqueeze(0), face_emb.unsqueeze(0)
-            ).squeeze(0)
-            evidence_mode = "audio_visual"
+        z_query, evidence_mode = self._query_embedding(voice_emb, face_emb)
 
         scored: list[tuple[str, float]] = []
         for sid, spk in self._speakers.items():
             if sid in skip_ids:
                 continue
-            z_spk = (
-                F.normalize(self.fuser.voice_proj(spk.voice_emb.unsqueeze(0)), dim=-1).squeeze(0)
-                if face_emb is None
-                else self.fuser(spk.voice_emb.unsqueeze(0), spk.face_emb.unsqueeze(0)).squeeze(0)
-            )
+            z_spk = self._speaker_embedding(sid, voice_only=face_emb is None)
             scored.append((sid, float(cosine_sim(z_query, z_spk).item())))
         scored.sort(key=lambda x: x[1], reverse=True)
         top = scored[: self.top_k]
@@ -188,13 +238,9 @@ class IdentityPool(nn.Module):
             z_id = torch.zeros_like(z_query)
         else:
             sid_top, _ = top[0]
-            spk = self._speakers[sid_top]
-            z_spk = (
-                F.normalize(self.fuser.voice_proj(spk.voice_emb.unsqueeze(0)), dim=-1).squeeze(0)
-                if face_emb is None
-                else self.fuser(spk.voice_emb.unsqueeze(0), spk.face_emb.unsqueeze(0)).squeeze(0)
+            z_id = self.conditioning_vector_for_speaker(
+                voice_emb, face_emb, sid_top,
             )
-            z_id = F.normalize(0.5 * z_query + 0.5 * z_spk, dim=-1)
 
         return IdentityQueryResult(
             top_ids=[sid for sid, _ in top],

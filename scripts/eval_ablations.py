@@ -53,11 +53,11 @@ from avsd_ger.eval.standard_metrics import compute_standard_metrics  # noqa: E40
 from avsd_ger.eval.formal_artifacts import write_formal_artifacts  # noqa: E402
 from avsd_ger.eval.power import PowerMonitor             # noqa: E402
 from avsd_ger.frontend import get_frontend_profile, list_frontend_profiles  # noqa: E402
-from avsd_ger.utils import load_config                   # noqa: E402
+from avsd_ger.utils import load_config, seed_all         # noqa: E402
 from avsd_ger.wandb_logger import WandbLogger, add_wandb_args  # noqa: E402
 
 
-ABLATION_MATRIX = [
+DEFAULT_ABLATION_MATRIX = [
     ("full_model",           {}),
     ("wo_c1",                {"disable_c1": True}),
     ("wo_c2",                {"disable_c2": True}),
@@ -67,6 +67,14 @@ ABLATION_MATRIX = [
         "disable_c3_update_gate": True,
     }),
 ]
+
+IDENTITY_CAUSAL_MATRIX = [
+    ("identity_normal",      {}),
+    ("zero_z_id",            {"zero_z_id": True}),
+    ("shuffled_z_id",        {"shuffle_z_id": True}),
+]
+
+ABLATION_REGISTRY = dict(DEFAULT_ABLATION_MATRIX + IDENTITY_CAUSAL_MATRIX)
 
 
 def _flatten_numeric(value: Any, prefix: str) -> dict[str, float]:
@@ -384,10 +392,15 @@ def _run_one(
     allow_legacy_checkpoint: bool = False,
 ) -> dict[str, Any]:
     cfg_run = copy.deepcopy(cfg)
+    # Every ablation sees exactly the same stochastic backbone/enrollment
+    # draws. This is required for a paired causal intervention.
+    seed_all(int(cfg_run.get("seed", 1337)))
     cfg_run.setdefault("ablation", {})
     # Clear any caller-supplied ablation flags for a clean baseline, then apply.
     cfg_run["ablation"] = {
         "disable_c1": False,
+        "zero_z_id": False,
+        "shuffle_z_id": False,
         "disable_c2": False,
         "disable_c3": False,
         "disable_c3_decision_gate": False,
@@ -409,6 +422,10 @@ def _run_one(
         # Only ablation switches vary. Neural weights stay resident while all
         # per-run mutable state is reset below.
         pipe.disable_c1 = bool(cfg_run["ablation"]["disable_c1"])
+        pipe.zero_z_id = bool(cfg_run["ablation"]["zero_z_id"])
+        pipe.shuffle_z_id = bool(cfg_run["ablation"]["shuffle_z_id"])
+        if pipe.zero_z_id and pipe.shuffle_z_id:
+            raise ValueError("zero_z_id and shuffle_z_id are mutually exclusive")
         pipe.disable_c2 = bool(cfg_run["ablation"]["disable_c2"])
         pipe.disable_c3 = bool(cfg_run["ablation"]["disable_c3"])
         pipe.disable_conf_gate = bool(cfg_run["ablation"]["disable_conf_gate"])
@@ -696,6 +713,7 @@ def _run_manifest(
     fresh_pool: bool,
     monitor: PowerMonitor | None,
     only: list[str] | None,
+    identity_causal_topology: str,
     wb: WandbLogger,
     step_offset: int = 0,
     aligner_ckpt: str | None = None,
@@ -713,9 +731,22 @@ def _run_manifest(
         )
 
     results: list[dict[str, Any]] = []
-    for i, (name, flags) in enumerate(ABLATION_MATRIX):
-        if only is not None and name not in only:
-            continue
+    requested = (
+        [name for name, _ in DEFAULT_ABLATION_MATRIX]
+        if only is None else list(only)
+    )
+    unknown = [name for name in requested if name not in ABLATION_REGISTRY]
+    if unknown:
+        raise ValueError(
+            f"Unknown ablation(s): {unknown}; available={sorted(ABLATION_REGISTRY)}"
+        )
+    for i, name in enumerate(requested):
+        flags = dict(ABLATION_REGISTRY[name])
+        if (
+            name in {item[0] for item in IDENTITY_CAUSAL_MATRIX}
+            and identity_causal_topology == "wo_c3"
+        ):
+            flags["disable_c3"] = True
         print(f"\n=== {manifest_path.name} :: running ablation: {name}  flags={flags} ===")
         r = _run_one(
             cfg,
@@ -813,7 +844,19 @@ def main() -> int:
         "--only",
         nargs="+",
         default=None,
-        help="restrict to a subset of {full_model,wo_c1,wo_c2,wo_c3,c3_wo_conf_gates}",
+        help=(
+            "restrict to named ablations; optional identity causal rows are "
+            "{identity_normal,zero_z_id,shuffled_z_id}"
+        ),
+    )
+    p.add_argument(
+        "--identity-causal-topology",
+        choices=["full_model", "wo_c3"],
+        default="full_model",
+        help=(
+            "C3 topology held fixed for identity_normal/zero_z_id/shuffled_z_id. "
+            "Choose this from the scoring gate before running causal evaluation."
+        ),
     )
     p.add_argument("--spec-bootstrap-samples", type=int, default=10_000)
     p.add_argument("--spec-bootstrap-seed", type=int, default=1337)
@@ -960,7 +1003,9 @@ def main() -> int:
     evaluation_started_at = datetime.now(timezone.utc).isoformat()
     all_runs: list[dict[str, Any]] = []
     raw_runs: list[dict[str, Any]] = []
-    ablations_per_manifest = len(args.only) if args.only is not None else len(ABLATION_MATRIX)
+    ablations_per_manifest = (
+        len(args.only) if args.only is not None else len(DEFAULT_ABLATION_MATRIX)
+    )
     # The 3B backend and immutable checkpoints are loaded once for the entire
     # 12x5 batch. _run_one resets gallery and ablation flags on every run.
     shared_pipe = AVSDGERPipeline(cfg)
@@ -976,6 +1021,7 @@ def main() -> int:
             args.fresh_pool,
             monitor,
             args.only,
+            args.identity_causal_topology,
             wb,
             step_offset=m_idx * max(1, ablations_per_manifest),
             aligner_ckpt=args.aligner_ckpt,
@@ -1017,8 +1063,10 @@ def main() -> int:
             pool_path=args.pool,
             aligner_ckpt=args.aligner_ckpt,
             ger_ckpt=args.ger_ckpt,
-            seed=args.spec_bootstrap_seed,
+            seed=int(cfg.get("seed", 1337)),
             started_at=evaluation_started_at,
+            bootstrap_samples=args.spec_bootstrap_samples,
+            bootstrap_seed=args.spec_bootstrap_seed,
         )
         print(f"\n[formal-artifacts] wrote {written_root}")
 

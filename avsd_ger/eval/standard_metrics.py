@@ -66,6 +66,12 @@ def _normalized_turns(
                 turn.hyp_text, language=language, detected_language=detected
             ),
         })
+    # AMI manifests may be grouped by participant rather than timestamp. All
+    # meeting scorers require chronological segment order, especially after
+    # multiple predicted speakers collapse to the same UNKNOWN label.
+    rows.sort(key=lambda row: (
+        row["start_time"], row["end_time"], str(row["turn_id"]),
+    ))
     return rows
 
 
@@ -155,6 +161,7 @@ def compute_meeteval_metrics(
     *,
     language: str = "en",
     tcpwer_collar: float = 5.0,
+    score_names: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     """Compute the applicable public MeetEval meeting-ASR metrics.
 
@@ -180,6 +187,10 @@ def compute_meeteval_metrics(
     ref_stm = meeteval.io.STM.parse(_stm(rows, reference=True))
     hyp_stm = meeteval.io.STM.parse(_stm(rows, reference=False))
 
+    # STM timestamps are Decimal in MeetEval 0.4.x. Keep the collar in the
+    # same numeric domain; a float collar raises Decimal-minus-float inside
+    # the official time-constrained scorer.
+    collar = Decimal(str(tcpwer_collar))
     scorers: dict[str, Callable[[], Any]] = {
         "siso_wer": lambda: meeteval.wer.wer.siso.siso_word_error_rate(
             reference, hypothesis
@@ -191,17 +202,17 @@ def compute_meeteval_metrics(
             ref_utterances, hyp_streams
         ),
         "tcpwer_collar_5s": lambda: meeteval.wer.combine_error_rates(
-            meeteval.wer.tcpwer(ref_stm, hyp_stm, collar=tcpwer_collar)
+            meeteval.wer.tcpwer(ref_stm, hyp_stm, collar=collar)
         ),
         "tcorcwer_collar_5s": lambda: meeteval.wer.combine_error_rates(
-            meeteval.wer.tcorcwer(ref_stm, hyp_stm, collar=tcpwer_collar)
+            meeteval.wer.tcorcwer(ref_stm, hyp_stm, collar=collar)
         ),
         "greedy_orcwer": lambda: meeteval.wer.combine_error_rates(
             meeteval.wer.greedy_orcwer(ref_stm, hyp_stm)
         ),
         "greedy_tcorcwer_collar_5s": lambda: meeteval.wer.combine_error_rates(
             meeteval.wer.greedy_tcorcwer(
-                ref_stm, hyp_stm, collar=tcpwer_collar
+                ref_stm, hyp_stm, collar=collar
             )
         ),
         "greedy_dicpwer": lambda: meeteval.wer.combine_error_rates(
@@ -211,9 +222,14 @@ def compute_meeteval_metrics(
             meeteval.wer.mimower(ref_stm, hyp_stm)
         ),
         "tcmimower_collar_5s": lambda: meeteval.wer.combine_error_rates(
-            meeteval.wer.tcmimower(ref_stm, hyp_stm, collar=tcpwer_collar)
+            meeteval.wer.tcmimower(ref_stm, hyp_stm, collar=collar)
         ),
     }
+    if score_names is not None:
+        unknown = sorted(set(score_names) - set(scorers))
+        if unknown:
+            raise ValueError(f"Unknown MeetEval score(s): {unknown}")
+        scorers = {name: scorers[name] for name in score_names}
     scores: dict[str, Any] = {}
     failures: dict[str, str] = {}
     for name, scorer in scorers.items():

@@ -8,8 +8,14 @@ import torch
 from avsd_ger.c1_identity.identity_pool import IdentityPool
 from avsd_ger.c3_feedback.closed_loop import ClosedLoopController, LoopAction
 from avsd_ger.eval.metrics import compute_sa_wer
-from avsd_ger.eval.standard_metrics import compute_jiwer_metrics
+from avsd_ger.eval.standard_metrics import compute_jiwer_metrics, _normalized_turns
 from avsd_ger.eval.formal_artifacts import _visual_availability, write_formal_artifacts
+from avsd_ger.eval.statistics import (
+    build_paired_comparisons,
+    build_statistics_report,
+    meeting_series_id,
+)
+from avsd_ger.pipeline import AVSDGERPipeline
 from avsd_ger.text_normalization import (
     LanguageResolutionError,
     normalize_text,
@@ -101,6 +107,65 @@ class C3SemanticsTest(unittest.TestCase):
         pool.enroll("known", torch.zeros(2), torch.zeros(2))
         self.assertFalse(pool.ema_update("known"))
         self.assertTrue(pool.ema_update("known", torch.ones(2), alpha=0.5))
+
+    def test_identity_derangement_is_sorted_cyclic_and_changes_only_vector(self):
+        cfg = {"top_k": 2, "min_av_consistency": -1.0,
+               "voice_dim": 2, "face_dim": 2, "fused_dim": 2}
+        pool = IdentityPool(cfg)
+        pool.enroll("speaker_b", torch.tensor([0.0, 1.0]), torch.tensor([0.0, 1.0]))
+        pool.enroll("speaker_a", torch.tensor([1.0, 0.0]), torch.tensor([1.0, 0.0]))
+        self.assertEqual(
+            pool.deterministic_derangement(),
+            {"speaker_a": "speaker_b", "speaker_b": "speaker_a"},
+        )
+        query_voice = torch.tensor([1.0, 0.0])
+        query_face = torch.tensor([1.0, 0.0])
+        result = pool.query(query_voice, query_face)
+        original_metadata = (
+            list(result.top_ids), list(result.top_scores), result.av_consistency,
+            result.is_unknown,
+        )
+        shuffled = pool.conditioning_vector_for_speaker(
+            query_voice, query_face,
+            pool.deterministic_derangement()[result.top_ids[0]],
+        )
+        self.assertEqual(
+            original_metadata,
+            (list(result.top_ids), list(result.top_scores), result.av_consistency,
+             result.is_unknown),
+        )
+        self.assertEqual(shuffled.shape, result.z_id.shape)
+
+    def test_pure_identity_interventions_preserve_query_metadata(self):
+        cfg = {"top_k": 2, "min_av_consistency": -1.0,
+               "voice_dim": 2, "face_dim": 2, "fused_dim": 2}
+        pool = IdentityPool(cfg)
+        pool.enroll("a", torch.tensor([1.0, 0.0]), torch.tensor([1.0, 0.0]))
+        pool.enroll("b", torch.tensor([0.0, 1.0]), torch.tensor([0.0, 1.0]))
+        voice = torch.tensor([1.0, 0.0])
+        face = torch.tensor([1.0, 0.0])
+        query = pool.query(voice, face)
+        metadata = (list(query.top_ids), list(query.top_scores), query.is_unknown)
+
+        pipe = object.__new__(AVSDGERPipeline)
+        pipe.pool = pool
+        pipe.zero_z_id, pipe.shuffle_z_id = True, False
+        zero, mode, source, mapping, eligible = pipe._identity_conditioning(
+            query, voice, face,
+        )
+        self.assertTrue(torch.count_nonzero(zero).item() == 0)
+        self.assertEqual((mode, source, mapping, eligible), ("zero", None, {}, True))
+
+        pipe.zero_z_id, pipe.shuffle_z_id = False, True
+        shuffled, mode, source, mapping, eligible = pipe._identity_conditioning(
+            query, voice, face,
+        )
+        self.assertEqual(mode, "shuffled")
+        self.assertNotEqual(source, query.top_ids[0])
+        self.assertEqual(mapping[query.top_ids[0]], source)
+        self.assertTrue(eligible)
+        self.assertEqual(metadata, (list(query.top_ids), list(query.top_scores), query.is_unknown))
+        self.assertEqual(shuffled.shape, query.z_id.shape)
 
     def test_cluster_bootstrap_never_treats_equality_as_pass(self):
         runs = []
@@ -254,6 +319,8 @@ class FormalArtifactTest(unittest.TestCase):
                 "run_manifest.json", "records.schema.json",
                 "records/c3_wo_confidence_gates.jsonl",
                 "metrics/main_table.json",
+                "metrics/statistics.json",
+                "metrics/paired_comparisons.json",
                 "metrics/per_ablation/c3_wo_confidence_gates.json",
                 "metrics/per_meeting/c3_wo_confidence_gates.jsonl",
                 "metrics/groups/by_visual_availability.json",
@@ -280,6 +347,99 @@ class FormalArtifactTest(unittest.TestCase):
                 (output / "metrics/scoring_protocol.json").read_text()
             )
             self.assertIn("memory_semantics", protocol)
+
+
+class ClusterStatisticsTest(unittest.TestCase):
+    @staticmethod
+    def _result(ablation, errors, length=100):
+        value = errors / length
+        return {
+            "ablation": ablation,
+            "metrics": {
+                "wer": value, "sa_wer": value, "scr": 0.0,
+                "av_sid_acc": 1.0, "der": 0.0, "jer": 0.0,
+            },
+            "standard_metrics": {
+                "jiwer": {
+                    "wer": value, "substitutions": errors,
+                    "deletions": 0, "insertions": 0,
+                    "reference_words": length,
+                },
+                "meeteval": {"scores": {
+                    "cpwer": {"error_rate": value, "errors": errors, "length": length},
+                    "tcpwer_collar_5s": {"error_rate": value, "errors": errors, "length": length},
+                }},
+            },
+            "metric_details": {
+                "sa_wer": {
+                    "n_sub": errors, "n_del": 0, "n_ins": 0,
+                    "n_spk_err": 0, "n_ref_words": length,
+                },
+                "scr": {"n_spk_err": 0, "n_matched": length - errors},
+                "av_sid": {"n_correct": 1, "n": 1},
+                "der": {"miss": 0, "false_alarm": 0, "confusion": 0, "total_ref": 1},
+                "jer": {"per_speaker": {"speaker": 0.0}},
+            },
+        }
+
+    def test_session_bootstrap_and_paired_delta(self):
+        runs = []
+        for meeting, full_errors, wo_errors in [
+            ("ES2011a", 10, 20), ("ES2011b", 20, 30),
+            ("IS1008a", 15, 25), ("TS3004a", 25, 35),
+        ]:
+            runs.append({
+                "manifest": f"{meeting}.json",
+                "results": [
+                    self._result("full_model", full_errors),
+                    self._result("wo_c3", wo_errors),
+                ],
+            })
+        statistics = build_statistics_report(runs, samples=200, seed=7)
+        tcp = statistics["ablations"]["full_model"]["tcpwer_5s"]
+        self.assertEqual(tcp["n_sessions"], 4)
+        self.assertEqual(tcp["n_meeting_series"], 3)
+        self.assertEqual(tcp["session_cluster"]["n_clusters"], 4)
+        paired = build_paired_comparisons(runs, samples=200, seed=7)
+        comparison = paired["comparisons"]["c3_topology"]
+        c3 = comparison["metrics"]["tcpwer_5s"]["session_cluster"]
+        self.assertAlmostEqual(c3["delta_challenger_minus_reference"], 0.1)
+        self.assertEqual(c3["direction"], "challenger_worse")
+        self.assertEqual(comparison["selection_gate"]["decision"], "full_model")
+        sensitivity = comparison["metrics"]["tcpwer_5s"]["meeting_series_sensitivity"]
+        self.assertEqual(sensitivity["n_pairs"], 3)
+        self.assertIn("warning", sensitivity)
+
+    def test_ami_series_id(self):
+        self.assertEqual(meeting_series_id("ES2011d"), "ES2011")
+
+    def test_identity_causal_gate(self):
+        runs = []
+        for meeting in ("ES2011a", "IS1008a", "TS3004a"):
+            runs.append({
+                "manifest": f"{meeting}.json",
+                "results": [
+                    self._result("identity_normal", 10),
+                    self._result("zero_z_id", 20),
+                    self._result("shuffled_z_id", 25),
+                ],
+            })
+        paired = build_paired_comparisons(runs, samples=100, seed=3)
+        self.assertEqual(
+            paired["comparisons"]["identity_zero"]["causal_gate"]["decision"],
+            "supports_identity_conditioning",
+        )
+
+    def test_public_scorer_rows_are_chronological(self):
+        from avsd_ger.eval.session import SessionTurnResult
+        turns = [
+            SessionTurnResult("late", 4.0, 5.0, "b", "s", 1.0, None, 1, False,
+                              ref_text="b", ref_speaker="s"),
+            SessionTurnResult("early", 1.0, 2.0, "a", "s", 1.0, None, 1, False,
+                              ref_text="a", ref_speaker="s"),
+        ]
+        rows = _normalized_turns(turns, "en")
+        self.assertEqual([row["turn_id"] for row in rows], ["early", "late"])
 
 
 if __name__ == "__main__":

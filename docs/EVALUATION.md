@@ -270,6 +270,8 @@ ami_test/
 │   ├── appendix_correction.json
 │   ├── appendix_sid.json
 │   ├── appendix_calibration.json
+│   ├── statistics.json
+│   ├── paired_comparisons.json
 │   ├── per_ablation/<ablation>.json
 │   ├── per_meeting/<ablation>.jsonl
 │   ├── groups/{by_snr,by_lip_conf,by_turn_length,by_duration,by_visual_availability}.json
@@ -305,6 +307,43 @@ The scoring protocol fixes the text normalizer, public scorer versions,
 diarization collars, aggregation rules, group bins and definitions of the few
 project-specific metrics. Use `--no-formal-artifacts` only when a lightweight
 legacy/debug run is explicitly desired.
+
+`statistics.json` keeps corpus micro point estimates but obtains 95% intervals
+by resampling whole session manifests, never turns. `paired_comparisons.json`
+uses paired session-cluster bootstrap for the predeclared primary comparison
+`wo_c3 - full_model` on tcpWER@5s. It also emits an AMI meeting-series
+sensitivity analysis; AMI dev/test have only three participant-series groups,
+so that result is explicitly labeled sensitivity-only.
+
+Existing completed dev summaries can be gated without rerunning GPU inference:
+
+```bash
+python scripts/evaluate_scoring_gate.py \
+  --input \
+    out/ami_full_v4_llama3_8b_dev/summary.json \
+    out/ami_full_v4_llama3_8b_dev_missing_ablations/summary.json \
+  --out-dir out/ami_full_v4_llama3_8b_dev_scoring_gate
+```
+
+## Identity causal evaluation
+
+The default five-row ablation run is unchanged. After the C3 scoring gate has
+selected `full_model` or `wo_c3`, request the optional causal rows explicitly:
+
+```bash
+python -u scripts/eval_ablations.py \
+  --only identity_normal zero_z_id shuffled_z_id \
+  --identity-causal-topology full_model \
+  ...
+```
+
+`zero_z_id` zeros only the identity vector supplied to C2/GER.
+`shuffled_z_id` replaces only that vector with the vector for the next sorted
+speaker ID in the same meeting (cyclic, with no self-map). Both retain C1
+retrieval IDs and scores, unknown decisions, confidence, predicted speaker and
+speaker prompt hint. The exact per-meeting derangement is persisted in every
+turn record and in `run_manifest.json`. Change the topology argument to
+`wo_c3` only when the scoring gate selected that topology.
 
 ## Offline canonical debug audit
 

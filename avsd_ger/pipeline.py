@@ -135,6 +135,10 @@ class AVSDGERPipeline:
         # the ablation table without code changes.
         abl = cfg.get("ablation", {}) or {}
         self.disable_c1 = bool(abl.get("disable_c1", False))                # bypass ID conditioning
+        self.zero_z_id = bool(abl.get("zero_z_id", False))
+        self.shuffle_z_id = bool(abl.get("shuffle_z_id", False))
+        if self.zero_z_id and self.shuffle_z_id:
+            raise ValueError("zero_z_id and shuffle_z_id are mutually exclusive")
         self.disable_c2 = bool(abl.get("disable_c2", False))                # skip GER; return ASR 1-best
         self.disable_c3 = bool(abl.get("disable_c3", False))                # skip closed-loop
         legacy_disable = bool(abl.get("disable_conf_gate", False))
@@ -168,6 +172,39 @@ class AVSDGERPipeline:
 
     def load_pool(self, path: str | Path, *, load_gallery: bool = True) -> None:
         self.pool.load(path, load_gallery=load_gallery)
+
+    def _identity_conditioning(
+        self,
+        id_q: IdentityQueryResult,
+        voice_emb: torch.Tensor,
+        face_emb: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, str, str | None, dict[str, str], bool]:
+        """Apply a pure z_id intervention without changing C1 decisions."""
+        predicted_id = (
+            id_q.top_ids[0] if id_q.top_ids and not id_q.is_unknown else None
+        )
+        if self.zero_z_id:
+            return (
+                torch.zeros_like(id_q.z_id), "zero", None, {},
+                predicted_id is not None,
+            )
+        if self.shuffle_z_id:
+            if predicted_id is None:
+                # Unknown queries already carry a zero vector and cannot be
+                # assigned a valid within-meeting derangement intervention.
+                return id_q.z_id, "shuffle_ineligible_unknown", None, {}, False
+            mapping = self.pool.deterministic_derangement()
+            source_id = mapping[predicted_id]
+            return (
+                self.pool.conditioning_vector_for_speaker(
+                    voice_emb, face_emb, source_id,
+                ),
+                "shuffled",
+                source_id,
+                mapping,
+                True,
+            )
+        return id_q.z_id, "normal", predicted_id, {}, predicted_id is not None
 
     def _get_mouth_roi_extractor(self) -> MouthROIExtractor:
         if self.mouth_roi_extractor is None:
@@ -328,6 +365,11 @@ class AVSDGERPipeline:
                 z_id=torch.zeros_like(id_q.z_id), is_unknown=True,
                 evidence_mode="disabled",
             )
+        conditioning_z_id, conditioning_mode, conditioning_source_id, derangement_map, causal_eligible = (
+            self._identity_conditioning(
+                id_q, voice_emb, face_emb if face_image is not None else None,
+            )
+        )
         c1_effective_debug = {
             "top_ids": list(id_q.top_ids),
             "top_scores": [float(x) for x in id_q.top_scores],
@@ -337,6 +379,11 @@ class AVSDGERPipeline:
             "is_unknown": bool(id_q.is_unknown),
             "identity_evidence_mode": id_q.evidence_mode,
             "z_id": _tensor_debug(id_q.z_id),
+            "conditioning_z_id": _tensor_debug(conditioning_z_id),
+            "identity_conditioning_mode": conditioning_mode,
+            "identity_conditioning_source_id": conditioning_source_id,
+            "identity_derangement_map": derangement_map,
+            "identity_causal_eligible": causal_eligible,
         }
 
         ger_out: dict[str, Any] | None = None
@@ -371,7 +418,7 @@ class AVSDGERPipeline:
             f_align = self.aligner(
                 asr_tok_feats=asr_tok_feats,
                 vsr_feats=vsr_out["vsr_features"].to(self.device),
-                e_id=id_q.z_id,
+                e_id=conditioning_z_id,
                 speaker_mask_v=speaker_mask_v_device,
                 snr_per_tok=snr_per_tok_device,
                 lip_conf_v=lip_conf_v_device,
@@ -404,7 +451,7 @@ class AVSDGERPipeline:
                 ger_out = {"text": top, "token_logprobs": torch.zeros(0), "prompt": ""}
             else:
                 ger_out = self.ger.generate(
-                    z_id=id_q.z_id,
+                    z_id=conditioning_z_id,
                     f_align=f_align,
                     nbest=asr_out.nbest,
                     nbest_scores=asr_out.nbest_scores,
@@ -508,6 +555,12 @@ class AVSDGERPipeline:
                 "is_unknown": bool(id_q.is_unknown),
                 "av_consistency_raw": float(id_q.av_consistency),
                 "speaker_id_hint": speaker_id_hint,
+                "identity_conditioning_mode": conditioning_mode,
+                "identity_conditioning_source_id": conditioning_source_id,
+                "identity_derangement_map": derangement_map,
+                "identity_causal_eligible": causal_eligible,
+                "identity_retrieval_z_id": _tensor_debug(id_q.z_id),
+                "identity_conditioning_z_id": _tensor_debug(conditioning_z_id),
                 "total_conf": rep.total,
                 "s_acoustic": s_acoustic,
                 "s_acoustic_conf": s_acoustic_conf,
@@ -568,6 +621,11 @@ class AVSDGERPipeline:
                 )
                 if id_q.is_unknown:
                     break
+                conditioning_z_id, conditioning_mode, conditioning_source_id, derangement_map, causal_eligible = (
+                    self._identity_conditioning(
+                        id_q, voice_emb, face_emb if face_image is not None else None,
+                    )
+                )
             # REALIGN falls through to re-run C2 with same id_q.
 
         return {
@@ -594,6 +652,10 @@ class AVSDGERPipeline:
                     "mode": effective_ger_mode,
                     "disable_lip_hyp": self.disable_lip_hyp,
                     "disable_av_context": self.disable_av_context,
+                    "identity_conditioning_mode": conditioning_mode,
+                    "identity_conditioning_source_id": conditioning_source_id,
+                    "identity_derangement_map": derangement_map,
+                    "identity_causal_eligible": causal_eligible,
                 },
                 "c3": {
                     "disable_c3": self.disable_c3,

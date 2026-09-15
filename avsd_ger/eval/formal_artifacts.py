@@ -20,6 +20,7 @@ import numpy as np
 from .metrics import evaluate_session
 from .session import SessionTurnResult
 from .standard_metrics import compute_standard_metrics
+from .statistics import build_paired_comparisons, build_statistics_report
 from ..text_normalization import NORMALIZER_VERSION, normalize_text
 
 
@@ -131,7 +132,9 @@ def records_schema() -> dict[str, Any]:
         "lip_conf_mean", "snr_estimate_db", "snr_score_mean",
         "turn_length_words", "start_time", "end_time", "duration_s",
         "wall_time_ms", "gpu_memory_allocated_mb", "gpu_peak_mb",
-        "visual_availability",
+        "visual_availability", "identity_conditioning_mode",
+        "identity_conditioning_source_id", "identity_derangement_map",
+        "identity_causal_eligible",
     ]
     properties = {key: {} for key in required}
     properties.update({
@@ -156,6 +159,14 @@ def records_schema() -> dict[str, Any]:
             "type": ["number", "null"],
             "description": "Instantaneous CUDA allocated memory sampled after this turn.",
         },
+        "identity_conditioning_mode": {
+            "enum": ["normal", "zero", "shuffled", "shuffle_ineligible_unknown"],
+        },
+        "identity_conditioning_source_id": {"type": ["string", "null"]},
+        "identity_derangement_map": {
+            "type": "object", "additionalProperties": {"type": "string"},
+        },
+        "identity_causal_eligible": {"type": "boolean"},
     })
     return {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -247,6 +258,16 @@ def _record(row: dict[str, Any], meeting_id: str, ablation: str) -> dict[str, An
         "visual_availability": _visual_availability(row, ablation),
         "pool_updated": bool(summary.get("pool_updated", False)),
         "iterations": summary.get("iterations"),
+        "identity_conditioning_mode": last.get(
+            "identity_conditioning_mode", "normal",
+        ),
+        "identity_conditioning_source_id": last.get(
+            "identity_conditioning_source_id",
+        ),
+        "identity_derangement_map": last.get("identity_derangement_map") or {},
+        "identity_causal_eligible": bool(
+            last.get("identity_causal_eligible", False)
+        ),
     }
 
 
@@ -573,10 +594,47 @@ def _scoring_protocol(language: str) -> dict[str, Any]:
         "language": language,
         "text_normalizer": NORMALIZER_VERSION,
         "libraries": _package_versions(),
+        "confirmatory_analysis": {
+            "primary_metric": "tcpwer_5s",
+            "primary_comparison": "wo_c3 - full_model",
+            "test": "two-sided paired session-cluster bootstrap",
+            "bootstrap_samples": 10000,
+            "independent_unit": "session/manifest; never turn",
+            "secondary_metrics": ["cpwer", "wer"],
+            "exploratory_metrics": [
+                "oracle_turn_der", "oracle_turn_jer", "sa_wer_custom",
+                "scr", "av_sid_acc",
+            ],
+            "multiplicity": (
+                "No multiplicity-adjusted claims for secondary/exploratory metrics; "
+                "effect estimates and confidence intervals are reported."
+            ),
+        },
         "primary_public_metrics": {
             "text": "JiWER; MeetEval for meeting/permutation-aware WER",
             "diarization": "pyannote.metrics, oracle-turn segmentation, collars 0.0 and 0.25 s, overlap included",
             "classification_calibration": "scikit-learn",
+        },
+        "tcpwer_5s": {
+            "scorer": "MeetEval",
+            "collar_seconds": 5.0,
+            "collar_application": (
+                "MeetEval expands hypothesis pseudo-word temporal annotations; "
+                "applying the tolerance to reference is equivalent"
+            ),
+            "reference_pseudo_word_timing": "character_based",
+            "hypothesis_pseudo_word_timing": "character_based_points",
+            "overlap_handling": "all input STM segments retained; no overlap exclusion",
+            "empty_hypothesis": "all reference words score as deletions",
+            "aggregation": "MeetEval combine_error_rates: sum(errors) / sum(length)",
+        },
+        "diarization_protocol": {
+            "scorer": "pyannote.metrics",
+            "segmentation": "oracle_turns",
+            "collars_seconds": [0.0, 0.25],
+            "skip_overlap": False,
+            "unknown_hypothesis": "None is omitted and contributes missed speech; explicit UNKNOWN is scored as a speaker label",
+            "interpretation": "speaker-attribution diagnostic, not end-to-end diarization segmentation performance",
         },
         "project_specific_metrics": {
             "sa_wer_scr": "legacy AVSD-GER speaker-attributed word alignment",
@@ -625,6 +683,8 @@ def write_formal_artifacts(
     ger_ckpt: str | None,
     seed: int,
     started_at: str,
+    bootstrap_samples: int = 10_000,
+    bootstrap_seed: int = 1337,
 ) -> Path:
     """Materialize the formal artifact tree from in-memory evaluation rows."""
     root = Path(output_root)
@@ -771,7 +831,22 @@ def write_formal_artifacts(
     _write_json(root / "metrics" / "appendix_correction.json", correction)
     _write_json(root / "metrics" / "appendix_sid.json", sid)
     _write_json(root / "metrics" / "appendix_calibration.json", calibration)
-    _write_json(root / "metrics" / "scoring_protocol.json", _scoring_protocol(language))
+    scoring_protocol = _scoring_protocol(language)
+    scoring_protocol["confirmatory_analysis"]["bootstrap_samples"] = int(bootstrap_samples)
+    scoring_protocol["confirmatory_analysis"]["bootstrap_seed"] = int(bootstrap_seed)
+    _write_json(root / "metrics" / "scoring_protocol.json", scoring_protocol)
+    _write_json(
+        root / "metrics" / "statistics.json",
+        build_statistics_report(
+            raw_runs, samples=bootstrap_samples, seed=bootstrap_seed,
+        ),
+    )
+    _write_json(
+        root / "metrics" / "paired_comparisons.json",
+        build_paired_comparisons(
+            raw_runs, samples=bootstrap_samples, seed=bootstrap_seed,
+        ),
+    )
     for name, payload in _group_metrics(records_by_ablation, language).items():
         _write_json(root / "metrics" / "groups" / f"{name}.json", payload)
 
@@ -797,6 +872,33 @@ def write_formal_artifacts(
         },
         "git": _git_snapshot(Path(repo_root)),
         "seed": seed,
+        "bootstrap": {"samples": int(bootstrap_samples), "seed": int(bootstrap_seed)},
+        "identity_causal_protocol": {
+            "normal": "original C1 z_id; retrieval metadata unchanged",
+            "zero": "only C2/GER conditioning z_id is zeroed",
+            "shuffled": (
+                "only C2/GER conditioning z_id is replaced using the next "
+                "sorted within-meeting speaker ID in a cyclic no-self mapping"
+            ),
+            "per_meeting_derangements": {
+                ablation: {
+                    meeting: next(
+                        (
+                            row["identity_derangement_map"]
+                            for row in records_by_ablation[ablation]
+                            if row["meeting_id"] == meeting
+                            and row.get("identity_derangement_map")
+                        ),
+                        {},
+                    )
+                    for meeting in sorted({
+                        row["meeting_id"] for row in records_by_ablation[ablation]
+                    })
+                }
+                for ablation in records_by_ablation
+                if ablation in {"identity_normal", "zero_z_id", "shuffled_z_id"}
+            },
+        },
         "effective_config_sha256": hashlib.sha256(
             json.dumps(config, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
         ).hexdigest(),

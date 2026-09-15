@@ -234,6 +234,10 @@ training:
 # ---------- Ablation defaults ----------
 ablation:
   disable_c1: false
+  # Pure identity-conditioning interventions. Unlike disable_c1, these retain
+  # retrieval IDs/scores, speaker hints, unknown decisions, and confidence.
+  zero_z_id: false
+  shuffle_z_id: false
   disable_c2: false
   disable_c3: false
   disable_c3_decision_gate: false
