@@ -25,6 +25,7 @@ from ..text_normalization import NORMALIZER_VERSION, normalize_text
 
 
 SCHEMA_VERSION = "avsd-ger-eval-record-v1"
+FORMAL_MEETEVAL_SCORES = ("cpwer", "tcpwer_collar_5s")
 VISUAL_CATEGORIES = [
     "real_visual", "low_quality_visual", "missing_mouth_roi",
     "source_video_excluded", "audio_only_by_ablation",
@@ -559,7 +560,11 @@ def _score_records(records: list[dict[str, Any]], language: str) -> dict[str, An
         turns = _as_turns(records_by_meeting[meeting])
         all_turns.extend(turns)
         report = evaluate_session(turns, language=language)
-        standard_payload = compute_standard_metrics(turns, language=language)
+        standard_payload = compute_standard_metrics(
+            turns,
+            language=language,
+            meeteval_score_names=FORMAL_MEETEVAL_SCORES,
+        )
         meeting_reports.append((meeting, report))
         meeting_standard.append(standard_payload)
         per_meeting.append({

@@ -520,15 +520,24 @@ def _never_raise(name: str, scorer: Callable[[], dict[str, Any]]) -> dict[str, A
 
 
 def compute_standard_metrics(
-    turns: Sequence[SessionTurnResult], *, language: str = "en"
+    turns: Sequence[SessionTurnResult], *, language: str = "en",
+    meeteval_score_names: Sequence[str] | None = None,
 ) -> dict[str, Any]:
-    """Compute all public-library metrics while the turn outputs are resident."""
+    """Compute public-library metrics while the turn outputs are resident.
+
+    ``meeteval_score_names`` lets aggregate/formal reporting request only the
+    preregistered metrics it publishes. Some appendix scorers (notably MIMO
+    variants) have very high memory complexity and must not run implicitly for
+    every meeting and subgroup during an offline rebuild.
+    """
     return {
         "jiwer": _never_raise(
             "jiwer", lambda: compute_jiwer_metrics(turns, language=language)
         ),
         "meeteval": _never_raise(
-            "meeteval", lambda: compute_meeteval_metrics(turns, language=language)
+            "meeteval", lambda: compute_meeteval_metrics(
+                turns, language=language, score_names=meeteval_score_names,
+            )
         ),
         "sklearn": _never_raise(
             "scikit-learn",

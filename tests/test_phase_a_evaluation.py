@@ -2,6 +2,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import torch
 
@@ -16,6 +17,7 @@ from avsd_ger.eval.standard_metrics import (
     _normalized_turns,
     _speaker_self_overlap,
     compute_jiwer_metrics,
+    compute_standard_metrics,
 )
 from avsd_ger.eval.formal_artifacts import (
     _aggregate_meeteval,
@@ -73,6 +75,20 @@ class CanonicalNormalizationTest(unittest.TestCase):
 
 
 class CanonicalWERTest(unittest.TestCase):
+    def test_standard_metrics_forwards_selected_meeteval_scores(self):
+        selected = ("cpwer", "tcpwer_collar_5s")
+        with patch(
+            "avsd_ger.eval.standard_metrics.compute_meeteval_metrics",
+            return_value={"status": "ok", "scores": {}},
+        ) as scorer:
+            compute_standard_metrics(
+                [_turn("hello", "hello")],
+                language="en",
+                meeteval_score_names=selected,
+            )
+        scorer.assert_called_once()
+        self.assertEqual(scorer.call_args.kwargs["score_names"], selected)
+
     def test_normalized_primary_and_legacy_raw_are_both_reported(self):
         score, details = compute_sa_wer(
             [_turn("Hello, WORLD!", "hello world")], language="auto"
