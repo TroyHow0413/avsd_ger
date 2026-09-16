@@ -1,0 +1,11 @@
+defaults:
+  - config_real_en_llama3_8b
+
+# True EOT variant: decode AV-HuBERT lip hypotheses and expose them to GER.
+# The runtime still verifies that the checkpoint contains a usable decoder and
+# target dictionary; otherwise AVHubertVSR fails closed by disabling text.
+vsr:
+  emit_text: true
+
+ger:
+  mode: av
