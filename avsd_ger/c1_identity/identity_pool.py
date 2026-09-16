@@ -114,6 +114,29 @@ class IdentityPool(nn.Module):
         """Remove enrollment records while preserving the trained fuser."""
         self._speakers.clear()
 
+    def snapshot_gallery(self) -> dict[str, dict[str, Any]]:
+        """Return an immutable tensor snapshot for paired causal replay."""
+        return {
+            speaker_id: {
+                "voice_emb": speaker.voice_emb.detach().clone(),
+                "face_emb": speaker.face_emb.detach().clone(),
+                "meta": dict(speaker.meta),
+            }
+            for speaker_id, speaker in self._speakers.items()
+        }
+
+    def restore_gallery(self, snapshot: dict[str, dict[str, Any]]) -> None:
+        """Restore a snapshot without changing learned fuser parameters."""
+        self._speakers = {
+            speaker_id: EnrolledSpeaker(
+                speaker_id=speaker_id,
+                voice_emb=record["voice_emb"].detach().clone().to(self.device),
+                face_emb=record["face_emb"].detach().clone().to(self.device),
+                meta=dict(record.get("meta", {})),
+            )
+            for speaker_id, record in snapshot.items()
+        }
+
     # -------------------------------------------------------------- EMA update
     def ema_update(
         self,

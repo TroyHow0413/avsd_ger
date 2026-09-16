@@ -17,9 +17,9 @@ from typing import Any, Iterable
 
 import numpy as np
 
-from .metrics import evaluate_session
+from .metrics import MetricsReport, evaluate_session
 from .session import SessionTurnResult
-from .standard_metrics import compute_standard_metrics
+from .standard_metrics import compute_sklearn_metrics, compute_standard_metrics
 from .statistics import build_paired_comparisons, build_statistics_report
 from ..text_normalization import NORMALIZER_VERSION, normalize_text
 
@@ -300,22 +300,308 @@ def _as_turns(records: list[dict[str, Any]], hypothesis_key: str = "ger_hyp_fina
     return turns
 
 
+def _sum_fields(payloads: list[dict[str, Any]], fields: Iterable[str]) -> dict[str, float | int]:
+    totals: dict[str, float | int] = {}
+    for field in fields:
+        values = [payload.get(field) for payload in payloads]
+        numeric = [value for value in values if isinstance(value, (int, float))]
+        if numeric:
+            total = sum(numeric)
+            totals[field] = int(total) if all(isinstance(value, int) for value in numeric) else float(total)
+    return totals
+
+
+def _aggregate_task_reports(
+    reports: list[tuple[str, MetricsReport]],
+) -> tuple[dict[str, float], dict[str, Any]]:
+    """Micro-aggregate meeting-local task metrics from additive components."""
+    sa_rows = [report.details.get("sa_wer", {}) for _, report in reports]
+    scr_rows = [report.details.get("scr", {}) for _, report in reports]
+    sid_rows = [report.details.get("av_sid", {}) for _, report in reports]
+    der_rows = [report.details.get("der", {}) for _, report in reports]
+
+    sa = _sum_fields(
+        sa_rows,
+        ("n_ref_words", "n_sub", "n_del", "n_ins", "n_spk_err",
+         "legacy_raw_n_ref_words"),
+    )
+    ref_words = int(sa.get("n_ref_words", 0))
+    text_errors = sum(int(sa.get(key, 0)) for key in ("n_sub", "n_del", "n_ins"))
+    speaker_errors = int(sa.get("n_spk_err", 0))
+    sa["wer"] = text_errors / ref_words if ref_words else 0.0
+    sa_wer = (text_errors + speaker_errors) / ref_words if ref_words else 0.0
+    raw_ref_words = int(sa.get("legacy_raw_n_ref_words", 0))
+    raw_weighted_errors = sum(
+        float(row.get("legacy_raw_wer", 0.0))
+        * int(row.get("legacy_raw_n_ref_words", 0))
+        for row in sa_rows
+    )
+    sa["legacy_raw_wer"] = raw_weighted_errors / raw_ref_words if raw_ref_words else 0.0
+    sa["mapping_by_meeting"] = {
+        meeting: report.details.get("sa_wer", {}).get("mapping", {})
+        for meeting, report in reports
+    }
+
+    scr = _sum_fields(scr_rows, ("n_matched", "n_spk_err"))
+    n_matched = int(scr.get("n_matched", 0))
+    scr_value = int(scr.get("n_spk_err", 0)) / n_matched if n_matched else 0.0
+    scr["mapping_by_meeting"] = {
+        meeting: report.details.get("scr", {}).get("mapping", {})
+        for meeting, report in reports
+    }
+
+    sid = _sum_fields(sid_rows, ("n", "n_correct"))
+    sid_n = int(sid.get("n", 0))
+    sid_value = int(sid.get("n_correct", 0)) / sid_n if sid_n else 0.0
+    sid["mapping_by_meeting"] = {
+        meeting: report.details.get("av_sid", {}).get("mapping", {})
+        for meeting, report in reports
+    }
+
+    der = _sum_fields(
+        der_rows,
+        ("total_ref", "total_hyp", "miss", "false_alarm", "confusion", "correct"),
+    )
+    total_ref = float(der.get("total_ref", 0.0))
+    der_value = sum(
+        float(der.get(key, 0.0)) for key in ("miss", "false_alarm", "confusion")
+    ) / total_ref if total_ref else 0.0
+    der["mapping_by_meeting"] = {
+        meeting: report.details.get("der", {}).get("mapping", {})
+        for meeting, report in reports
+    }
+
+    jer_per_speaker: dict[str, float] = {}
+    jer_mapping: dict[str, Any] = {}
+    for meeting, report in reports:
+        detail = report.details.get("jer", {})
+        jer_mapping[meeting] = detail.get("mapping", {})
+        for speaker, value in detail.get("per_speaker", {}).items():
+            jer_per_speaker[f"{meeting}:{speaker}"] = float(value)
+    jer_value = (
+        sum(jer_per_speaker.values()) / len(jer_per_speaker)
+        if jer_per_speaker else 0.0
+    )
+
+    return ({
+        "sa_wer": sa_wer,
+        "wer": float(sa["wer"]),
+        "scr": scr_value,
+        "av_sid_acc": sid_value,
+        "der": der_value,
+        "jer": jer_value,
+    }, {
+        "sa_wer": sa,
+        "scr": scr,
+        "av_sid": sid,
+        "der": der,
+        "jer": {"per_speaker": jer_per_speaker, "mapping_by_meeting": jer_mapping},
+    })
+
+
+def _aggregate_jiwer(payloads: list[dict[str, Any]]) -> dict[str, Any]:
+    available = [payload for payload in payloads if payload.get("status") == "ok"]
+    if not available:
+        return payloads[0] if payloads else {"status": "unavailable", "library": "jiwer"}
+    totals = _sum_fields(available, (
+        "hits", "substitutions", "deletions", "insertions",
+        "reference_words", "hypothesis_words", "char_hits",
+        "char_substitutions", "char_deletions", "char_insertions",
+        "reference_characters",
+    ))
+    hits = int(totals.get("hits", 0))
+    sub = int(totals.get("substitutions", 0))
+    delete = int(totals.get("deletions", 0))
+    insert = int(totals.get("insertions", 0))
+    ref = int(totals.get("reference_words", hits + sub + delete))
+    hyp = int(totals.get("hypothesis_words", hits + sub + insert))
+    errors = sub + delete + insert
+    char_errors = sum(int(totals.get(key, 0)) for key in (
+        "char_substitutions", "char_deletions", "char_insertions",
+    ))
+    ref_chars = int(totals.get("reference_characters", 0))
+    wip = (hits / ref) * (hits / hyp) if ref and hyp else 0.0
+    return {
+        "status": "ok" if len(available) == len(payloads) else "partial",
+        "n_meetings_expected": len(payloads),
+        "n_meetings_scored": len(available),
+        "library": available[0].get("library", "jiwer"),
+        "library_version": available[0].get("library_version"),
+        "normalizer_version": available[0].get("normalizer_version", NORMALIZER_VERSION),
+        "wer": errors / ref if ref else 0.0,
+        "mer": errors / (hits + errors) if hits + errors else 0.0,
+        "wil": 1.0 - wip,
+        "wip": wip,
+        "cer": char_errors / ref_chars if ref_chars else 0.0,
+        **totals,
+        "aggregation": "micro from meeting-local additive counts",
+    }
+
+
+def _aggregate_meeteval(payloads: list[dict[str, Any]]) -> dict[str, Any]:
+    available = [
+        payload for payload in payloads
+        if payload.get("status") in {"ok", "partial"}
+    ]
+    if not available:
+        return payloads[0] if payloads else {"status": "unavailable", "library": "meeteval"}
+    score_names = sorted({
+        name for payload in available for name in payload.get("scores", {})
+    })
+    scores: dict[str, Any] = {}
+    for name in score_names:
+        rows = [
+            payload["scores"][name] for payload in available
+            if name in payload.get("scores", {})
+        ]
+        numeric_keys = sorted({
+            key for row in rows for key, value in row.items()
+            if key != "error_rate" and isinstance(value, (int, float))
+        })
+        aggregate = _sum_fields(rows, numeric_keys)
+        errors = aggregate.get("errors")
+        length = aggregate.get("length")
+        if isinstance(errors, (int, float)) and isinstance(length, (int, float)):
+            aggregate["error_rate"] = float(errors) / float(length) if length else 0.0
+        else:
+            weights = [float(row.get("length", 1.0)) for row in rows]
+            denominator = sum(weights)
+            aggregate["error_rate"] = (
+                sum(float(row.get("error_rate", 0.0)) * weight
+                    for row, weight in zip(rows, weights)) / denominator
+                if denominator else 0.0
+            )
+        scores[name] = aggregate
+    failures = {
+        f"meeting_{index}": payload.get("failures", {})
+        for index, payload in enumerate(available)
+        if payload.get("failures")
+    }
+    diagnostics = [payload.get("diagnostics", {}) for payload in available]
+    self_overlap_seconds = sum(
+        float(item.get("hypothesis_self_overlap_seconds", 0.0) or 0.0)
+        for item in diagnostics
+    )
+    overlap_meetings = sum(
+        int(float(item.get("hypothesis_self_overlap_seconds", 0.0) or 0.0) > 0)
+        for item in diagnostics
+    )
+    complete = len(available) == len(payloads) and not failures
+    return {
+        "status": "ok" if complete else "partial",
+        "n_meetings_expected": len(payloads),
+        "n_meetings_scored": len(available),
+        "library": available[0].get("library", "meeteval"),
+        "library_version": available[0].get("library_version"),
+        "normalizer_version": available[0].get("normalizer_version", NORMALIZER_VERSION),
+        "protocol": available[0].get("protocol", {}),
+        "diagnostics": {
+            "hypothesis_self_overlap_seconds": self_overlap_seconds,
+            "meetings_with_hypothesis_self_overlap": overlap_meetings,
+            "n_meetings_checked": len(diagnostics),
+            "status": "warning" if self_overlap_seconds > 0 else "ok",
+        },
+        "scores": scores,
+        "failures": failures,
+        "aggregation": "micro from meeting-local error counts",
+    }
+
+
+def _aggregate_pyannote(payloads: list[dict[str, Any]]) -> dict[str, Any]:
+    available = [payload for payload in payloads if payload.get("status") == "ok"]
+    if not available:
+        return payloads[0] if payloads else {
+            "status": "unavailable", "library": "pyannote.metrics",
+        }
+    score_names = sorted({
+        name for payload in available for name in payload.get("scores", {})
+    })
+    scores: dict[str, Any] = {}
+    for name in score_names:
+        rows = [payload["scores"][name] for payload in available]
+        components = [row.get("components", {}) for row in rows]
+        keys = sorted({
+            key for component in components for key, value in component.items()
+            if isinstance(value, (int, float))
+        })
+        total = _sum_fields(components, keys)
+        if name.startswith("der_") and float(total.get("total", 0.0)):
+            value = sum(float(total.get(key, 0.0)) for key in (
+                "false alarm", "missed detection", "confusion",
+            )) / float(total["total"])
+        elif name.startswith("jer_") and float(total.get("speaker count", 0.0)):
+            value = float(total.get("speaker error", 0.0)) / float(total["speaker count"])
+        else:
+            value = sum(float(row.get("value", 0.0)) for row in rows) / len(rows)
+        scores[name] = {"value": value, "components": total}
+    return {
+        "status": "ok" if len(available) == len(payloads) else "partial",
+        "n_meetings_expected": len(payloads),
+        "n_meetings_scored": len(available),
+        "library": available[0].get("library", "pyannote.metrics"),
+        "library_version": available[0].get("library_version"),
+        "protocol": available[0].get("protocol", {}),
+        "scores": scores,
+        "aggregation": "meeting-local additive components",
+    }
+
+
 def _score_records(records: list[dict[str, Any]], language: str) -> dict[str, Any]:
-    turns = _as_turns(records)
-    report = evaluate_session(turns, language=language)
-    standard = compute_standard_metrics(turns, language=language)
+    records_by_meeting: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in records:
+        records_by_meeting[str(row["meeting_id"])].append(row)
+
+    meeting_reports: list[tuple[str, MetricsReport]] = []
+    meeting_standard: list[dict[str, Any]] = []
+    per_meeting: list[dict[str, Any]] = []
+    all_turns: list[SessionTurnResult] = []
+    for meeting in sorted(records_by_meeting):
+        turns = _as_turns(records_by_meeting[meeting])
+        all_turns.extend(turns)
+        report = evaluate_session(turns, language=language)
+        standard_payload = compute_standard_metrics(turns, language=language)
+        meeting_reports.append((meeting, report))
+        meeting_standard.append(standard_payload)
+        per_meeting.append({
+            "meeting_id": meeting,
+            "counts": {
+                "n_turns": len(records_by_meeting[meeting]),
+                "n_ref_words": report.n_ref_words,
+            },
+            "task_metrics": {
+                "sa_wer": report.sa_wer, "wer": report.wer,
+                "scr": report.scr, "av_sid_acc": report.av_sid_acc,
+                "der": report.der, "jer": report.jer,
+            },
+            "task_metric_details": report.details,
+            "standard_metrics": standard_payload,
+        })
+
+    task_metrics, task_details = _aggregate_task_reports(meeting_reports)
+    standard = {
+        "jiwer": _aggregate_jiwer([
+            payload.get("jiwer", {}) for payload in meeting_standard
+        ]),
+        "meeteval": _aggregate_meeteval([
+            payload.get("meeteval", {}) for payload in meeting_standard
+        ]),
+        # Confidence calibration and meeting-prefixed speaker classification
+        # are inexpensive and are intentionally evaluated on all turns.
+        "sklearn": compute_sklearn_metrics(all_turns, language=language),
+        "pyannote": _aggregate_pyannote([
+            payload.get("pyannote", {}) for payload in meeting_standard
+        ]),
+    }
     return {
         "counts": {
             "n_turns": len(records),
-            "n_ref_words": report.n_ref_words,
-            "n_meetings": len({r["meeting_id"] for r in records}),
+            "n_ref_words": sum(report.n_ref_words for _, report in meeting_reports),
+            "n_meetings": len(records_by_meeting),
         },
-        "task_metrics": {
-            "sa_wer": report.sa_wer, "wer": report.wer, "scr": report.scr,
-            "av_sid_acc": report.av_sid_acc, "der": report.der, "jer": report.jer,
-        },
-        "task_metric_details": report.details,
+        "task_metrics": task_metrics,
+        "task_metric_details": task_details,
         "standard_metrics": standard,
+        "per_meeting": per_meeting,
     }
 
 
@@ -555,11 +841,31 @@ def _group_metrics(records_by_ablation: dict[str, list[dict[str, Any]]], languag
     return outputs
 
 
-def _stm(records: list[dict[str, Any]], hypothesis: bool) -> str:
+def _scoring_text(
+    row: dict[str, Any], *, hypothesis: bool, language: str, normalized: bool,
+) -> str:
+    text = str(row.get("ger_hyp_final" if hypothesis else "ref_text") or "")
+    if normalized:
+        return normalize_text(text, language=language)
+    return " ".join(text.split())
+
+
+def _stm(
+    records: list[dict[str, Any]], hypothesis: bool, *, language: str = "en",
+    normalized: bool = True,
+) -> str:
     lines: list[str] = []
-    for row in records:
-        speaker = row.get("speaker_hyp" if hypothesis else "speaker_ref") or "UNKNOWN"
-        text = row.get("ger_hyp_final" if hypothesis else "ref_text") or ""
+    ordered = sorted(records, key=lambda row: (
+        str(row["meeting_id"]), float(row["start_time"]),
+        float(row["end_time"]), str(row["utt_id"]),
+    ))
+    for row in ordered:
+        text = _scoring_text(
+            row, hypothesis=hypothesis, language=language, normalized=normalized,
+        )
+        if not text:
+            continue
+        speaker = row.get("speaker_hyp" if hypothesis else "speaker_ref") or "__NONE__"
         safe = hashlib.sha1(str(speaker).encode()).hexdigest()[:12]
         lines.append(
             f"{row['meeting_id']} 1 spk_{safe} {row['start_time']:.6f} "
@@ -570,8 +876,16 @@ def _stm(records: list[dict[str, Any]], hypothesis: bool) -> str:
 
 def _rttm(records: list[dict[str, Any]], hypothesis: bool) -> str:
     lines: list[str] = []
-    for row in records:
-        speaker = row.get("speaker_hyp" if hypothesis else "speaker_ref") or "UNKNOWN"
+    ordered = sorted(records, key=lambda row: (
+        str(row["meeting_id"]), float(row["start_time"]),
+        float(row["end_time"]), str(row["utt_id"]),
+    ))
+    for row in ordered:
+        speaker = row.get("speaker_hyp" if hypothesis else "speaker_ref")
+        # Match compute_pyannote_diarization_metrics: a missing label means
+        # missing speech attribution, not a real speaker named UNKNOWN.
+        if speaker is None:
+            continue
         lines.append(
             f"SPEAKER {row['meeting_id']} 1 {row['start_time']:.6f} "
             f"{row['duration_s']:.6f} <NA> <NA> {speaker} <NA> <NA>"
@@ -579,13 +893,29 @@ def _rttm(records: list[dict[str, Any]], hypothesis: bool) -> str:
     return "\n".join(lines) + ("\n" if lines else "")
 
 
-def _seglst(records: list[dict[str, Any]], hypothesis: bool) -> list[dict[str, Any]]:
-    return [{
-        "session_id": row["meeting_id"],
-        "speaker": row.get("speaker_hyp" if hypothesis else "speaker_ref") or "UNKNOWN",
-        "start_time": row["start_time"], "end_time": row["end_time"],
-        "words": row.get("ger_hyp_final" if hypothesis else "ref_text") or "",
-    } for row in records]
+def _seglst(
+    records: list[dict[str, Any]], hypothesis: bool, *, language: str = "en",
+    normalized: bool = True,
+) -> list[dict[str, Any]]:
+    output: list[dict[str, Any]] = []
+    for row in sorted(records, key=lambda item: (
+        str(item["meeting_id"]), float(item["start_time"]),
+        float(item["end_time"]), str(item["utt_id"]),
+    )):
+        words = _scoring_text(
+            row, hypothesis=hypothesis, language=language, normalized=normalized,
+        )
+        if not words:
+            continue
+        output.append({
+            "session_id": row["meeting_id"],
+            "speaker": row.get(
+                "speaker_hyp" if hypothesis else "speaker_ref"
+            ) or "__NONE__",
+            "start_time": row["start_time"], "end_time": row["end_time"],
+            "words": words,
+        })
+    return output
 
 
 def _scoring_protocol(language: str) -> dict[str, Any]:
@@ -627,6 +957,19 @@ def _scoring_protocol(language: str) -> dict[str, Any]:
             "overlap_handling": "all input STM segments retained; no overlap exclusion",
             "empty_hypothesis": "all reference words score as deletions",
             "aggregation": "MeetEval combine_error_rates: sum(errors) / sum(length)",
+            "cross_meeting_alignment": "forbidden; every meeting is scored independently",
+        },
+        "scoring_inputs": {
+            "canonical_stm_and_seglst": (
+                "reference.stm, hypothesis.stm and *.seglst.json contain "
+                f"{NORMALIZER_VERSION}-normalized text"
+            ),
+            "raw_transcript_copies": "*.raw.stm and *.raw.seglst.json",
+            "empty_text_segments": "omitted from STM and SegLST",
+            "missing_hypothesis_speaker_rttm": (
+                "omitted and scored as missed attribution; never converted to "
+                "a literal UNKNOWN speaker"
+            ),
         },
         "diarization_protocol": {
             "scorer": "pyannote.metrics",
@@ -652,7 +995,11 @@ def _scoring_protocol(language: str) -> dict[str, Any]:
             "source_video_excluded can only be populated when excluded turns are present in the evaluation input; "
             "AMI v4 manifests that omit excluded turns retain an explicit empty category"
         ),
-        "aggregation": "micro-aggregate by concatenated turns with meeting-prefixed speaker namespaces; per-meeting rows are retained",
+        "aggregation": (
+            "score each meeting independently, then micro-aggregate additive "
+            "error counts; speaker mappings and word alignments never cross "
+            "meeting boundaries; per-meeting rows are retained"
+        ),
         "efficiency": "CUDA synchronized per turn; peak memory reset once per ablation; RTF=wall_time/audio_duration",
         "memory_semantics": {
             "gpu_peak_mb": (
@@ -747,22 +1094,54 @@ def write_formal_artifacts(
     _write_json(root / "records.schema.json", records_schema())
     for ablation, rows in records_by_ablation.items():
         _write_jsonl(root / "records" / f"{ablation}.jsonl", rows)
-        _write_jsonl(root / "metrics" / "per_meeting" / f"{ablation}.jsonl", per_meeting[ablation])
 
     all_reference = records_by_ablation.get("full_model") or next(iter(records_by_ablation.values()), [])
     reference_dir = root / "scoring_inputs" / "reference"
     reference_dir.mkdir(parents=True, exist_ok=True)
-    (reference_dir / "reference.stm").write_text(_stm(all_reference, False), encoding="utf-8")
+    (reference_dir / "reference.stm").write_text(
+        _stm(all_reference, False, language=language), encoding="utf-8",
+    )
+    (reference_dir / "reference.raw.stm").write_text(
+        _stm(all_reference, False, language=language, normalized=False),
+        encoding="utf-8",
+    )
     (reference_dir / "reference.rttm").write_text(_rttm(all_reference, False), encoding="utf-8")
-    _write_json(reference_dir / "reference.seglst.json", _seglst(all_reference, False))
+    _write_json(
+        reference_dir / "reference.seglst.json",
+        _seglst(all_reference, False, language=language),
+    )
+    _write_json(
+        reference_dir / "reference.raw.seglst.json",
+        _seglst(all_reference, False, language=language, normalized=False),
+    )
 
     per_ablation_metrics: dict[str, Any] = {}
     main_rows: list[dict[str, Any]] = []
     correction: dict[str, Any] = {}
     sid: dict[str, Any] = {}
     calibration: dict[str, Any] = {}
+    public_scoring_complete = True
     for ablation, rows in records_by_ablation.items():
         scored = _score_records(rows, language)
+        source_meeting_rows = {
+            row["meeting_id"]: row for row in per_meeting[ablation]
+        }
+        rescored_meetings: list[dict[str, Any]] = []
+        for meeting_score in scored["per_meeting"]:
+            meeting_id = meeting_score["meeting_id"]
+            source = source_meeting_rows.get(meeting_id, {})
+            rescored_meetings.append({
+                **source,
+                "meeting_id": meeting_id,
+                "metrics": meeting_score["task_metrics"],
+                "metric_details": meeting_score["task_metric_details"],
+                "standard_metrics": meeting_score["standard_metrics"],
+                "counts": meeting_score["counts"],
+            })
+        _write_jsonl(
+            root / "metrics" / "per_meeting" / f"{ablation}.jsonl",
+            rescored_meetings,
+        )
         correction[ablation] = _correction_metrics(rows, language)
         sid[ablation] = _topk_sid(rows, mappings[ablation])
         calibration[ablation] = {
@@ -782,10 +1161,18 @@ def write_formal_artifacts(
         standard = scored["standard_metrics"]
         jiwer_wer = standard.get("jiwer", {}).get("wer")
         cpwer = standard.get("meeteval", {}).get("scores", {}).get("cpwer", {}).get("error_rate")
+        tcpwer = (
+            standard.get("meeteval", {}).get("scores", {})
+            .get("tcpwer_collar_5s", {}).get("error_rate")
+        )
         pyannote_scores = standard.get("pyannote", {}).get("scores", {})
         pyannote_der = pyannote_scores.get("der_collar_0s", {}).get("value")
         pyannote_jer = pyannote_scores.get("jer_collar_0s", {}).get("value")
-        sklearn_sid = standard.get("sklearn", {}).get("speaker_classification", {}).get("accuracy")
+        public_complete = all(
+            standard.get(name, {}).get("status") == "ok"
+            for name in ("jiwer", "meeteval", "pyannote")
+        ) and all(value is not None for value in (jiwer_wer, cpwer, tcpwer, pyannote_der, pyannote_jer))
+        public_scoring_complete = public_scoring_complete and public_complete
         asr_scored = _score_records([
             {**row, "ger_hyp_final": row["asr_hyp"]} for row in rows
         ], language)
@@ -799,29 +1186,50 @@ def write_formal_artifacts(
             "ablation": ablation, **scored["counts"],
             "wer": primary_wer,
             "cpwer": cpwer,
+            "tcpwer_5s": tcpwer,
             "sa_wer": task["sa_wer"], "scr": task["scr"],
-            "av_sid_acc": sklearn_sid if sklearn_sid is not None else task["av_sid_acc"],
-            "der": pyannote_der if pyannote_der is not None else task["der"],
-            "jer": pyannote_jer if pyannote_jer is not None else task["jer"],
+            "av_sid_acc": task["av_sid_acc"],
+            # Standard columns never silently fall back to project metrics.
+            "der": pyannote_der,
+            "jer": pyannote_jer,
+            "der_custom": task["der"],
+            "jer_custom": task["jer"],
+            "public_scoring_complete": public_complete,
             "asr_baseline_wer": asr_wer,
             "werr": ((asr_wer - primary_wer) / asr_wer) if asr_wer else None,
             "ocr": correction[ablation]["overcorrection_rate"],
             "rtf": total_wall / total_audio if total_audio else None,
             "metric_sources": {
                 "wer": "jiwer" if jiwer_wer is not None else "project_fallback",
-                "cpwer": "meeteval",
+                "cpwer": "meeteval" if cpwer is not None else None,
+                "tcpwer_5s": "meeteval" if tcpwer is not None else None,
                 "sa_wer": "project_specific",
                 "scr": "project_specific",
-                "av_sid_acc": "scikit-learn" if sklearn_sid is not None else "project_fallback",
-                "der": "pyannote.metrics" if pyannote_der is not None else "project_fallback",
-                "jer": "pyannote.metrics" if pyannote_jer is not None else "project_fallback",
+                "av_sid_acc": "project_specific_meeting_local_hungarian",
+                "der": "pyannote.metrics" if pyannote_der is not None else None,
+                "jer": "pyannote.metrics" if pyannote_jer is not None else None,
+                "der_custom": "project_specific",
+                "jer_custom": "project_specific",
             },
         })
         hyp_dir = root / "scoring_inputs" / "hypothesis" / ablation
         hyp_dir.mkdir(parents=True, exist_ok=True)
-        (hyp_dir / "hypothesis.stm").write_text(_stm(rows, True), encoding="utf-8")
+        (hyp_dir / "hypothesis.stm").write_text(
+            _stm(rows, True, language=language), encoding="utf-8",
+        )
+        (hyp_dir / "hypothesis.raw.stm").write_text(
+            _stm(rows, True, language=language, normalized=False),
+            encoding="utf-8",
+        )
         (hyp_dir / "hypothesis.rttm").write_text(_rttm(rows, True), encoding="utf-8")
-        _write_json(hyp_dir / "hypothesis.seglst.json", _seglst(rows, True))
+        _write_json(
+            hyp_dir / "hypothesis.seglst.json",
+            _seglst(rows, True, language=language),
+        )
+        _write_json(
+            hyp_dir / "hypothesis.raw.seglst.json",
+            _seglst(rows, True, language=language, normalized=False),
+        )
 
     _write_json(root / "metrics" / "main_table.json", {"rows": main_rows})
     _write_json(root / "metrics" / "appendix_sdi.json", {
@@ -855,9 +1263,11 @@ def write_formal_artifacts(
     _write_jsonl(root / "profiles" / "latency_per_turn.jsonl", latency_rows)
 
     config_file = Path(config_path)
+    git_snapshot = _git_snapshot(Path(repo_root))
     manifest = {
         "schema_version": SCHEMA_VERSION,
-        "status": "complete",
+        "status": "complete" if public_scoring_complete else "metrics_incomplete",
+        "public_scoring_complete": public_scoring_complete,
         "started_at": started_at,
         "completed_at": datetime.now(timezone.utc).isoformat(),
         "ablations": [ablation_meta[key] for key in records_by_ablation],
@@ -870,7 +1280,9 @@ def write_formal_artifacts(
                 "ger": {"path": ger_ckpt, "sha256": _sha256(ger_ckpt)},
             },
         },
-        "git": _git_snapshot(Path(repo_root)),
+        "config_path": config_path,
+        "git_commit": git_snapshot.get("commit"),
+        "git": git_snapshot,
         "seed": seed,
         "bootstrap": {"samples": int(bootstrap_samples), "seed": int(bootstrap_seed)},
         "identity_causal_protocol": {
@@ -902,6 +1314,15 @@ def write_formal_artifacts(
         "effective_config_sha256": hashlib.sha256(
             json.dumps(config, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
         ).hexdigest(),
+        "effective_settings": {
+            "vsr_emit_text": bool(config.get("vsr", {}).get("emit_text", False)),
+            "enable_pool_update": bool(
+                config.get("feedback", {}).get("enable_pool_update", False)
+            ),
+            "tau_update": config.get("feedback", {}).get("tau_update"),
+            "ger_mode": config.get("ger", {}).get("mode"),
+            "soft_token_count": config.get("ger", {}).get("bridge", {}).get("n_queries"),
+        },
         "libraries": _package_versions(),
         "record_schema": "records.schema.json",
     }

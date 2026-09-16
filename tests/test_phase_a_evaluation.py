@@ -7,14 +7,31 @@ import torch
 
 from avsd_ger.c1_identity.identity_pool import IdentityPool
 from avsd_ger.c3_feedback.closed_loop import ClosedLoopController, LoopAction
-from avsd_ger.eval.metrics import compute_sa_wer
-from avsd_ger.eval.standard_metrics import compute_jiwer_metrics, _normalized_turns
-from avsd_ger.eval.formal_artifacts import _visual_availability, write_formal_artifacts
+from avsd_ger.eval.metrics import (
+    _word_levenshtein_align,
+    _word_levenshtein_align_python,
+    compute_sa_wer,
+)
+from avsd_ger.eval.standard_metrics import (
+    _normalized_turns,
+    _speaker_self_overlap,
+    compute_jiwer_metrics,
+)
+from avsd_ger.eval.formal_artifacts import (
+    _aggregate_meeteval,
+    _rttm,
+    _score_records,
+    _stm,
+    _visual_availability,
+    write_formal_artifacts,
+)
 from avsd_ger.eval.statistics import (
     build_paired_comparisons,
     build_statistics_report,
     meeting_series_id,
 )
+from scripts.evaluate_scoring_gate import validate_identity_controls
+from scripts.rebuild_formal_metrics import rebuild as rebuild_formal_metrics
 from avsd_ger.pipeline import AVSDGERPipeline
 from avsd_ger.text_normalization import (
     LanguageResolutionError,
@@ -77,6 +94,61 @@ class CanonicalWERTest(unittest.TestCase):
         self.assertEqual(result["substitutions"], 1)
         for key in ("mer", "wil", "wip", "cer", "hits"):
             self.assertIn(key, result)
+
+    def test_rapidfuzz_alignment_has_same_minimum_edit_distance(self):
+        cases = [
+            ("a b c", "a x c"),
+            ("a b", "a new b"),
+            ("a old b", "a b"),
+            ("one two three four", "zero one three four five"),
+            ("", "insert only"),
+            ("delete only", ""),
+        ]
+        for reference, hypothesis in cases:
+            ref = [("r", word) for word in reference.split()]
+            hyp = [("h", word) for word in hypothesis.split()]
+            fast = _word_levenshtein_align(ref, hyp)
+            audited = _word_levenshtein_align_python(ref, hyp)
+            # Multiple optimal paths can exist (e.g. delete+insert versus two
+            # substitutions). The scorer requires minimum cost and valid word
+            # indices, not the legacy implementation's particular tie break.
+            self.assertEqual(
+                sum(op != "match" for op, _, _ in fast),
+                sum(op != "match" for op, _, _ in audited),
+                (reference, hypothesis),
+            )
+            self.assertEqual(
+                [i for op, i, _ in fast if op != "ins"],
+                list(range(len(ref))),
+            )
+            self.assertEqual(
+                [j for op, _, j in fast if op != "del"],
+                list(range(len(hyp))),
+            )
+            for op, i, j in fast:
+                if op == "match":
+                    self.assertEqual(ref[i][1], hyp[j][1])
+
+
+class IdentityGalleryReplayTest(unittest.TestCase):
+    def test_snapshot_restore_replays_exact_gallery_state(self):
+        pool = IdentityPool({
+            "top_k": 1, "log_top_k": 1, "min_av_consistency": 0.0,
+            "voice_dim": 2, "face_dim": 2, "fused_dim": 2,
+        })
+        original_voice = torch.tensor([1.0, 0.0])
+        original_face = torch.tensor([0.0, 1.0])
+        pool.enroll("alice", original_voice, original_face)
+        snapshot = pool.snapshot_gallery()
+        pool.ema_update(
+            "alice", new_voice_emb=torch.tensor([0.0, 1.0]), alpha=1.0,
+        )
+        self.assertFalse(torch.equal(pool._speakers["alice"].voice_emb, original_voice))
+        pool.restore_gallery(snapshot)
+        self.assertTrue(torch.equal(pool._speakers["alice"].voice_emb, original_voice))
+        # Restoring clones the snapshot rather than aliasing mutable tensors.
+        pool._speakers["alice"].voice_emb.zero_()
+        self.assertTrue(torch.equal(snapshot["alice"]["voice_emb"], original_voice))
 
 
 class C3SemanticsTest(unittest.TestCase):
@@ -250,6 +322,48 @@ class OfflineAnalyzerTest(unittest.TestCase):
 
 
 class FormalArtifactTest(unittest.TestCase):
+    def test_aggregate_scoring_never_aligns_words_across_meetings(self):
+        # A global concatenated alignment can incorrectly match the hypothesis
+        # word from meeting B with the reference word from meeting A. Meeting-
+        # local scoring must count one deletion and one insertion instead.
+        records = [
+            {
+                "meeting_id": "meeting_a", "utt_id": "a1",
+                "start_time": 0.0, "end_time": 1.0,
+                "speaker_ref": "alice", "speaker_hyp": "alice",
+                "ref_text": "shared", "ger_hyp_final": "",
+                "ger_confidence": 0.0, "acoustic_confidence": None,
+                "iterations": 1, "pool_updated": False,
+            },
+            {
+                "meeting_id": "meeting_b", "utt_id": "b1",
+                "start_time": 0.0, "end_time": 1.0,
+                "speaker_ref": "bob", "speaker_hyp": "bob",
+                "ref_text": "", "ger_hyp_final": "shared",
+                "ger_confidence": 0.0, "acoustic_confidence": None,
+                "iterations": 1, "pool_updated": False,
+            },
+        ]
+        scored = _score_records(records, "en")
+        self.assertEqual(scored["counts"]["n_meetings"], 2)
+        self.assertEqual(scored["task_metric_details"]["sa_wer"]["n_del"], 1)
+        self.assertEqual(scored["task_metric_details"]["sa_wer"]["n_ins"], 1)
+        self.assertEqual(scored["task_metrics"]["wer"], 2.0)
+
+    def test_scoring_exports_are_normalized_and_missing_speakers_are_not_rttm_labels(self):
+        records = [{
+            "meeting_id": "m1", "utt_id": "u1",
+            "start_time": 1.0, "end_time": 2.0, "duration_s": 1.0,
+            "speaker_ref": "Alice", "speaker_hyp": None,
+            "ref_text": "Hello, WORLD!", "ger_hyp_final": "",
+        }]
+        reference = _stm(records, False, language="en")
+        hypothesis = _stm(records, True, language="en")
+        self.assertIn("hello world", reference)
+        self.assertNotIn("Hello, WORLD!", reference)
+        self.assertEqual(hypothesis, "")
+        self.assertEqual(_rttm(records, True), "")
+
     def test_visual_availability_uses_input_availability_not_effective_mode(self):
         audio_only = {
             "summary": {"has_visual": False},
@@ -347,6 +461,26 @@ class FormalArtifactTest(unittest.TestCase):
                 (output / "metrics/scoring_protocol.json").read_text()
             )
             self.assertIn("memory_semantics", protocol)
+            main = json.loads((output / "metrics/main_table.json").read_text())
+            self.assertIn("tcpwer_5s", main["rows"][0])
+            self.assertTrue(
+                (output / "scoring_inputs/reference/reference.raw.stm").exists()
+            )
+            rebuilt = root / "eval_rescored"
+            rebuild_formal_metrics(
+                output, rebuilt, language="en",
+                bootstrap_samples=20, bootstrap_seed=7,
+                allow_incomplete=False,
+            )
+            rebuilt_main = json.loads(
+                (rebuilt / "metrics/main_table.json").read_text()
+            )["rows"][0]
+            self.assertTrue(rebuilt_main["public_scoring_complete"])
+            self.assertIsNotNone(rebuilt_main["tcpwer_5s"])
+            rebuilt_manifest = json.loads(
+                (rebuilt / "run_manifest.json").read_text()
+            )
+            self.assertEqual(rebuilt_manifest["status"], "complete")
 
 
 class ClusterStatisticsTest(unittest.TestCase):
@@ -430,6 +564,94 @@ class ClusterStatisticsTest(unittest.TestCase):
             "supports_identity_conditioning",
         )
 
+    def test_paired_comparison_rejects_missing_and_duplicate_meetings(self):
+        missing = [
+            {"manifest": "m1.json", "results": [
+                self._result("identity_normal", 10),
+                self._result("zero_z_id", 20),
+            ]},
+            {"manifest": "m2.json", "results": [
+                self._result("identity_normal", 10),
+            ]},
+        ]
+        paired = build_paired_comparisons(missing, samples=20, seed=1)
+        self.assertEqual(
+            paired["comparisons"]["identity_zero"]["status"],
+            "invalid_unpaired_meetings",
+        )
+        duplicate = missing + [{
+            "manifest": "m1.json",
+            "results": [self._result("identity_normal", 10)],
+        }]
+        with self.assertRaisesRegex(ValueError, "Duplicate meeting/ablation"):
+            build_paired_comparisons(duplicate, samples=20, seed=1)
+
+    def test_identity_control_audit_detects_upstream_asr_change(self):
+        def payload(ablation, asr_top):
+            return {
+                "ablation": ablation,
+                "turns": [{
+                    "summary": {
+                        "turn_id": "t1", "start": 0.0, "end": 1.0,
+                        "ref_text": "hello", "ref_speaker": "alice",
+                        "asr_top": asr_top, "has_visual": True,
+                        "lip_conf_mean": 1.0,
+                    },
+                    "turn": {"audio_path": "a.wav", "mouth_roi_path": "m.npy"},
+                    "asr": {"nbest": [asr_top], "nbest_scores": [0.0]},
+                    "visual": {"lip_hyp": "hello"},
+                    "c1_effective": {
+                        "top_ids": ["alice"], "top_scores": [0.9],
+                        "logged_top_ids": ["alice"], "logged_top_scores": [0.9],
+                        "is_unknown": False, "av_consistency_raw": 0.9,
+                        "z_id": {"norm": 1.0},
+                    },
+                }],
+            }
+        audit = validate_identity_controls({
+            ("m1", "identity_normal"): payload("identity_normal", "hello"),
+            ("m1", "zero_z_id"): payload("zero_z_id", "different"),
+        })
+        zero = audit["comparisons"]["zero_z_id"]
+        self.assertEqual(zero["status"], "control_failed")
+        self.assertEqual(zero["failure_counts"]["asr"], 1)
+
+    def test_identity_control_audit_detects_frontend_feature_change(self):
+        def payload(ablation, encoder_mean):
+            return {
+                "ablation": ablation,
+                "turns": [{
+                    "summary": {
+                        "turn_id": "t1", "start": 0.0, "end": 1.0,
+                        "ref_text": "hello", "ref_speaker": "alice",
+                        "asr_top": "hello", "has_visual": True,
+                        "lip_conf_mean": 1.0,
+                    },
+                    "turn": {"audio_path": "a.wav", "mouth_roi_path": "m.npy"},
+                    "asr": {
+                        "nbest": ["hello"], "nbest_scores": [0.0],
+                        "encoder_features": {"mean": encoder_mean},
+                    },
+                    "visual": {
+                        "lip_hyp": "hello", "vsr_features": {"mean": 0.1},
+                    },
+                    "embeddings": {"voice": {"norm": 1.0}},
+                    "c1_effective": {
+                        "top_ids": ["alice"], "top_scores": [0.9],
+                        "logged_top_ids": ["alice"], "logged_top_scores": [0.9],
+                        "is_unknown": False, "av_consistency_raw": 0.9,
+                        "z_id": {"norm": 1.0},
+                    },
+                }],
+            }
+        audit = validate_identity_controls({
+            ("m1", "identity_normal"): payload("identity_normal", 0.1),
+            ("m1", "zero_z_id"): payload("zero_z_id", 0.2),
+        })
+        zero = audit["comparisons"]["zero_z_id"]
+        self.assertEqual(zero["status"], "control_failed")
+        self.assertEqual(zero["failure_counts"]["frontend_features"], 1)
+
     def test_public_scorer_rows_are_chronological(self):
         from avsd_ger.eval.session import SessionTurnResult
         turns = [
@@ -440,6 +662,43 @@ class ClusterStatisticsTest(unittest.TestCase):
         ]
         rows = _normalized_turns(turns, "en")
         self.assertEqual([row["turn_id"] for row in rows], ["early", "late"])
+
+    def test_meeteval_self_overlap_diagnostic(self):
+        rows = [
+            {
+                "hyp_speaker": "speaker", "hypothesis": "one",
+                "start_time": 0.0, "end_time": 2.0,
+            },
+            {
+                "hyp_speaker": "speaker", "hypothesis": "two",
+                "start_time": 1.5, "end_time": 3.0,
+            },
+            {
+                "hyp_speaker": "other", "hypothesis": "three",
+                "start_time": 1.0, "end_time": 2.5,
+            },
+        ]
+        diagnostic = _speaker_self_overlap(rows)
+        self.assertEqual(diagnostic["status"], "warning")
+        self.assertAlmostEqual(diagnostic["hypothesis_self_overlap_seconds"], 0.5)
+        self.assertEqual(diagnostic["speakers_with_self_overlap"], 1)
+
+    def test_meeteval_aggregation_preserves_self_overlap_diagnostic(self):
+        payloads = [{
+            "status": "ok", "scores": {
+                "cpwer": {"errors": 1, "length": 10, "error_rate": 0.1},
+            },
+            "diagnostics": {"hypothesis_self_overlap_seconds": seconds},
+            "failures": {},
+        } for seconds in (0.0, 1.25)]
+        aggregate = _aggregate_meeteval(payloads)
+        self.assertEqual(aggregate["status"], "ok")
+        self.assertAlmostEqual(
+            aggregate["diagnostics"]["hypothesis_self_overlap_seconds"], 1.25
+        )
+        self.assertEqual(
+            aggregate["diagnostics"]["meetings_with_hypothesis_self_overlap"], 1
+        )
 
 
 if __name__ == "__main__":

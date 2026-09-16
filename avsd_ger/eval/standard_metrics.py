@@ -17,6 +17,7 @@ from dataclasses import asdict, is_dataclass
 from decimal import Decimal
 import hashlib
 import math
+import warnings
 from importlib.metadata import PackageNotFoundError, version
 from typing import Any, Callable, Sequence
 
@@ -156,6 +157,49 @@ def _error_rate_payload(score: Any) -> dict[str, Any]:
     return payload
 
 
+def _speaker_self_overlap(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Diagnose overlapping output segments assigned to the same speaker.
+
+    This is not a replacement metric. MeetEval can warn about this malformed
+    hypothesis geometry, so record its exact extent alongside the public
+    scores instead of leaving the warning only in stderr.
+    """
+    per_speaker: dict[str, list[tuple[float, float]]] = defaultdict(list)
+    for row in rows:
+        if not row["hypothesis"] or row["end_time"] <= row["start_time"]:
+            continue
+        per_speaker[str(row["hyp_speaker"])].append(
+            (float(row["start_time"]), float(row["end_time"]))
+        )
+
+    overlap_by_speaker: dict[str, float] = {}
+    for speaker, intervals in per_speaker.items():
+        events: list[tuple[float, int]] = []
+        for start, end in intervals:
+            events.extend(((start, 1), (end, -1)))
+        # End events precede start events at the same timestamp, so touching
+        # segments are not counted as overlap.
+        events.sort(key=lambda item: (item[0], item[1]))
+        active = 0
+        previous: float | None = None
+        overlap = 0.0
+        for timestamp, delta in events:
+            if previous is not None and active > 1:
+                overlap += timestamp - previous
+            active += delta
+            previous = timestamp
+        if overlap > 0:
+            overlap_by_speaker[speaker] = overlap
+
+    total = sum(overlap_by_speaker.values())
+    return {
+        "hypothesis_self_overlap_seconds": total,
+        "speakers_with_self_overlap": len(overlap_by_speaker),
+        "per_speaker_seconds": overlap_by_speaker,
+        "status": "warning" if total > 0 else "ok",
+    }
+
+
 def compute_meeteval_metrics(
     turns: Sequence[SessionTurnResult],
     *,
@@ -248,6 +292,7 @@ def compute_meeteval_metrics(
             "tcpwer_collar_seconds": float(tcpwer_collar),
             "pseudo_word_timing": "character_based (MeetEval default)",
         },
+        "diagnostics": _speaker_self_overlap(rows),
         "scores": scores,
         "failures": failures,
     }
@@ -350,38 +395,53 @@ def compute_sklearn_metrics(
         for t in labeled
     ]
     multiple_labels = len(set(y_true) | set(y_pred)) > 1
-    classification = {
-        "accuracy": float(accuracy_score(y_true, y_pred)) if y_true else None,
-        "balanced_accuracy": (
-            float(balanced_accuracy_score(y_true, y_pred))
-            if y_true and multiple_labels else None
-        ),
-        "macro_precision": (
-            float(precision_score(y_true, y_pred, average="macro", zero_division=0))
-            if y_true else None
-        ),
-        "macro_recall": (
-            float(recall_score(y_true, y_pred, average="macro", zero_division=0))
-            if y_true else None
-        ),
-        "macro_f1": (
-            float(f1_score(y_true, y_pred, average="macro", zero_division=0))
-            if y_true else None
-        ),
-        "weighted_f1": (
-            float(f1_score(y_true, y_pred, average="weighted", zero_division=0))
-            if y_true else None
-        ),
-        "matthews_correlation_coefficient": (
-            float(matthews_corrcoef(y_true, y_pred))
-            if y_true and multiple_labels else None
-        ),
-        "cohen_kappa": (
-            float(cohen_kappa_score(y_true, y_pred))
-            if y_true and multiple_labels else None
-        ),
-        "n_turns": len(y_true),
-    }
+    # Speaker IDs are categorical by construction. Small subgroup slices can
+    # legitimately contain almost as many IDs as turns, and an unknown/predicted
+    # ID may be absent from y_true. Scikit-learn warns about both situations as
+    # heuristics; neither indicates a malformed target in this scoring protocol.
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message="The number of unique classes is greater than 50%.*",
+            category=UserWarning,
+        )
+        warnings.filterwarnings(
+            "ignore",
+            message="y_pred contains classes not in y_true",
+            category=UserWarning,
+        )
+        classification = {
+            "accuracy": float(accuracy_score(y_true, y_pred)) if y_true else None,
+            "balanced_accuracy": (
+                float(balanced_accuracy_score(y_true, y_pred))
+                if y_true and multiple_labels else None
+            ),
+            "macro_precision": (
+                float(precision_score(y_true, y_pred, average="macro", zero_division=0))
+                if y_true else None
+            ),
+            "macro_recall": (
+                float(recall_score(y_true, y_pred, average="macro", zero_division=0))
+                if y_true else None
+            ),
+            "macro_f1": (
+                float(f1_score(y_true, y_pred, average="macro", zero_division=0))
+                if y_true else None
+            ),
+            "weighted_f1": (
+                float(f1_score(y_true, y_pred, average="weighted", zero_division=0))
+                if y_true else None
+            ),
+            "matthews_correlation_coefficient": (
+                float(matthews_corrcoef(y_true, y_pred))
+                if y_true and multiple_labels else None
+            ),
+            "cohen_kappa": (
+                float(cohen_kappa_score(y_true, y_pred))
+                if y_true and multiple_labels else None
+            ),
+            "n_turns": len(y_true),
+        }
 
     rows = _normalized_turns(turns, language)
     correctness = [int(r["reference"] == r["hypothesis"]) for r in rows]

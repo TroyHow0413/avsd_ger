@@ -199,8 +199,17 @@ def _collect(raw_runs: list[dict[str, Any]]) -> dict[str, dict[str, dict[str, An
     collected: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
     for run in raw_runs:
         meeting = Path(str(run.get("manifest", ""))).stem
+        if not meeting:
+            raise ValueError("Every scoring run must have a non-empty manifest/meeting ID")
         for result in run.get("results", []):
             ablation = str(result.get("ablation"))
+            if not ablation or ablation == "None":
+                raise ValueError(f"{meeting}: every result must have an ablation ID")
+            if meeting in collected[ablation]:
+                raise ValueError(
+                    f"Duplicate meeting/ablation result: {meeting}/{ablation}; "
+                    "refusing to overwrite paired scoring input"
+                )
             collected[ablation][meeting] = {
                 metric: observation
                 for metric in METRIC_ORDER
@@ -276,11 +285,29 @@ def _paired_bootstrap(
         indices = rng.integers(0, len(reference), size=len(reference))
         deltas[draw] = _aggregate(challenger, indices) - _aggregate(reference, indices)
     low, high = np.percentile(deltas, [2.5, 97.5])
-    less_equal = (np.count_nonzero(deltas <= 0.0) + 1) / (samples + 1)
-    greater_equal = (np.count_nonzero(deltas >= 0.0) + 1) / (samples + 1)
+    # The percentile bootstrap is used for the confidence interval only.  A
+    # bootstrap distribution is centered on the observed effect, so counting
+    # how often it crosses zero is not a valid null-hypothesis p-value.
+    observed = abs(challenger_estimate - ref_estimate)
+    permutation_rng = np.random.default_rng(seed + 2)
+    extreme = 0
+    for _ in range(samples):
+        swap = permutation_rng.integers(0, 2, size=len(reference), dtype=np.int8)
+        permuted_reference = [
+            challenger[index] if swap[index] else reference[index]
+            for index in range(len(reference))
+        ]
+        permuted_challenger = [
+            reference[index] if swap[index] else challenger[index]
+            for index in range(len(reference))
+        ]
+        delta = _aggregate(permuted_challenger) - _aggregate(permuted_reference)
+        extreme += int(abs(delta) >= observed - 1e-15)
     return {
         **result, "status": "ok", "ci95": [float(low), float(high)],
-        "p_value_two_sided": float(min(1.0, 2.0 * min(less_equal, greater_equal))),
+        "p_value_two_sided": float((extreme + 1) / (samples + 1)),
+        "p_value_method": "paired randomization by within-session label swap",
+        "permutation_samples": int(samples),
         "direction": (
             "challenger_worse" if low > 0 else
             "challenger_better" if high < 0 else "inconclusive"
@@ -332,15 +359,30 @@ def build_paired_comparisons(
             "reference": reference_name, "challenger": challenger_name,
             "metrics": {},
         }
-        common = sorted(set(collected[reference_name]) & set(collected[challenger_name]))
+        reference_meetings = set(collected[reference_name])
+        challenger_meetings = set(collected[challenger_name])
+        if reference_meetings != challenger_meetings:
+            result.update({
+                "status": "invalid_unpaired_meetings",
+                "missing_from_reference": sorted(challenger_meetings - reference_meetings),
+                "missing_from_challenger": sorted(reference_meetings - challenger_meetings),
+            })
+            output["comparisons"][name] = result
+            continue
+        common = sorted(reference_meetings)
         for metric in METRIC_ORDER:
             ids = [
                 mid for mid in common
                 if metric in collected[reference_name][mid]
                 and metric in collected[challenger_name][mid]
             ]
-            if not ids:
-                result["metrics"][metric] = {"status": "unavailable", "n_pairs": 0}
+            if len(ids) != len(common):
+                result["metrics"][metric] = {
+                    "status": "invalid_incomplete_metric_pairs",
+                    "n_pairs": len(ids),
+                    "expected_pairs": len(common),
+                    "missing_meetings": sorted(set(common) - set(ids)),
+                }
                 continue
             reference = [collected[reference_name][mid][metric] for mid in ids]
             challenger = [collected[challenger_name][mid][metric] for mid in ids]

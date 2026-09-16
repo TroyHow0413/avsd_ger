@@ -118,11 +118,11 @@ def _hungarian_label_mapping(
 
 # ------------------------------------------------------------------ WER / SA-WER / SCR
 
-def _word_levenshtein_align(
+def _word_levenshtein_align_python(
     ref: Sequence[tuple[str, str]],
     hyp: Sequence[tuple[str, str]],
 ) -> list[tuple[str, int, int]]:
-    """Standard word-level Levenshtein; returns edit ops as (op, i_ref, j_hyp).
+    """Pure-Python fallback for word-level Levenshtein alignment.
 
     op in {"match", "sub", "del", "ins"}. Indices are -1 when not applicable.
     Cost is computed on *words only*; speaker tags are carried through for the
@@ -172,6 +172,66 @@ def _word_levenshtein_align(
     return ops
 
 
+def _word_levenshtein_align(
+    ref: Sequence[tuple[str, str]],
+    hyp: Sequence[tuple[str, str]],
+) -> list[tuple[str, int, int]]:
+    """Return word edit operations without constructing a quadratic Python DP.
+
+    JiWER already depends on RapidFuzz, whose C++ ``editops`` implementation is
+    dramatically faster and does not materialize the two dense ``(N+1)x(M+1)``
+    matrices used by the legacy implementation.  Reconstructing matches between
+    edit operations preserves the existing public return format, including word
+    indices needed for speaker-attribution scoring.
+
+    The audited Python implementation remains as a fallback for minimal
+    environments where RapidFuzz is unavailable.
+    """
+    ref_words = [word for _, word in ref]
+    hyp_words = [word for _, word in hyp]
+    try:
+        from rapidfuzz.distance import Levenshtein
+
+        editops = Levenshtein.editops(ref_words, hyp_words)
+    except (ImportError, ModuleNotFoundError):
+        return _word_levenshtein_align_python(ref, hyp)
+
+    ops: list[tuple[str, int, int]] = []
+    i = j = 0
+    for edit in editops:
+        src = int(edit.src_pos)
+        dest = int(edit.dest_pos)
+        while i < src and j < dest:
+            # Regions between minimal edit operations are exact matches.
+            ops.append(("match", i, j))
+            i += 1
+            j += 1
+        if edit.tag == "replace":
+            ops.append(("sub", i, j))
+            i += 1
+            j += 1
+        elif edit.tag == "delete":
+            ops.append(("del", i, -1))
+            i += 1
+        elif edit.tag == "insert":
+            ops.append(("ins", -1, j))
+            j += 1
+        else:  # pragma: no cover - RapidFuzz currently exposes three tags.
+            raise ValueError(f"Unsupported RapidFuzz edit operation: {edit.tag}")
+
+    while i < len(ref_words) and j < len(hyp_words):
+        ops.append(("match", i, j))
+        i += 1
+        j += 1
+    while i < len(ref_words):
+        ops.append(("del", i, -1))
+        i += 1
+    while j < len(hyp_words):
+        ops.append(("ins", -1, j))
+        j += 1
+    return ops
+
+
 @dataclass
 class MetricsReport:
     """Container for a single evaluation run."""
@@ -210,7 +270,24 @@ def compute_sa_wer(
     )
     n_ref = len(ref_pairs)
     if n_ref == 0:
-        return 0.0, {"n_ref_words": 0, "wer": 0.0}
+        # Keep insertion counts so a caller can micro-aggregate this empty-
+        # reference meeting/slice with non-empty meetings. The standalone rate
+        # remains zero because WER has no reference-word denominator here.
+        raw_hyp_words = sum(len(_tokens(t.hyp_text)) for t in turns)
+        return 0.0, {
+            "n_ref_words": 0,
+            "n_sub": 0,
+            "n_del": 0,
+            "n_ins": len(hyp_pairs),
+            "n_spk_err": 0,
+            "wer": 0.0,
+            "mapping": {},
+            "normalizer_version": NORMALIZER_VERSION,
+            "language": language,
+            "legacy_raw_wer": 0.0,
+            "legacy_raw_n_ref_words": 0,
+            "legacy_raw_n_hyp_words": raw_hyp_words,
+        }
 
     # Build label confusion matrix from turn-level alignment for mapping.
     ref_labels = sorted({p[0] for p in ref_pairs if p[0] != "__NONE__"})

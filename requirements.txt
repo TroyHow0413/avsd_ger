@@ -33,6 +33,7 @@ einops>=0.7.0
 faster-whisper>=1.0.0   # CTranslate2 Whisper-large-v3
 openai-whisper>=20231117 # optional unified Whisper backend: decode + encoder + rescore
 jiwer==4.0.0            # independent canonical WER cross-check
+rapidfuzz==3.14.5       # C++ word editops for scalable SA-WER/SCR alignment
 meeteval>=0.4.3          # public cpWER/ORC-WER/tcpWER meeting-ASR scoring
 scikit-learn>=1.3,<2.0  # public classification/calibration metrics and C1 clustering
 pyannote.metrics==3.2.1 # standard DER/JER scorer compatible with the NumPy<2 AV stack

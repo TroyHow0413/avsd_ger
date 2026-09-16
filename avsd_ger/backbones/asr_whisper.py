@@ -191,11 +191,17 @@ class WhisperASR(nn.Module):
     @torch.no_grad()
     def _faster_transcribe(self, wav_np: np.ndarray, sr: int = 16000) -> ASROutputs:
         # N-best + word timestamps from faster-whisper
+        temperatures = self.cfg.get("temperatures", [0.0, 0.2, 0.4, 0.6, 0.8])
+        if not isinstance(temperatures, (list, tuple)):
+            temperatures = [temperatures]
+        temperatures = [float(value) for value in temperatures]
+        if not temperatures:
+            temperatures = [0.0]
         segments, _info = self._ct2.transcribe(
             wav_np,
             beam_size=self.beam,
             best_of=self.beam,
-            temperature=[0.0, 0.2, 0.4, 0.6, 0.8],
+            temperature=temperatures,
             word_timestamps=self.word_timestamps,
             language=self.cfg.get("language", None),
         )

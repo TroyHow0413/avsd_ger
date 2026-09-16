@@ -126,7 +126,13 @@ class SessionRunner:
     def __init__(self, pipeline: AVSDGERPipeline):
         self.pipeline = pipeline
 
-    def run(self, turns: Iterable[SessionTurn]) -> SessionResult:
+    def run(
+        self,
+        turns: Iterable[SessionTurn],
+        *,
+        gallery_replay: dict[str, dict[str, dict[str, Any]]] | None = None,
+        gallery_capture: dict[str, dict[str, dict[str, Any]]] | None = None,
+    ) -> SessionResult:
         turns = list(turns)
         # Stitch by start time so that trace ordering survives out-of-order input.
         turns.sort(key=lambda t: (t.start, t.end, t.turn_id))
@@ -137,6 +143,14 @@ class SessionRunner:
         transcript_lines: list[str] = []
 
         for turn in turns:
+            if gallery_replay is not None:
+                if turn.turn_id not in gallery_replay:
+                    raise KeyError(
+                        f"Missing causal gallery snapshot for turn {turn.turn_id}"
+                    )
+                self.pipeline.pool.restore_gallery(gallery_replay[turn.turn_id])
+            if gallery_capture is not None:
+                gallery_capture[turn.turn_id] = self.pipeline.pool.snapshot_gallery()
             device = torch.device(getattr(self.pipeline, "device", "cpu"))
             if device.type == "cuda":
                 torch.cuda.synchronize(device)

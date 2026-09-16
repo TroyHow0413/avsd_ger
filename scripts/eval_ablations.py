@@ -390,6 +390,8 @@ def _run_one(
     ger_ckpt: str | None = None,
     pipe: AVSDGERPipeline | None = None,
     allow_legacy_checkpoint: bool = False,
+    gallery_replay: dict[str, dict[str, dict[str, Any]]] | None = None,
+    gallery_capture: dict[str, dict[str, dict[str, Any]]] | None = None,
 ) -> dict[str, Any]:
     cfg_run = copy.deepcopy(cfg)
     # Every ablation sees exactly the same stochastic backbone/enrollment
@@ -468,10 +470,18 @@ def _run_one(
 
     if monitor is not None:
         with monitor.measure(ablation_name):
-            session = runner.run(turns)
+            session = runner.run(
+                turns,
+                gallery_replay=gallery_replay,
+                gallery_capture=gallery_capture,
+            )
         pwr = monitor.last_report()
     else:
-        session = runner.run(turns)
+        session = runner.run(
+            turns,
+            gallery_replay=gallery_replay,
+            gallery_capture=gallery_capture,
+        )
         pwr = None
     wall_time_s = time.perf_counter() - run_started
     latencies = np.asarray(
@@ -740,6 +750,36 @@ def _run_manifest(
         raise ValueError(
             f"Unknown ablation(s): {unknown}; available={sorted(ABLATION_REGISTRY)}"
         )
+    causal_names = {name for name, _ in IDENTITY_CAUSAL_MATRIX}
+    causal_requested = any(name in causal_names for name in requested)
+    gallery_snapshots: dict[str, dict[str, dict[str, Any]]] = {}
+    if causal_requested:
+        required = {"identity_normal", "zero_z_id", "shuffled_z_id"}
+        if not required.issubset(requested):
+            raise ValueError(
+                "Identity causal evaluation must include identity_normal, "
+                "zero_z_id, and shuffled_z_id in one paired run"
+            )
+        if requested.index("identity_normal") > min(
+            requested.index("zero_z_id"), requested.index("shuffled_z_id")
+        ):
+            raise ValueError(
+                "identity_normal must run before zero_z_id/shuffled_z_id so its "
+                "per-turn gallery trajectory can be replayed"
+            )
+        # faster-whisper otherwise uses stochastic temperature fallback for a
+        # few difficult turns. Pure identity intervention requires identical
+        # ASR output, so causal runs use beam decoding at temperature zero.
+        cfg.setdefault("asr", {})["temperatures"] = [0.0]
+        if pipe is not None:
+            pipe.asr.cfg["temperatures"] = [0.0]
+        torch.backends.cudnn.benchmark = False
+        torch.backends.cudnn.deterministic = True
+        torch.use_deterministic_algorithms(True, warn_only=True)
+        print(
+            "[identity-causal] deterministic ASR temperature=[0.0]; "
+            "normal gallery trajectory will be replayed per turn"
+        )
     for i, name in enumerate(requested):
         flags = dict(ABLATION_REGISTRY[name])
         if (
@@ -760,6 +800,13 @@ def _run_manifest(
             ger_ckpt=ger_ckpt,
             pipe=pipe,
             allow_legacy_checkpoint=allow_legacy_checkpoint,
+            gallery_capture=(
+                gallery_snapshots if name == "identity_normal" else None
+            ),
+            gallery_replay=(
+                gallery_snapshots
+                if name in {"zero_z_id", "shuffled_z_id"} else None
+            ),
         )
         print(json.dumps(r["metrics"], indent=2))
         results.append(r)
@@ -967,6 +1014,14 @@ def main() -> int:
         _apply_safe_core_preset(cfg, args.safe_core_preset)
         print(f"[eval_ablations] Apply safe-core preset -> {args.safe_core_preset}")
     _apply_frontend_profile(cfg, args.frontend_profile)
+    if "eot" in str(args.out).lower() and not bool(
+        cfg.get("vsr", {}).get("emit_text", False)
+    ):
+        print(
+            "[warning] output path contains 'eot' but effective "
+            "vsr.emit_text=false; this run must not be reported as an "
+            "emit-text experiment"
+        )
     manifest_paths = _resolve_manifest_paths(args.manifest)
     multi = len(manifest_paths) > 1
     frontend_meta = _frontend_meta_from_cfg(cfg)

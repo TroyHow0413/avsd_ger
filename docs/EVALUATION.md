@@ -115,8 +115,10 @@ than the project's backwards-compatible metric implementations:
   evaluator receives reference turn boundaries rather than detecting segments.
 
 Missing or incompatible optional scorers are represented by
-`status: unavailable/failed` with the exception message.  They never discard a
-completed model inference.  The debug sidecars retain every reference,
+`status: unavailable/failed` with the exception message. They never discard a
+completed model inference, but `run_manifest.json` is marked
+`metrics_incomplete` and standard main-table columns remain null rather than
+silently falling back to project metrics. The debug sidecars retain every reference,
 hypothesis, speaker, time boundary and confidence required for offline
 rescoring.
 
@@ -129,6 +131,25 @@ python scripts/rescore_standard_metrics.py \
   --language en \
   --in-place
 ```
+
+To rebuild the complete formal bundle (main table, per-meeting and
+per-ablation metrics, grouped appendices, statistics, paired comparisons, and
+normalized scoring inputs), use the dedicated scoring environment and write a
+new comparison directory:
+
+```bash
+python scripts/rebuild_formal_metrics.py \
+  --artifact-root out/ami_full_v4_llama3_8b_dev \
+  --out-dir out/ami_full_v4_llama3_8b_dev_rescored \
+  --language en \
+  --samples 10000 \
+  --seed 1337
+```
+
+The command fails closed when JiWER, MeetEval, or pyannote is unavailable, or
+when ablations do not contain identical reference turns. `--in-place` is
+available but is intentionally explicit; the default workflow preserves the
+original bundle.
 
 The scorer is pinned to pyannote.metrics 3.2.1/core<6 because pyannote 4.x/core
 6.x requires NumPy 2.x while this project's AV stack pins NumPy below 2.  This
@@ -277,8 +298,8 @@ ami_test/
 │   ├── groups/{by_snr,by_lip_conf,by_turn_length,by_duration,by_visual_availability}.json
 │   └── scoring_protocol.json
 ├── scoring_inputs/
-│   ├── reference/{reference.stm,reference.rttm,reference.seglst.json}
-│   └── hypothesis/<ablation>/{hypothesis.stm,hypothesis.rttm,hypothesis.seglst.json}
+│   ├── reference/{reference.stm,reference.raw.stm,reference.rttm,reference.seglst.json}
+│   └── hypothesis/<ablation>/{hypothesis.stm,hypothesis.raw.stm,hypothesis.rttm,hypothesis.seglst.json}
 ├── profiles/{efficiency.json,power.json,latency_per_turn.jsonl}
 └── debug/<ablation>/<meeting>.debug.json
 ```
@@ -303,15 +324,31 @@ mapping. Because `av_consistency_raw` is a cosine similarity rather than a
 learned probability, ECE/Brier use `clip(av_consistency_raw, 0, 1)` as an
 explicitly documented diagnostic proxy; ranking metrics retain the raw score.
 
+Canonical STM/SegLST files contain normalized text and omit empty-text
+segments; `.raw.*` siblings preserve human-readable raw transcripts. RTTM
+omits turns whose hypothesis speaker is missing instead of creating a literal
+speaker named `UNKNOWN`.
+
 The scoring protocol fixes the text normalizer, public scorer versions,
 diarization collars, aggregation rules, group bins and definitions of the few
 project-specific metrics. Use `--no-formal-artifacts` only when a lightweight
 legacy/debug run is explicitly desired.
 
+Every meeting is scored independently. Corpus scores are ratio-of-sums over
+meeting-local additive error counts; word alignment and speaker permutation
+are never allowed to cross a meeting boundary.
+
+MeetEval output also records `diagnostics.hypothesis_self_overlap_seconds`.
+This does not replace an official WER metric; it makes malformed same-speaker
+overlap explicit instead of leaving it as a transient scorer warning.
+
 `statistics.json` keeps corpus micro point estimates but obtains 95% intervals
 by resampling whole session manifests, never turns. `paired_comparisons.json`
 uses paired session-cluster bootstrap for the predeclared primary comparison
-`wo_c3 - full_model` on tcpWER@5s. It also emits an AMI meeting-series
+`wo_c3 - full_model` on tcpWER@5s. Two-sided p-values, when reported, use a
+paired within-session label-swap randomization test rather than bootstrap-tail
+counts. Missing/duplicate meetings or incomplete metric pairs invalidate the
+comparison instead of being silently dropped. It also emits an AMI meeting-series
 sensitivity analysis; AMI dev/test have only three participant-series groups,
 so that result is explicitly labeled sensitivity-only.
 
@@ -344,6 +381,17 @@ retrieval IDs and scores, unknown decisions, confidence, predicted speaker and
 speaker prompt hint. The exact per-meeting derangement is persisted in every
 turn record and in `run_manifest.json`. Change the topology argument to
 `wo_c3` only when the scoring gate selected that topology.
+
+For these three causal rows, the evaluator additionally forces deterministic
+ASR beam decoding (`temperature=[0.0]`). `identity_normal` records the exact C1
+gallery state before every turn; `zero_z_id` and `shuffled_z_id` replay those
+same snapshots. This prevents intervention-dependent pool updates from
+changing later C1 retrieval inputs while preserving the selected C3 topology.
+
+`evaluate_scoring_gate.py` audits turn IDs, references, media paths, ASR/VSR
+outputs, and pre-intervention C1 state. Any difference changes the causal gate
+to `control_failed` and writes `identity_control_invariants.json`; a statistical
+CI is never treated as causal evidence after a failed control audit.
 
 ## Offline canonical debug audit
 
