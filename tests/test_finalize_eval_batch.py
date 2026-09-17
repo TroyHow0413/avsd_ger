@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts.finalize_eval_batch import load_completed_runs
+from scripts.finalize_eval_batch import effective_config_from_runs, load_completed_runs
 
 
 ABLATIONS = ("identity_normal", "zero_z_id", "shuffled_z_id")
@@ -64,3 +64,36 @@ def test_load_completed_runs_rebases_repo_relative_debug_path(tmp_path: Path) ->
 
     assert len(runs) == 1
     assert all(result["turn_debug"] for result in runs[0]["results"])
+
+
+def test_effective_config_restores_observed_ger_mode() -> None:
+    runs = [{
+        "manifest": "data/ES2004a.json",
+        "results": [{
+            "ablation": ablation,
+            "turn_debug": [{"summary": {"ger_mode": "av"}}],
+        } for ablation in ABLATIONS],
+    }]
+    original = {"ger": {"mode": "audio_only"}}
+
+    effective = effective_config_from_runs(original, runs)
+
+    assert effective["ger"]["mode"] == "av"
+    assert original["ger"]["mode"] == "audio_only"
+
+
+def test_effective_config_rejects_conflicting_override() -> None:
+    runs = [{
+        "manifest": "data/ES2004a.json",
+        "results": [{
+            "ablation": "identity_normal",
+            "turn_debug": [{"summary": {"ger_mode": "av"}}],
+        }],
+    }]
+
+    with pytest.raises(ValueError, match="conflicts with observed mode"):
+        effective_config_from_runs(
+            {"ger": {"mode": "audio_only"}},
+            runs,
+            ger_mode_override="audio_only",
+        )

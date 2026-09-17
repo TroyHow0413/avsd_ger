@@ -1125,6 +1125,11 @@ def write_formal_artifacts(
     correction: dict[str, Any] = {}
     sid: dict[str, Any] = {}
     calibration: dict[str, Any] = {}
+    rescored_results_by_meeting: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    manifest_by_meeting = {
+        Path(str(run["manifest"])).stem: str(run["manifest"])
+        for run in raw_runs
+    }
     public_scoring_complete = True
     for ablation, rows in records_by_ablation.items():
         scored = _score_records(rows, language)
@@ -1142,6 +1147,12 @@ def write_formal_artifacts(
                 "metric_details": meeting_score["task_metric_details"],
                 "standard_metrics": meeting_score["standard_metrics"],
                 "counts": meeting_score["counts"],
+            })
+            rescored_results_by_meeting[meeting_id].append({
+                "ablation": ablation,
+                "metrics": meeting_score["task_metrics"],
+                "metric_details": meeting_score["task_metric_details"],
+                "standard_metrics": meeting_score["standard_metrics"],
             })
         _write_jsonl(
             root / "metrics" / "per_meeting" / f"{ablation}.jsonl",
@@ -1248,16 +1259,27 @@ def write_formal_artifacts(
     scoring_protocol["confirmatory_analysis"]["bootstrap_samples"] = int(bootstrap_samples)
     scoring_protocol["confirmatory_analysis"]["bootstrap_seed"] = int(bootstrap_seed)
     _write_json(root / "metrics" / "scoring_protocol.json", scoring_protocol)
+    # Statistical inference must consume the meeting-local scores produced in
+    # this environment.  The input reports may contain unavailable public
+    # metrics when inference ran in a lean model environment without MeetEval
+    # or pyannote.metrics.
+    rescored_runs = [
+        {
+            "manifest": manifest_by_meeting.get(meeting, f"{meeting}.json"),
+            "results": rescored_results_by_meeting[meeting],
+        }
+        for meeting in sorted(rescored_results_by_meeting)
+    ]
     _write_json(
         root / "metrics" / "statistics.json",
         build_statistics_report(
-            raw_runs, samples=bootstrap_samples, seed=bootstrap_seed,
+            rescored_runs, samples=bootstrap_samples, seed=bootstrap_seed,
         ),
     )
     _write_json(
         root / "metrics" / "paired_comparisons.json",
         build_paired_comparisons(
-            raw_runs, samples=bootstrap_samples, seed=bootstrap_seed,
+            rescored_runs, samples=bootstrap_samples, seed=bootstrap_seed,
         ),
     )
     for name, payload in _group_metrics(records_by_ablation, language).items():

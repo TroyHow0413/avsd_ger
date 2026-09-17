@@ -9,6 +9,7 @@ It never loads model checkpoints or media.
 from __future__ import annotations
 
 import argparse
+from copy import deepcopy
 from datetime import datetime, timezone
 import json
 from pathlib import Path
@@ -23,6 +24,7 @@ from avsd_ger.utils import load_config  # noqa: E402
 
 
 IDENTITY_ABLATIONS = {"identity_normal", "zero_z_id", "shuffled_z_id"}
+GER_MODES = {"audio_only", "av", "visual_only"}
 
 
 def _resolve_debug_path(repo_root: Path, artifact_root: Path, raw: str) -> Path:
@@ -89,6 +91,49 @@ def load_completed_runs(
     return runs
 
 
+def effective_config_from_runs(
+    config: dict[str, Any],
+    runs: list[dict[str, Any]],
+    *,
+    ger_mode_override: str | None = None,
+) -> dict[str, Any]:
+    """Restore runtime settings that are recorded in turn debug rows.
+
+    ``eval_ablations.py`` applies CLI overrides after loading the YAML.  A
+    standalone finalization pass only sees that original YAML, so using it
+    verbatim can mislabel an AV run as ``audio_only``.  Every completed turn
+    records the effective GER mode; require those observations to agree and
+    use them as the authoritative value.  The explicit option is retained for
+    older artifacts that predate the debug field and is checked against any
+    observed value.
+    """
+    observed = {
+        str(summary["ger_mode"])
+        for run in runs
+        for result in run.get("results", [])
+        for turn in result.get("turn_debug", [])
+        if isinstance((summary := turn.get("summary", {})), dict)
+        and summary.get("ger_mode") is not None
+    }
+    invalid = sorted(observed - GER_MODES)
+    if invalid:
+        raise ValueError(f"Unsupported observed GER modes: {invalid}")
+    if len(observed) > 1:
+        raise ValueError(f"Inconsistent observed GER modes: {sorted(observed)}")
+    observed_mode = next(iter(observed), None)
+    if ger_mode_override and observed_mode and ger_mode_override != observed_mode:
+        raise ValueError(
+            f"--ger-mode={ger_mode_override} conflicts with observed mode "
+            f"{observed_mode}"
+        )
+
+    effective = deepcopy(config)
+    mode = ger_mode_override or observed_mode
+    if mode:
+        effective.setdefault("ger", {})["mode"] = mode
+    return effective
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--artifact-root", required=True, type=Path)
@@ -100,6 +145,15 @@ def main() -> int:
     parser.add_argument("--expected-meetings", type=int, required=True)
     parser.add_argument("--seed", type=int, default=1337)
     parser.add_argument("--samples", type=int, default=10_000)
+    parser.add_argument(
+        "--ger-mode",
+        choices=sorted(GER_MODES),
+        default=None,
+        help=(
+            "Effective inference GER mode. Normally inferred from saved turn "
+            "debug; use this only for older artifacts without ger_mode."
+        ),
+    )
     args = parser.parse_args()
 
     source = args.artifact_root.resolve()
@@ -114,7 +168,9 @@ def main() -> int:
             f"found {len(meetings)}: {meetings}"
         )
 
-    cfg = load_config(args.config)
+    cfg = effective_config_from_runs(
+        load_config(args.config), runs, ger_mode_override=args.ger_mode,
+    )
     destination.mkdir(parents=True, exist_ok=False)
     (destination / "summary.json").write_text(
         json.dumps({"n_manifests": len(runs), "runs": runs}, indent=2),

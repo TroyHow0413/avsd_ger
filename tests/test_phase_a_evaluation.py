@@ -479,6 +479,14 @@ class FormalArtifactTest(unittest.TestCase):
             self.assertIn("memory_semantics", protocol)
             main = json.loads((output / "metrics/main_table.json").read_text())
             self.assertIn("tcpwer_5s", main["rows"][0])
+            statistics = json.loads(
+                (output / "metrics/statistics.json").read_text()
+            )
+            self.assertEqual(
+                statistics["ablations"]["c3_wo_confidence_gates"]
+                ["tcpwer_5s"]["n_sessions"],
+                1,
+            )
             self.assertTrue(
                 (output / "scoring_inputs/reference/reference.raw.stm").exists()
             )
