@@ -1,0 +1,5 @@
+defaults:
+  - config_real_en_llama3_8b_c3_tau030
+
+vsr:
+  emit_text: true
