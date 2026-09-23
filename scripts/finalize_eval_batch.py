@@ -53,10 +53,11 @@ def load_completed_runs(
     artifact_root: Path,
     *,
     repo_root: Path = ROOT,
-    expected_ablations: set[str] = IDENTITY_ABLATIONS,
+    expected_ablations: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     runs: list[dict[str, Any]] = []
     seen_meetings: set[str] = set()
+    expected_names = set(expected_ablations) if expected_ablations is not None else None
     for path in sorted(artifact_root.glob("*.json")):
         if path.name in {"summary.json", "run_manifest.json", "records.schema.json"}:
             continue
@@ -68,9 +69,13 @@ def load_completed_runs(
             raise ValueError(f"Duplicate meeting report for {meeting}: {path}")
         seen_meetings.add(meeting)
         names = {str(result.get("ablation")) for result in payload["results"]}
-        if names != expected_ablations:
+        if not names or "None" in names:
+            raise ValueError(f"{path}: missing or invalid ablation names: {sorted(names)}")
+        if expected_names is None:
+            expected_names = names
+        elif names != expected_names:
             raise ValueError(
-                f"{path}: expected ablations {sorted(expected_ablations)}, got {sorted(names)}"
+                f"{path}: expected ablations {sorted(expected_names)}, got {sorted(names)}"
             )
         results: list[dict[str, Any]] = []
         for result in payload["results"]:
@@ -146,6 +151,16 @@ def main() -> int:
     parser.add_argument("--seed", type=int, default=1337)
     parser.add_argument("--samples", type=int, default=10_000)
     parser.add_argument(
+        "--expected-ablations",
+        nargs="+",
+        default=None,
+        help=(
+            "Optional exact ablation names required in every meeting report. "
+            "When omitted, infer the set from the first completed report and "
+            "require every remaining meeting to match it."
+        ),
+    )
+    parser.add_argument(
         "--ger-mode",
         choices=sorted(GER_MODES),
         default=None,
@@ -160,7 +175,12 @@ def main() -> int:
     destination = args.out_dir.resolve()
     if destination.exists():
         raise FileExistsError(f"Destination already exists: {destination}")
-    runs = load_completed_runs(source)
+    runs = load_completed_runs(
+        source,
+        expected_ablations=(
+            set(args.expected_ablations) if args.expected_ablations else None
+        ),
+    )
     meetings = sorted(Path(str(run["manifest"])).stem for run in runs)
     if len(meetings) != args.expected_meetings:
         raise RuntimeError(

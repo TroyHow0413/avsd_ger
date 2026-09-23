@@ -11,9 +11,15 @@ from scripts.finalize_eval_batch import effective_config_from_runs, load_complet
 ABLATIONS = ("identity_normal", "zero_z_id", "shuffled_z_id")
 
 
-def _write_report(root: Path, meeting: str, *, repo_relative_debug: bool = False) -> None:
+def _write_report(
+    root: Path,
+    meeting: str,
+    *,
+    repo_relative_debug: bool = False,
+    ablations: tuple[str, ...] = ABLATIONS,
+) -> None:
     results = []
-    for ablation in ABLATIONS:
+    for ablation in ablations:
         debug = root / f"{meeting}_debug" / f"{meeting}.{ablation}.debug.json"
         debug.parent.mkdir(parents=True, exist_ok=True)
         debug.write_text(
@@ -52,6 +58,39 @@ def test_load_completed_runs_rejects_missing_ablation(tmp_path: Path) -> None:
     payload = json.loads(path.read_text(encoding="utf-8"))
     payload["results"].pop()
     path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="expected ablations"):
+        load_completed_runs(tmp_path, expected_ablations=set(ABLATIONS))
+
+
+def test_load_completed_runs_infers_av_ablation_matrix(tmp_path: Path) -> None:
+    ablations = ("full_model", "wo_c1", "wo_c2", "wo_c3", "c3_wo_conf_gates")
+    _write_report(tmp_path, "ES2004a", ablations=ablations)
+    _write_report(tmp_path, "TS3003d", ablations=ablations)
+
+    runs = load_completed_runs(tmp_path)
+
+    assert len(runs) == 2
+    assert all(
+        {result["ablation"] for result in run["results"]} == set(ablations)
+        for run in runs
+    )
+
+
+def test_load_completed_runs_infers_single_ablation(tmp_path: Path) -> None:
+    _write_report(tmp_path, "ES2004a", ablations=("full_model",))
+    _write_report(tmp_path, "TS3003d", ablations=("full_model",))
+
+    runs = load_completed_runs(tmp_path)
+
+    assert len(runs) == 2
+
+
+def test_load_completed_runs_rejects_inconsistent_inferred_matrix(
+    tmp_path: Path,
+) -> None:
+    _write_report(tmp_path, "ES2004a")
+    _write_report(tmp_path, "TS3003d", ablations=ABLATIONS[:-1])
 
     with pytest.raises(ValueError, match="expected ablations"):
         load_completed_runs(tmp_path)
