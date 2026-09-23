@@ -518,7 +518,9 @@ def _run_one(
     metric_language = cfg_run.get("asr", {}).get("language") or "auto"
     report = evaluate_session(session.turns, language=metric_language)
     standard_metrics = compute_standard_metrics(
-        session.turns, language=metric_language
+        session.turns,
+        language=metric_language,
+        meeteval_score_names=("cpwer", "tcpwer_collar_5s"),
     )
     frontend_meta = _frontend_meta_from_cfg(cfg_run)
     trace_summary = _summarize_traces(session.turns)
