@@ -56,6 +56,11 @@ All five operate on `list[SessionTurnResult]` and use **Hungarian assignment** (
 | `compute_der(turns)` | `(der, details)` | Diarization Error Rate = `(miss + false_alarm + confusion) / total_ref_speech`. Confusion uses the optimal hyp→ref mapping. **Computed at turn granularity** — assumes turns don't overlap, which matches the single-speaker-per-utterance pipeline shape. |
 | `compute_jer(turns)` | `(jer, details)` | Jaccard Error Rate = mean over reference speakers of `1 − Jaccard(ref_time, hyp_time)`. Speakers without a hyp match contribute `1.0`. |
 
+Paired deltas are always `challenger - reference`. Error-rate metrics are
+minimized, while `av_sid_acc` is maximized; its numeric delta and confidence
+interval retain the same sign, but the better/worse direction label follows
+the higher-is-better interpretation.
+
 Bundled:
 
 ```python
@@ -207,10 +212,21 @@ Rows (controlled via `cfg.ablation` overrides):
 | `wo_c2` | `disable_c2: true` | contribution of the GER head over ASR 1-best |
 | `wo_c3` | `disable_c3: true` | contribution of the closed loop |
 | `c3_wo_conf_gates` | `disable_c3_decision_gate: true`, `disable_c3_update_gate: true` | both C3 confidence gates; GER safety remains enabled |
+| `c3_wo_decision_gate` | `disable_c3_decision_gate: true` | diagnostic row that disables only the C3 decision gate |
+| `c3_wo_update_gate` | `disable_c3_update_gate: true` | diagnostic row that disables only the C3 update gate |
 
 The legacy `disable_conf_gate` key remains accepted, emits a deprecation
 warning, and maps to both new switches. Historical `c3_wo_conf_gate` results
 only disabled the update gate and must not be mixed with the corrected row.
+The two single-gate diagnostic rows are opt-in through `--only`; they do not
+change the default five-row evaluation matrix.
+
+Raw summaries retain the compatibility ID `c3_wo_conf_gates`; statistical
+ingestion canonicalizes it to `c3_wo_confidence_gates` before resolving paired
+comparisons. When all four factorial conditions are present, the paired
+statistics artifact also reports the interaction
+`both_off - decision_off - update_off + full_model` with session-bootstrap and
+meeting-series sensitivity intervals.
 
 **Structural-safety check** is computed across manifests using a paired
 manifest-cluster bootstrap. Equality and a 95% interval crossing zero are

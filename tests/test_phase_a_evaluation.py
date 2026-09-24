@@ -20,6 +20,7 @@ from avsd_ger.eval.standard_metrics import (
     compute_standard_metrics,
 )
 from avsd_ger.eval.formal_artifacts import (
+    CANONICAL_ABLATIONS,
     _aggregate_meeteval,
     _rttm,
     _score_records,
@@ -43,6 +44,11 @@ from avsd_ger.text_normalization import (
 from avsd_ger.eval.session import SessionTurnResult
 from scripts.analyze_debug_outputs import _edit_counts, analyze
 from avsd_ger.c3_statistics import c3_cluster_bootstrap_spec_check
+from scripts.eval_ablations import (
+    ABLATION_REGISTRY,
+    C3_DIAGNOSTIC_MATRIX,
+    DEFAULT_ABLATION_MATRIX,
+)
 
 
 def _turn(ref: str, hyp: str, language: str | None = "en") -> SessionTurnResult:
@@ -52,6 +58,42 @@ def _turn(ref: str, hyp: str, language: str | None = "en") -> SessionTurnResult:
         iterations=1, pool_updated=False, asr_language=language,
         ref_text=ref, ref_speaker="speaker",
     )
+
+
+class C3DiagnosticRegistryTest(unittest.TestCase):
+    def test_default_matrix_remains_the_original_five_rows(self):
+        self.assertEqual(
+            [name for name, _ in DEFAULT_ABLATION_MATRIX],
+            ["full_model", "wo_c1", "wo_c2", "wo_c3", "c3_wo_conf_gates"],
+        )
+
+    def test_single_gate_rows_are_opt_in_and_independent(self):
+        self.assertEqual(
+            dict(C3_DIAGNOSTIC_MATRIX),
+            {
+                "c3_wo_decision_gate": {"disable_c3_decision_gate": True},
+                "c3_wo_update_gate": {"disable_c3_update_gate": True},
+            },
+        )
+        self.assertNotIn(
+            "disable_c3_update_gate",
+            ABLATION_REGISTRY["c3_wo_decision_gate"],
+        )
+        self.assertNotIn(
+            "disable_c3_decision_gate",
+            ABLATION_REGISTRY["c3_wo_update_gate"],
+        )
+
+    def test_formal_ids_do_not_reuse_the_legacy_singular_name(self):
+        self.assertEqual(
+            CANONICAL_ABLATIONS["c3_wo_decision_gate"],
+            "c3_wo_decision_gate",
+        )
+        self.assertEqual(
+            CANONICAL_ABLATIONS["c3_wo_update_gate"],
+            "c3_wo_update_gate",
+        )
+        self.assertNotIn("c3_wo_conf_gate", ABLATION_REGISTRY)
 
 
 class CanonicalNormalizationTest(unittest.TestCase):
@@ -540,6 +582,16 @@ class ClusterStatisticsTest(unittest.TestCase):
             },
         }
 
+    @classmethod
+    def _sid_result(cls, ablation, correct, total=4):
+        result = cls._result(ablation, errors=10)
+        result["metrics"]["av_sid_acc"] = correct / total
+        result["metric_details"]["av_sid"] = {
+            "n_correct": correct,
+            "n": total,
+        }
+        return result
+
     def test_session_bootstrap_and_paired_delta(self):
         runs = []
         for meeting, full_errors, wo_errors in [
@@ -562,6 +614,7 @@ class ClusterStatisticsTest(unittest.TestCase):
         comparison = paired["comparisons"]["c3_topology"]
         c3 = comparison["metrics"]["tcpwer_5s"]["session_cluster"]
         self.assertAlmostEqual(c3["delta_challenger_minus_reference"], 0.1)
+        self.assertEqual(c3["optimization"], "minimize")
         self.assertEqual(c3["direction"], "challenger_worse")
         self.assertEqual(comparison["selection_gate"]["decision"], "full_model")
         sensitivity = comparison["metrics"]["tcpwer_5s"]["meeting_series_sensitivity"]
@@ -586,6 +639,110 @@ class ClusterStatisticsTest(unittest.TestCase):
         self.assertEqual(
             paired["comparisons"]["identity_zero"]["causal_gate"]["decision"],
             "supports_identity_conditioning",
+        )
+
+    def test_av_sid_accuracy_uses_higher_is_better_direction(self):
+        runs = []
+        for meeting in ("ES2011a", "IS1008a", "TS3004a", "EN2001a"):
+            runs.append({
+                "manifest": f"{meeting}.json",
+                "results": [
+                    self._sid_result("full_model", 1),
+                    self._sid_result("c3_wo_decision_gate", 3),
+                ],
+            })
+        paired = build_paired_comparisons(runs, samples=200, seed=11)
+        metric = paired["comparisons"]["c3_decision_gate"]["metrics"][
+            "av_sid_acc"
+        ]["session_cluster"]
+        self.assertAlmostEqual(metric["delta_challenger_minus_reference"], 0.5)
+        self.assertEqual(metric["optimization"], "maximize")
+        self.assertEqual(metric["direction"], "challenger_better")
+        self.assertGreater(metric["ci95"][0], 0.0)
+
+    def test_av_sid_accuracy_negative_delta_is_worse(self):
+        runs = []
+        for meeting in ("ES2011a", "IS1008a", "TS3004a", "EN2001a"):
+            runs.append({
+                "manifest": f"{meeting}.json",
+                "results": [
+                    self._sid_result("full_model", 3),
+                    self._sid_result("c3_wo_update_gate", 1),
+                ],
+            })
+        paired = build_paired_comparisons(runs, samples=200, seed=13)
+        metric = paired["comparisons"]["c3_update_gate"]["metrics"][
+            "av_sid_acc"
+        ]["session_cluster"]
+        self.assertAlmostEqual(metric["delta_challenger_minus_reference"], -0.5)
+        self.assertEqual(metric["direction"], "challenger_worse")
+        self.assertLess(metric["ci95"][1], 0.0)
+
+    def test_av_sid_accuracy_ci_crossing_zero_is_inconclusive(self):
+        runs = []
+        for index, meeting in enumerate(
+            ("ES2011a", "IS1008a", "TS3004a", "EN2001a")
+        ):
+            reference, challenger = ((1, 3) if index < 2 else (3, 1))
+            runs.append({
+                "manifest": f"{meeting}.json",
+                "results": [
+                    self._sid_result("full_model", reference),
+                    self._sid_result("c3_wo_decision_gate", challenger),
+                ],
+            })
+        paired = build_paired_comparisons(runs, samples=500, seed=17)
+        metric = paired["comparisons"]["c3_decision_gate"]["metrics"][
+            "av_sid_acc"
+        ]["session_cluster"]
+        self.assertLessEqual(metric["ci95"][0], 0.0)
+        self.assertGreaterEqual(metric["ci95"][1], 0.0)
+        self.assertEqual(metric["direction"], "inconclusive")
+
+    def test_c3_single_gate_and_incremental_comparisons_are_registered(self):
+        runs = []
+        for meeting in ("ES2011a", "IS1008a", "TS3004a", "EN2001a"):
+            runs.append({
+                "manifest": f"{meeting}.json",
+                "results": [
+                    self._result("full_model", 20),
+                    self._result("c3_wo_decision_gate", 15),
+                    self._result("c3_wo_update_gate", 18),
+                    # Raw summaries use this compatibility ID.  Statistics
+                    # must canonicalize it before resolving comparisons.
+                    self._result("c3_wo_conf_gates", 10),
+                ],
+            })
+        comparisons = build_paired_comparisons(
+            runs, samples=100, seed=19,
+        )["comparisons"]
+        expected = {
+            "c3_decision_gate",
+            "c3_update_gate",
+            "c3_both_gates",
+            "c3_decision_gate_incremental",
+            "c3_update_gate_incremental",
+        }
+        self.assertTrue(expected.issubset(comparisons))
+        for name in expected:
+            metric = comparisons[name]["metrics"]["tcpwer_5s"]["session_cluster"]
+            self.assertEqual(metric["status"], "ok")
+            self.assertEqual(metric["optimization"], "minimize")
+
+        report = build_statistics_report(runs, samples=100, seed=19)
+        self.assertIn("c3_wo_confidence_gates", report["ablations"])
+        self.assertNotIn("c3_wo_conf_gates", report["ablations"])
+
+        interaction = build_paired_comparisons(
+            runs, samples=100, seed=19,
+        )["interactions"]["c3_gates"]
+        self.assertEqual(interaction["status"], "ok")
+        tcp = interaction["metrics"]["tcpwer_5s"]["session_cluster"]
+        self.assertAlmostEqual(tcp["estimate"], -0.03)
+        self.assertEqual(tcp["direction"], "negative_interaction")
+        self.assertEqual(
+            tcp["performance_interpretation"],
+            "joint_disable_more_favorable_than_additive",
         )
 
     def test_paired_comparison_rejects_missing_and_duplicate_meetings(self):

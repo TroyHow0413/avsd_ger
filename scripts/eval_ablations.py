@@ -74,7 +74,18 @@ IDENTITY_CAUSAL_MATRIX = [
     ("shuffled_z_id",        {"shuffle_z_id": True}),
 ]
 
-ABLATION_REGISTRY = dict(DEFAULT_ABLATION_MATRIX + IDENTITY_CAUSAL_MATRIX)
+C3_DIAGNOSTIC_MATRIX = [
+    ("c3_wo_decision_gate",  {
+        "disable_c3_decision_gate": True,
+    }),
+    ("c3_wo_update_gate",    {
+        "disable_c3_update_gate": True,
+    }),
+]
+
+ABLATION_REGISTRY = dict(
+    DEFAULT_ABLATION_MATRIX + IDENTITY_CAUSAL_MATRIX + C3_DIAGNOSTIC_MATRIX
+)
 
 
 def _flatten_numeric(value: Any, prefix: str) -> dict[str, float]:
@@ -894,8 +905,9 @@ def main() -> int:
         nargs="+",
         default=None,
         help=(
-            "restrict to named ablations; optional identity causal rows are "
-            "{identity_normal,zero_z_id,shuffled_z_id}"
+            "restrict to named ablations; optional rows include identity causal "
+            "{identity_normal,zero_z_id,shuffled_z_id} and C3 diagnostic "
+            "{c3_wo_decision_gate,c3_wo_update_gate}"
         ),
     )
     p.add_argument(

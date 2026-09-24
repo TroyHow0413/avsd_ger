@@ -19,6 +19,23 @@ METRIC_ORDER = (
     "sa_wer_custom", "scr", "av_sid_acc",
 )
 
+# Deltas are always reported as challenger - reference.  Most metrics are
+# error rates and therefore improve when the delta is negative.  AV-SID is an
+# accuracy, so its interpretation is intentionally reversed without changing
+# the numeric delta, confidence interval, or randomization test.
+METRIC_OPTIMIZATION = {
+    metric: ("maximize" if metric == "av_sid_acc" else "minimize")
+    for metric in METRIC_ORDER
+}
+
+ABLATION_ALIASES = {
+    # Raw eval summaries use the compatibility ID while formal artifacts use
+    # the canonical spelling.  Normalize at ingestion so both paths produce
+    # identical comparisons.  The historical singular c3_wo_conf_gate is
+    # deliberately not aliased because it had update-gate-only semantics.
+    "c3_wo_conf_gates": "c3_wo_confidence_gates",
+}
+
 
 def meeting_series_id(meeting_id: str) -> str:
     """Collapse AMI sessions such as ES2011a-d to their participant series."""
@@ -202,12 +219,14 @@ def _collect(raw_runs: list[dict[str, Any]]) -> dict[str, dict[str, dict[str, An
         if not meeting:
             raise ValueError("Every scoring run must have a non-empty manifest/meeting ID")
         for result in run.get("results", []):
-            ablation = str(result.get("ablation"))
-            if not ablation or ablation == "None":
+            raw_ablation = str(result.get("ablation"))
+            if not raw_ablation or raw_ablation == "None":
                 raise ValueError(f"{meeting}: every result must have an ablation ID")
+            ablation = ABLATION_ALIASES.get(raw_ablation, raw_ablation)
             if meeting in collected[ablation]:
                 raise ValueError(
-                    f"Duplicate meeting/ablation result: {meeting}/{ablation}; "
+                    f"Duplicate meeting/ablation result after canonicalization: "
+                    f"{meeting}/{ablation} (input={raw_ablation}); "
                     "refusing to overwrite paired scoring input"
                 )
             collected[ablation][meeting] = {
@@ -260,6 +279,19 @@ def build_statistics_report(
 
 COMPARISON_SPECS = (
     ("c3_topology", "full_model", "wo_c3"),
+    ("c3_decision_gate", "full_model", "c3_wo_decision_gate"),
+    ("c3_update_gate", "full_model", "c3_wo_update_gate"),
+    ("c3_both_gates", "full_model", "c3_wo_confidence_gates"),
+    (
+        "c3_decision_gate_incremental",
+        "c3_wo_update_gate",
+        "c3_wo_confidence_gates",
+    ),
+    (
+        "c3_update_gate_incremental",
+        "c3_wo_decision_gate",
+        "c3_wo_confidence_gates",
+    ),
     ("identity_zero", "identity_normal", "zero_z_id"),
     ("identity_shuffle", "identity_normal", "shuffled_z_id"),
 )
@@ -267,8 +299,10 @@ COMPARISON_SPECS = (
 
 def _paired_bootstrap(
     reference: list[dict[str, Any]], challenger: list[dict[str, Any]],
-    *, samples: int, seed: int,
+    *, samples: int, seed: int, optimization: str,
 ) -> dict[str, Any]:
+    if optimization not in {"minimize", "maximize"}:
+        raise ValueError(f"Unsupported metric optimization direction: {optimization!r}")
     ref_estimate = _aggregate(reference)
     challenger_estimate = _aggregate(challenger)
     result = {
@@ -276,6 +310,7 @@ def _paired_bootstrap(
         "challenger_estimate": challenger_estimate,
         "delta_challenger_minus_reference": challenger_estimate - ref_estimate,
         "n_pairs": len(reference), "bootstrap_samples": samples, "seed": seed,
+        "optimization": optimization,
     }
     if len(reference) < 2:
         return {**result, "status": "insufficient", "ci95": None, "p_value_two_sided": None}
@@ -303,15 +338,18 @@ def _paired_bootstrap(
         ]
         delta = _aggregate(permuted_challenger) - _aggregate(permuted_reference)
         extreme += int(abs(delta) >= observed - 1e-15)
+    if low > 0:
+        direction = "challenger_better" if optimization == "maximize" else "challenger_worse"
+    elif high < 0:
+        direction = "challenger_worse" if optimization == "maximize" else "challenger_better"
+    else:
+        direction = "inconclusive"
     return {
         **result, "status": "ok", "ci95": [float(low), float(high)],
         "p_value_two_sided": float((extreme + 1) / (samples + 1)),
         "p_value_method": "paired randomization by within-session label swap",
         "permutation_samples": int(samples),
-        "direction": (
-            "challenger_worse" if low > 0 else
-            "challenger_better" if high < 0 else "inconclusive"
-        ),
+        "direction": direction,
     }
 
 
@@ -337,16 +375,182 @@ def _paired_series_observations(
     return collapsed_reference, collapsed_challenger
 
 
+def _factorial_interaction_bootstrap(
+    full: list[dict[str, Any]],
+    decision_off: list[dict[str, Any]],
+    update_off: list[dict[str, Any]],
+    both_off: list[dict[str, Any]],
+    *,
+    samples: int,
+    seed: int,
+    optimization: str,
+) -> dict[str, Any]:
+    """Paired 2x2 interaction for disabling the decision and update gates."""
+    if optimization not in {"minimize", "maximize"}:
+        raise ValueError(f"Unsupported metric optimization direction: {optimization!r}")
+
+    def estimate(indices: np.ndarray | None = None) -> float:
+        return float(
+            _aggregate(both_off, indices)
+            - _aggregate(decision_off, indices)
+            - _aggregate(update_off, indices)
+            + _aggregate(full, indices)
+        )
+
+    observed = estimate()
+    result = {
+        "estimate": observed,
+        "formula": "both_off - decision_off - update_off + full_model",
+        "n_pairs": len(full),
+        "bootstrap_samples": int(samples),
+        "seed": int(seed),
+        "optimization": optimization,
+    }
+    if len(full) < 2:
+        return {**result, "status": "insufficient", "ci95": None}
+
+    rng = np.random.default_rng(seed)
+    values = np.empty(samples, dtype=np.float64)
+    for draw in range(samples):
+        indices = rng.integers(0, len(full), size=len(full))
+        values[draw] = estimate(indices)
+    low, high = np.percentile(values, [2.5, 97.5])
+    if low > 0:
+        direction = "positive_interaction"
+        interpretation = (
+            "joint_disable_more_favorable_than_additive"
+            if optimization == "maximize"
+            else "joint_disable_less_favorable_than_additive"
+        )
+    elif high < 0:
+        direction = "negative_interaction"
+        interpretation = (
+            "joint_disable_less_favorable_than_additive"
+            if optimization == "maximize"
+            else "joint_disable_more_favorable_than_additive"
+        )
+    else:
+        direction = "inconclusive"
+        interpretation = "inconclusive"
+    return {
+        **result,
+        "status": "ok",
+        "ci95": [float(low), float(high)],
+        "bootstrap_mean": float(values.mean()),
+        "direction": direction,
+        "performance_interpretation": interpretation,
+    }
+
+
+def _build_c3_gate_interaction(
+    collected: dict[str, dict[str, dict[str, Any]]],
+    *,
+    samples: int,
+    seed: int,
+) -> dict[str, Any]:
+    conditions = {
+        "full_model": "full_model",
+        "decision_off": "c3_wo_decision_gate",
+        "update_off": "c3_wo_update_gate",
+        "both_off": "c3_wo_confidence_gates",
+    }
+    missing = [name for name in conditions.values() if name not in collected]
+    if missing:
+        return {
+            "status": "not_run",
+            "conditions": conditions,
+            "missing_ablations": missing,
+        }
+
+    meeting_sets = {
+        label: set(collected[ablation])
+        for label, ablation in conditions.items()
+    }
+    if len({frozenset(meetings) for meetings in meeting_sets.values()}) != 1:
+        return {
+            "status": "invalid_unpaired_meetings",
+            "conditions": conditions,
+            "meetings_by_condition": {
+                label: sorted(meetings)
+                for label, meetings in meeting_sets.items()
+            },
+        }
+
+    common = sorted(meeting_sets["full_model"])
+    result: dict[str, Any] = {
+        "status": "ok",
+        "conditions": conditions,
+        "formula": "both_off - decision_off - update_off + full_model",
+        "metrics": {},
+    }
+    for metric in METRIC_ORDER:
+        ids = [
+            meeting for meeting in common
+            if all(
+                metric in collected[ablation][meeting]
+                for ablation in conditions.values()
+            )
+        ]
+        if len(ids) != len(common):
+            result["metrics"][metric] = {
+                "status": "invalid_incomplete_metric_pairs",
+                "n_pairs": len(ids),
+                "expected_pairs": len(common),
+                "missing_meetings": sorted(set(common) - set(ids)),
+            }
+            continue
+        observations = {
+            label: [collected[ablation][meeting][metric] for meeting in ids]
+            for label, ablation in conditions.items()
+        }
+        session = _factorial_interaction_bootstrap(
+            observations["full_model"],
+            observations["decision_off"],
+            observations["update_off"],
+            observations["both_off"],
+            samples=samples,
+            seed=seed,
+            optimization=METRIC_OPTIMIZATION[metric],
+        )
+        series_ids = [meeting_series_id(meeting) for meeting in ids]
+        series = {
+            label: _collapse_clusters(values, series_ids)
+            for label, values in observations.items()
+        }
+        series_result = _factorial_interaction_bootstrap(
+            series["full_model"],
+            series["decision_off"],
+            series["update_off"],
+            series["both_off"],
+            samples=samples,
+            seed=seed + 1,
+            optimization=METRIC_OPTIMIZATION[metric],
+        )
+        if len(series["full_model"]) < 5:
+            series_result["warning"] = (
+                "fewer than five meeting-series pairs; sensitivity only"
+            )
+        result["metrics"][metric] = {
+            "session_cluster": session,
+            "meeting_series_sensitivity": series_result,
+            "n_sessions": len(ids),
+            "n_meeting_series": len(series["full_model"]),
+        }
+    return result
+
+
 def build_paired_comparisons(
     raw_runs: list[dict[str, Any]], *, samples: int = 10_000, seed: int = 1337,
 ) -> dict[str, Any]:
     collected = _collect(raw_runs)
     output: dict[str, Any] = {
         "schema_version": 1,
-        "delta_definition": "challenger - reference; positive is worse for error metrics",
+        "delta_definition": "challenger - reference",
+        "metric_optimization": dict(METRIC_OPTIMIZATION),
         "bootstrap_unit": "paired session/manifest",
         "bootstrap_samples": samples, "seed": seed,
         "comparisons": {},
+        "interactions": {},
     }
     for name, reference_name, challenger_name in COMPARISON_SPECS:
         if reference_name not in collected or challenger_name not in collected:
@@ -388,12 +592,14 @@ def build_paired_comparisons(
             challenger = [collected[challenger_name][mid][metric] for mid in ids]
             session_result = _paired_bootstrap(
                 reference, challenger, samples=samples, seed=seed,
+                optimization=METRIC_OPTIMIZATION[metric],
             )
             series_reference, series_challenger = _paired_series_observations(
                 ids, reference, challenger,
             )
             series_result = _paired_bootstrap(
                 series_reference, series_challenger, samples=samples, seed=seed + 1,
+                optimization=METRIC_OPTIMIZATION[metric],
             )
             if len(series_reference) < 5:
                 series_result["warning"] = (
@@ -440,4 +646,7 @@ def build_paired_comparisons(
                     ),
                 }
         output["comparisons"][name] = result
+    output["interactions"]["c3_gates"] = _build_c3_gate_interaction(
+        collected, samples=samples, seed=seed,
+    )
     return output

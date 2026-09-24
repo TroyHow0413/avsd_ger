@@ -155,11 +155,13 @@ def analyze(inputs: list[Path], *, language: str) -> dict[str, Any]:
                 debug_path.read_text(encoding="utf-8")
             )
             ablation = str(result.get("ablation") or debug.get("ablation") or "unknown")
-            semantics = (
-                "legacy_update_gate_only"
-                if ablation == "c3_wo_conf_gate"
-                else "c3_v2" if ablation == "c3_wo_conf_gates" else "not_applicable"
-            )
+            semantics = {
+                "c3_wo_conf_gate": "legacy_update_gate_only",
+                "c3_wo_conf_gates": "c3_v2_both_gates_disabled",
+                "c3_wo_confidence_gates": "c3_v2_both_gates_disabled",
+                "c3_wo_decision_gate": "c3_v2_decision_gate_only_disabled",
+                "c3_wo_update_gate": "c3_v2_update_gate_only_disabled",
+            }.get(ablation, "not_applicable")
             flags = result.get("flags") or debug.get("flags") or {}
             eligible = not bool(flags.get("disable_c2")) and ablation != "wo_c2"
             session_start = len(turn_rows)
