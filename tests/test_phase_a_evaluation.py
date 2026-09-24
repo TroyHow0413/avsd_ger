@@ -2,6 +2,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
@@ -48,6 +49,10 @@ from scripts.eval_ablations import (
     ABLATION_REGISTRY,
     C3_DIAGNOSTIC_MATRIX,
     DEFAULT_ABLATION_MATRIX,
+    VISUAL_DIAGNOSTIC_MATRIX,
+    _apply_reused_pipeline_flags,
+    _prepare_run_config,
+    _validate_visual_result_rows,
 )
 
 
@@ -94,6 +99,110 @@ class C3DiagnosticRegistryTest(unittest.TestCase):
             "c3_wo_update_gate",
         )
         self.assertNotIn("c3_wo_conf_gate", ABLATION_REGISTRY)
+
+
+class VisualDiagnosticRegistryTest(unittest.TestCase):
+    def test_visual_rows_are_opt_in_and_inherit_selected_c3_topology(self):
+        rows = dict(VISUAL_DIAGNOSTIC_MATRIX)
+        self.assertEqual(
+            list(rows),
+            [
+                "selected_visual_baseline",
+                "selected_wo_lip_hyp",
+                "selected_wo_av_context",
+            ],
+        )
+        for flags in rows.values():
+            self.assertTrue(flags["disable_c3_decision_gate"])
+            self.assertTrue(flags["disable_c3_update_gate"])
+        self.assertFalse(rows["selected_visual_baseline"]["disable_lip_hyp"])
+        self.assertFalse(rows["selected_visual_baseline"]["disable_av_context"])
+        self.assertTrue(rows["selected_wo_lip_hyp"]["disable_lip_hyp"])
+        self.assertFalse(rows["selected_wo_lip_hyp"]["disable_av_context"])
+        self.assertFalse(rows["selected_wo_av_context"]["disable_lip_hyp"])
+        self.assertTrue(rows["selected_wo_av_context"]["disable_av_context"])
+
+    def test_visual_flags_are_row_local_and_not_stored_as_c3_flags(self):
+        cfg = {
+            "ger": {
+                "mode": "av",
+                "disable_lip_hyp": True,
+                "disable_av_context": True,
+            },
+            "ablation": {"disable_c1": True},
+        }
+        baseline = _prepare_run_config(
+            cfg, ABLATION_REGISTRY["selected_visual_baseline"],
+        )
+        lip_off = _prepare_run_config(
+            cfg, ABLATION_REGISTRY["selected_wo_lip_hyp"],
+        )
+        self.assertFalse(baseline["ger"]["disable_lip_hyp"])
+        self.assertFalse(baseline["ger"]["disable_av_context"])
+        self.assertTrue(lip_off["ger"]["disable_lip_hyp"])
+        self.assertFalse(lip_off["ger"]["disable_av_context"])
+        self.assertNotIn("disable_lip_hyp", baseline["ablation"])
+        self.assertNotIn("disable_av_context", baseline["ablation"])
+        self.assertTrue(baseline["ablation"]["disable_c3_decision_gate"])
+        self.assertTrue(baseline["ablation"]["disable_c3_update_gate"])
+        self.assertTrue(cfg["ger"]["disable_lip_hyp"])
+        self.assertTrue(cfg["ablation"]["disable_c1"])
+
+    def test_reused_pipeline_visual_switches_are_reset_between_rows(self):
+        pipe = SimpleNamespace()
+        lip_off = _prepare_run_config(
+            {"ger": {"mode": "av"}},
+            ABLATION_REGISTRY["selected_wo_lip_hyp"],
+        )
+        baseline = _prepare_run_config(
+            {"ger": {"mode": "av"}},
+            ABLATION_REGISTRY["selected_visual_baseline"],
+        )
+        _apply_reused_pipeline_flags(pipe, lip_off)
+        self.assertTrue(pipe.disable_lip_hyp)
+        _apply_reused_pipeline_flags(pipe, baseline)
+        self.assertFalse(pipe.disable_lip_hyp)
+        self.assertFalse(pipe.disable_av_context)
+
+    def test_visual_formal_ids_are_canonical(self):
+        for name, _ in VISUAL_DIAGNOSTIC_MATRIX:
+            self.assertEqual(CANONICAL_ABLATIONS[name], name)
+
+    @staticmethod
+    def _visual_result(name, *, prompt="hello", use_av_context=True):
+        return {
+            "ablation": name,
+            "turn_debug": [{
+                "summary": {
+                    "turn_id": "t1", "start": 0.0, "end": 1.0,
+                    "ref_text": "hello", "ref_speaker": "alice",
+                    "asr_top": "hello", "has_visual": True,
+                },
+                "visual": {
+                    "lip_hyp": "hello", "prompt_lip_hyp": prompt,
+                    "vsr_features": {"mean": 0.5},
+                    "use_av_context": use_av_context,
+                    "disable_lip_hyp": name == "selected_wo_lip_hyp",
+                    "disable_av_context": name == "selected_wo_av_context",
+                },
+            }],
+        }
+
+    def test_visual_control_audit_requires_active_and_isolated_inputs(self):
+        rows = [
+            self._visual_result("selected_visual_baseline"),
+            self._visual_result("selected_wo_lip_hyp", prompt=""),
+            self._visual_result(
+                "selected_wo_av_context", use_av_context=False,
+            ),
+        ]
+        audit = _validate_visual_result_rows(rows)
+        self.assertEqual(audit["baseline_nonempty_lip_hyp"], 1)
+        self.assertEqual(audit["baseline_av_context_turns"], 1)
+
+        rows[0]["turn_debug"][0]["visual"]["prompt_lip_hyp"] = ""
+        with self.assertRaisesRegex(RuntimeError, "lip_hyp is empty"):
+            _validate_visual_result_rows(rows)
 
 
 class CanonicalNormalizationTest(unittest.TestCase):
@@ -744,6 +853,39 @@ class ClusterStatisticsTest(unittest.TestCase):
             tcp["performance_interpretation"],
             "joint_disable_more_favorable_than_additive",
         )
+
+    def test_visual_comparisons_use_selected_visual_baseline(self):
+        runs = []
+        for meeting in ("ES2011a", "IS1008a", "TS3004a", "EN2001a"):
+            runs.append({
+                "manifest": f"{meeting}.json",
+                "results": [
+                    self._result("selected_visual_baseline", 20),
+                    self._result("selected_wo_lip_hyp", 15),
+                    self._result("selected_wo_av_context", 18),
+                ],
+            })
+        comparisons = build_paired_comparisons(
+            runs, samples=100, seed=23,
+        )["comparisons"]
+        self.assertEqual(
+            comparisons["visual_lip_hyp"]["reference"],
+            "selected_visual_baseline",
+        )
+        self.assertEqual(
+            comparisons["visual_lip_hyp"]["challenger"],
+            "selected_wo_lip_hyp",
+        )
+        self.assertEqual(
+            comparisons["visual_av_context"]["challenger"],
+            "selected_wo_av_context",
+        )
+        for name in ("visual_lip_hyp", "visual_av_context"):
+            metric = comparisons[name]["metrics"]["tcpwer_5s"][
+                "session_cluster"
+            ]
+            self.assertEqual(metric["status"], "ok")
+            self.assertEqual(metric["optimization"], "minimize")
 
     def test_paired_comparison_rejects_missing_and_duplicate_meetings(self):
         missing = [

@@ -294,6 +294,16 @@ COMPARISON_SPECS = (
     ),
     ("identity_zero", "identity_normal", "zero_z_id"),
     ("identity_shuffle", "identity_normal", "shuffled_z_id"),
+    (
+        "visual_lip_hyp",
+        "selected_visual_baseline",
+        "selected_wo_lip_hyp",
+    ),
+    (
+        "visual_av_context",
+        "selected_visual_baseline",
+        "selected_wo_av_context",
+    ),
 )
 
 

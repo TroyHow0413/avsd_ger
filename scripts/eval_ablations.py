@@ -83,9 +83,163 @@ C3_DIAGNOSTIC_MATRIX = [
     }),
 ]
 
+VISUAL_DIAGNOSTIC_MATRIX = [
+    ("selected_visual_baseline", {
+        "disable_c3_decision_gate": True,
+        "disable_c3_update_gate": True,
+        "disable_lip_hyp": False,
+        "disable_av_context": False,
+    }),
+    ("selected_wo_lip_hyp", {
+        "disable_c3_decision_gate": True,
+        "disable_c3_update_gate": True,
+        "disable_lip_hyp": True,
+        "disable_av_context": False,
+    }),
+    ("selected_wo_av_context", {
+        "disable_c3_decision_gate": True,
+        "disable_c3_update_gate": True,
+        "disable_lip_hyp": False,
+        "disable_av_context": True,
+    }),
+]
+
 ABLATION_REGISTRY = dict(
     DEFAULT_ABLATION_MATRIX + IDENTITY_CAUSAL_MATRIX + C3_DIAGNOSTIC_MATRIX
+    + VISUAL_DIAGNOSTIC_MATRIX
 )
+
+VISUAL_ROW_FLAGS = ("disable_lip_hyp", "disable_av_context")
+
+
+def _prepare_run_config(
+    cfg: dict[str, Any], flags: dict[str, bool],
+) -> dict[str, Any]:
+    """Build one isolated row config without leaking switches across rows."""
+    cfg_run = copy.deepcopy(cfg)
+    cfg_run["ablation"] = {
+        "disable_c1": False,
+        "zero_z_id": False,
+        "shuffle_z_id": False,
+        "disable_c2": False,
+        "disable_c3": False,
+        "disable_c3_decision_gate": False,
+        "disable_c3_update_gate": False,
+        "disable_conf_gate": False,
+    }
+    cfg_run["ablation"].update({
+        key: value for key, value in flags.items()
+        if key not in VISUAL_ROW_FLAGS
+    })
+    ger_cfg = cfg_run.setdefault("ger", {})
+    for key in VISUAL_ROW_FLAGS:
+        if key in flags:
+            ger_cfg[key] = bool(flags[key])
+    return cfg_run
+
+
+def _apply_reused_pipeline_flags(
+    pipe: AVSDGERPipeline, cfg_run: dict[str, Any],
+) -> None:
+    """Apply all row-local switches when model weights are kept resident."""
+    abl = cfg_run["ablation"]
+    pipe.disable_c1 = bool(abl["disable_c1"])
+    pipe.zero_z_id = bool(abl["zero_z_id"])
+    pipe.shuffle_z_id = bool(abl["shuffle_z_id"])
+    if pipe.zero_z_id and pipe.shuffle_z_id:
+        raise ValueError("zero_z_id and shuffle_z_id are mutually exclusive")
+    pipe.disable_c2 = bool(abl["disable_c2"])
+    pipe.disable_c3 = bool(abl["disable_c3"])
+    pipe.disable_conf_gate = bool(abl["disable_conf_gate"])
+    pipe.disable_c3_decision_gate = bool(abl["disable_c3_decision_gate"])
+    pipe.disable_c3_update_gate = bool(abl["disable_c3_update_gate"])
+    ger_cfg = cfg_run.get("ger", {})
+    pipe.disable_lip_hyp = bool(ger_cfg.get("disable_lip_hyp", False))
+    pipe.disable_av_context = bool(ger_cfg.get("disable_av_context", False))
+
+
+def _validate_visual_result_rows(results: list[dict[str, Any]]) -> dict[str, int]:
+    """Fail closed when a visual intervention is absent or rows are unpaired."""
+    by_name = {str(row.get("ablation")): row for row in results}
+    names = [name for name, _ in VISUAL_DIAGNOSTIC_MATRIX]
+    if not all(name in by_name for name in names):
+        raise RuntimeError("visual control audit failed: missing diagnostic row")
+
+    turns_by_name = {
+        name: {
+            str(turn.get("summary", {}).get("turn_id")): turn
+            for turn in by_name[name].get("turn_debug", [])
+        }
+        for name in names
+    }
+    baseline = turns_by_name["selected_visual_baseline"]
+    if not baseline or any(set(rows) != set(baseline) for rows in turns_by_name.values()):
+        raise RuntimeError("visual control audit failed: unpaired turn sets")
+
+    counts = {
+        "turns": len(baseline),
+        "visual_turns": 0,
+        "baseline_nonempty_lip_hyp": 0,
+        "baseline_av_context_turns": 0,
+    }
+    for turn_id, reference in baseline.items():
+        ref_summary = reference.get("summary", {}) or {}
+        ref_visual = reference.get("visual", {}) or {}
+        if ref_summary.get("has_visual"):
+            counts["visual_turns"] += 1
+        if str(ref_visual.get("prompt_lip_hyp") or "").strip():
+            counts["baseline_nonempty_lip_hyp"] += 1
+        if ref_visual.get("use_av_context"):
+            counts["baseline_av_context_turns"] += 1
+
+        for name in names[1:]:
+            candidate = turns_by_name[name][turn_id]
+            cand_summary = candidate.get("summary", {}) or {}
+            cand_visual = candidate.get("visual", {}) or {}
+            invariant = (
+                ref_summary.get("start"), ref_summary.get("end"),
+                ref_summary.get("ref_text"), ref_summary.get("ref_speaker"),
+                ref_summary.get("asr_top"), ref_summary.get("has_visual"),
+                ref_visual.get("lip_hyp"), ref_visual.get("vsr_features"),
+            )
+            candidate_invariant = (
+                cand_summary.get("start"), cand_summary.get("end"),
+                cand_summary.get("ref_text"), cand_summary.get("ref_speaker"),
+                cand_summary.get("asr_top"), cand_summary.get("has_visual"),
+                cand_visual.get("lip_hyp"), cand_visual.get("vsr_features"),
+            )
+            if invariant != candidate_invariant:
+                raise RuntimeError(
+                    "visual control audit failed: upstream mismatch at "
+                    f"{turn_id}/{name}"
+                )
+
+        lip_visual = turns_by_name["selected_wo_lip_hyp"][turn_id].get(
+            "visual", {}
+        ) or {}
+        av_visual = turns_by_name["selected_wo_av_context"][turn_id].get(
+            "visual", {}
+        ) or {}
+        if not lip_visual.get("disable_lip_hyp") or str(
+            lip_visual.get("prompt_lip_hyp") or ""
+        ).strip():
+            raise RuntimeError(
+                f"visual control audit failed: lip_hyp active at {turn_id}"
+            )
+        if not av_visual.get("disable_av_context") or av_visual.get(
+            "use_av_context"
+        ):
+            raise RuntimeError(
+                f"visual control audit failed: AV context active at {turn_id}"
+            )
+
+    if counts["visual_turns"] == 0:
+        raise RuntimeError("visual control audit failed: no visual turns")
+    if counts["baseline_nonempty_lip_hyp"] == 0:
+        raise RuntimeError("visual control audit failed: lip_hyp is empty for all turns")
+    if counts["baseline_av_context_turns"] == 0:
+        raise RuntimeError("visual control audit failed: AV context is inactive")
+    return counts
 
 
 def _flatten_numeric(value: Any, prefix: str) -> dict[str, float]:
@@ -404,23 +558,10 @@ def _run_one(
     gallery_replay: dict[str, dict[str, dict[str, Any]]] | None = None,
     gallery_capture: dict[str, dict[str, dict[str, Any]]] | None = None,
 ) -> dict[str, Any]:
-    cfg_run = copy.deepcopy(cfg)
+    cfg_run = _prepare_run_config(cfg, flags)
     # Every ablation sees exactly the same stochastic backbone/enrollment
     # draws. This is required for a paired causal intervention.
     seed_all(int(cfg_run.get("seed", 1337)))
-    cfg_run.setdefault("ablation", {})
-    # Clear any caller-supplied ablation flags for a clean baseline, then apply.
-    cfg_run["ablation"] = {
-        "disable_c1": False,
-        "zero_z_id": False,
-        "shuffle_z_id": False,
-        "disable_c2": False,
-        "disable_c3": False,
-        "disable_c3_decision_gate": False,
-        "disable_c3_update_gate": False,
-        "disable_conf_gate": False,
-    }
-    cfg_run["ablation"].update(flags)
     if cfg_run.get("ger", {}).get("mode") == "visual_only":
         cfg_run["ablation"]["disable_c2"] = False
 
@@ -434,20 +575,7 @@ def _run_one(
     else:
         # Only ablation switches vary. Neural weights stay resident while all
         # per-run mutable state is reset below.
-        pipe.disable_c1 = bool(cfg_run["ablation"]["disable_c1"])
-        pipe.zero_z_id = bool(cfg_run["ablation"]["zero_z_id"])
-        pipe.shuffle_z_id = bool(cfg_run["ablation"]["shuffle_z_id"])
-        if pipe.zero_z_id and pipe.shuffle_z_id:
-            raise ValueError("zero_z_id and shuffle_z_id are mutually exclusive")
-        pipe.disable_c2 = bool(cfg_run["ablation"]["disable_c2"])
-        pipe.disable_c3 = bool(cfg_run["ablation"]["disable_c3"])
-        pipe.disable_conf_gate = bool(cfg_run["ablation"]["disable_conf_gate"])
-        pipe.disable_c3_decision_gate = bool(
-            cfg_run["ablation"]["disable_c3_decision_gate"]
-        )
-        pipe.disable_c3_update_gate = bool(
-            cfg_run["ablation"]["disable_c3_update_gate"]
-        )
+        _apply_reused_pipeline_flags(pipe, cfg_run)
     pipe.pool.clear_gallery()
     loaded_pool = False
     if pool_path and Path(pool_path).exists() and not fresh_pool:
@@ -793,6 +921,36 @@ def _run_manifest(
             "[identity-causal] deterministic ASR temperature=[0.0]; "
             "normal gallery trajectory will be replayed per turn"
         )
+    visual_names = {name for name, _ in VISUAL_DIAGNOSTIC_MATRIX}
+    if any(name in visual_names for name in requested):
+        if not visual_names.issubset(requested):
+            raise ValueError(
+                "Visual diagnostic evaluation must include "
+                "selected_visual_baseline, selected_wo_lip_hyp, and "
+                "selected_wo_av_context in one paired run"
+            )
+        if requested.index("selected_visual_baseline") != min(
+            requested.index(name) for name in visual_names
+        ):
+            raise ValueError(
+                "selected_visual_baseline must run before visual challengers"
+            )
+        if str(cfg.get("ger", {}).get("mode", "audio_only")).lower() != "av":
+            raise ValueError("Visual diagnostic evaluation requires ger.mode=av")
+        if not bool(cfg.get("vsr", {}).get("emit_text", False)):
+            raise ValueError(
+                "Visual diagnostic evaluation requires vsr.emit_text=true so "
+                "the lip_hyp intervention is active"
+            )
+        # Keep upstream ASR/VSR inputs paired so only the two GER visual inputs
+        # differ between diagnostic rows.
+        cfg.setdefault("asr", {})["temperatures"] = [0.0]
+        if pipe is not None:
+            pipe.asr.cfg["temperatures"] = [0.0]
+        torch.backends.cudnn.benchmark = False
+        torch.backends.cudnn.deterministic = True
+        torch.use_deterministic_algorithms(True, warn_only=True)
+        print("[visual-diagnostic] deterministic ASR temperature=[0.0]")
     for i, name in enumerate(requested):
         flags = dict(ABLATION_REGISTRY[name])
         if (
@@ -854,6 +1012,10 @@ def _run_manifest(
             ),
         }, step=step_offset + i)
 
+    if any(name in visual_names for name in requested):
+        audit = _validate_visual_result_rows(results)
+        print(f"[visual-diagnostic] control audit passed: {audit}")
+
     return results, None
 
 
@@ -907,7 +1069,8 @@ def main() -> int:
         help=(
             "restrict to named ablations; optional rows include identity causal "
             "{identity_normal,zero_z_id,shuffled_z_id} and C3 diagnostic "
-            "{c3_wo_decision_gate,c3_wo_update_gate}"
+            "{c3_wo_decision_gate,c3_wo_update_gate} and visual diagnostics "
+            "{selected_visual_baseline,selected_wo_lip_hyp,selected_wo_av_context}"
         ),
     )
     p.add_argument(

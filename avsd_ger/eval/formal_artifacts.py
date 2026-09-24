@@ -39,6 +39,9 @@ CANONICAL_ABLATIONS = {
     "c3_wo_confidence_gates": "c3_wo_confidence_gates",
     "c3_wo_decision_gate": "c3_wo_decision_gate",
     "c3_wo_update_gate": "c3_wo_update_gate",
+    "selected_visual_baseline": "selected_visual_baseline",
+    "selected_wo_lip_hyp": "selected_wo_lip_hyp",
+    "selected_wo_av_context": "selected_wo_av_context",
 }
 
 GROUP_BINS = {
