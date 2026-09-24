@@ -1,5 +1,7 @@
 # Real Model Workflow
 
+> **Document status:** Current generic real-model workflow. For the frozen AMI full-v4 protocol and repair gates, use [`AMI_FULL_V4_TRAINING_REPAIR.md`](AMI_FULL_V4_TRAINING_REPAIR.md). See the [documentation index](../README.md#documentation-index).
+
 This is the current real-data workflow for switching off `stub_backbones` and training/evaluating the system. It replaces the old Phase D-G wording with the scripts and arguments that exist now.
 
 ---
@@ -11,7 +13,7 @@ Before setting `stub_backbones: false`, verify the model dependencies:
 ```bash
 python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU')"
 python -c "import soundfile, cv2, transformers, faster_whisper, peft, speechbrain, insightface; print('deps ok')"
-python -c "from pathlib import Path; print(Path('checkpoints/avhubert_large_lrs3_iter5.pt').exists())"
+python -c "from pathlib import Path; print(Path('checkpoints/self_large_vox_433h.pt').exists())"
 hf auth whoami
 ```
 
@@ -20,10 +22,10 @@ Backbone expectations:
 | Backbone | Setup |
 |---|---|
 | Whisper-large-v3 | Auto-cached on first ASR use. |
-| AV-HuBERT Large | `checkpoints/avhubert_large_lrs3_iter5.pt`. |
+| AV-HuBERT Large | The default uses fine-tuned `checkpoints/self_large_vox_433h.pt` so VSR text is available. A pretraining-only checkpoint supplies features but has no decoder/dictionary. |
 | ECAPA-TDNN | Auto-cached from SpeechBrain. |
 | InsightFace `buffalo_l` | Auto-cached on first face embedding call. |
-| GER causal LM | Qwen2.5-3B-Instruct or Llama-3.2-3B-Instruct is reused from `ger.model_path`; when missing, configs may allow a one-time Hugging Face download from `ger.model_id`. |
+| GER causal LM | A registered local profile is reused from `ger.model_path`: Qwen2.5-3B (default), Llama-3.2-3B, Llama-3-8B, or Qwen2.5-7B. AMI full-v4 uses `configs/llama3_8b.yaml`. Downloads require an explicit preparation-time opt-in. |
 
 For Windows native shells, make sure AV-HuBERT is on `PYTHONPATH` as described in the README install section.
 

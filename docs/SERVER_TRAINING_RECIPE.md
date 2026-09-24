@@ -1,5 +1,7 @@
 # Server Training Recipe
 
+> **Document status:** Generic server/W&B example using placeholder paths. For the current AMI full-v4 production run, use [`AMI_FULL_V4_TRAINING_REPAIR.md`](AMI_FULL_V4_TRAINING_REPAIR.md). See the [documentation index](../README.md#documentation-index).
+
 This is the long-form server/W&B recipe used for the AMI visual runs. The three training stages are:
 
 1. identity / InfoNCE

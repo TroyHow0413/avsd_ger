@@ -1,5 +1,7 @@
 # Training
 
+> **Document status:** Current generic training reference. AMI full-v4 adds experiment-specific commands and acceptance gates in [`AMI_FULL_V4_TRAINING_REPAIR.md`](AMI_FULL_V4_TRAINING_REPAIR.md). See the [documentation index](../README.md#documentation-index).
+
 This project currently trains through concrete scripts, not Phase A-G labels.
 
 | Job | Entry point | Output |

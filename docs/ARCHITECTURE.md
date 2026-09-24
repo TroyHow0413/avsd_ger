@@ -1,5 +1,7 @@
 # Architecture
 
+> **Document status:** Current implementation reference for C1, C2, and C3. Runtime defaults come from `configs/default.yaml` plus any inherited model profile. See the [documentation index](../README.md#documentation-index).
+
 > Full chain: **identity (early) → feature (mid) → alignment (mid) → LLM (late) → feedback (closed-loop)**.
 
 ```
@@ -19,7 +21,7 @@
                                               │               │ f_align
                                               ▼               ▼
                                     ┌─────────────────────────────────────┐
-│ GER Head: local dense 3B LM + LoRA  │
+                                    │ GER Head: local dense LM + LoRA     │
                                     │ prompt = [Speaker token]            │
                                     │          + Audio N-best (text)      │
                                     │          + Visual hyp (text)        │
@@ -74,7 +76,7 @@ Spec §2 C2 mandates four design choices:
 
 ### GER head (`c2_alignment/`)
 
-* **LLM backend**: dense Hugging Face causal LM materialized in `ger.model_path`; an existing local snapshot is reused, while an absent snapshot may be downloaded from `ger.model_id` when explicitly enabled. Phase 1 profiles are Qwen2.5-3B-Instruct (hidden size 2048) and Llama-3.2-3B-Instruct (hidden size 3072).
+* **LLM backend**: dense Hugging Face causal LM materialized in `ger.model_path`; an existing local snapshot is reused, while an absent snapshot may be downloaded from `ger.model_id` when explicitly enabled. Registered profiles are Qwen2.5-3B-Instruct (hidden size 2048), Llama-3.2-3B-Instruct (3072), Qwen2.5-7B-Instruct (3584), and Llama-3-8B-Instruct (4096). `configs/default.yaml` selects Qwen2.5-3B; AMI full-v4 uses the inherited `configs/llama3_8b.yaml` profile.
 * **Policies**: prompt/chat-template handling, QFormer soft-token bridging, deterministic generation, and checkpoint compatibility metadata are separate modules.
 * **LoRA**: `r=16, α=32, dropout=0.05`; target modules are selected and validated from the active model profile.
 * **Soft prefix**: a Q-Former–style projector turns `f_align` into a fixed-length sequence of pseudo-token embeddings (`<AV_CTX>`).
@@ -85,7 +87,9 @@ Spec §2 C2 mandates four design choices:
   Audio hypothesis: {asr_nbest}
   Visual hypothesis: {lip_hyp}
   Aligned feature context: <AV_CTX>
-  Correct the transcript. Preserve the speaker label.
+  Correct the transcript using the audio hypothesis as the main source.
+  Return only the corrected transcript text, with no explanation and no quoted instruction.
+  Do not output the words "speaker label".
   Output:
   ```
 

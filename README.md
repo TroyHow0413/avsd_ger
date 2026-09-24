@@ -169,10 +169,10 @@ source scripts/setup_avhubert_env.sh
 ### Backbone weights (only when running real models)
 
 * **Whisper-large-v3** — auto-downloaded into `checkpoints/whisper/` on first use (`faster-whisper` CT2 weights plus the Hugging Face encoder/rescore weights). This directory is portable; upload it with `checkpoints/` to avoid slow server downloads.
-* **AV-HuBERT Large** — drop the `.pt` at `checkpoints/avhubert_large_lrs3_iter5.pt` (path in `configs/default.yaml`).
+* **AV-HuBERT Large** — the default real profile uses the fine-tuned VSR checkpoint at `checkpoints/self_large_vox_433h.pt`, which includes the decoder/dictionary required for `lip_hyp`. A pretraining-only checkpoint can still provide continuous visual features, but cannot emit visual text.
 * **ECAPA-TDNN** — auto from SpeechBrain.
 * **InsightFace `buffalo_l`** — auto on first use.
-* **GER causal LM** — a dense HF model materialized in a configured local directory. Use `configs/qwen25_3b.yaml` for Qwen2.5-3B-Instruct or `configs/llama32_3b.yaml` for Llama-3.2-3B-Instruct. Training and evaluation default to `ger.allow_download: false` and fail fast when `ger.model_path` is incomplete. Model acquisition is a separate explicit preparation operation: temporarily opt in with `ger.allow_download: true`, materialize the model once, then restore the safe default before training or evaluation.
+* **GER causal LM** — a dense HF model materialized in a configured local directory. `configs/default.yaml` uses Qwen2.5-3B; the registered overrides are `configs/qwen25_3b.yaml`, `configs/llama32_3b.yaml`, `configs/llama3_8b.yaml`, and `configs/qwen25_7b.yaml`. The AMI full-v4 primary profile is Llama-3-8B. Training and evaluation default to `ger.allow_download: false` and fail fast when `ger.model_path` is incomplete. Model acquisition is a separate explicit preparation operation.
 
 Set `stub_backbones: true` in an inherited smoke config to verify wiring without any of the above.
 
@@ -190,23 +190,24 @@ For current day-to-day work, use the concrete scripts:
 | Single utterance smoke test | `scripts/run_sample.py` | Runs C1 -> C2 -> C3 on one utterance. |
 | Stage-1 training | `scripts/train_identity.py` | Trains the C1 identity fuser with bidirectional InfoNCE. |
 | Stage-2 training | `scripts/train_stage2.py` | Trains alignment, CTC, GER LoRA/QFormer pieces depending on `--warmup`. |
-| Ablation eval | `scripts/eval_ablations.py` | Runs the 5 ablation rows and writes metrics. |
+| Ablation eval | `scripts/eval_ablations.py` | Runs the default five-row matrix or explicitly selected diagnostic/causal rows and writes formal artifacts. |
+| Eval-batch finalization | `scripts/finalize_eval_batch.py` | Rebuilds a formal artifact bundle from completed per-meeting reports without loading models. |
 | Convenience launcher | `one_go/train.py` | Optional wrapper around Stage-1 and Stage-2; useful for quick local runs, not required. |
 
 ### Minimal Stub Check
 
-`configs/default.yaml` defaults to `stub_backbones: true`, so this checks wiring without downloading real model weights.
+`configs/default.yaml` is a real-backbone profile (`stub_backbones: false`). For a synthetic wiring check, use the checked-in stub profile explicitly:
 
 ```bash
-python scripts/enroll_identity.py --manifest data/sample_manifest.json
-python scripts/run_sample.py --manifest data/sample_manifest.json --utt utt_0001
+python scripts/enroll_identity.py --config one_go/runs/config_stub.yaml --manifest data/sample_manifest.json
+python scripts/run_sample.py --config one_go/runs/config_stub.yaml --manifest data/sample_manifest.json --utt utt_0001
 ```
 
 Optional stub ablation check:
 
 ```bash
 python scripts/eval_ablations.py \
-    --config configs/default.yaml \
+    --config one_go/runs/config_stub.yaml \
     --manifest data/sample_session_manifest.json \
     --pool checkpoints/identity_pool.pt \
     --out out/ablation_report_stub.json \
@@ -215,7 +216,7 @@ python scripts/eval_ablations.py \
 
 ### Real Training
 
-Prepare the real backbones first: set `stub_backbones: false`, put AV-HuBERT at `checkpoints/avhubert_large_lrs3_iter5.pt`, place the selected GER model in its configured local directory, and let Whisper/ECAPA/InsightFace use their existing cache paths.
+Prepare the real backbones first: keep `stub_backbones: false`, put the configured fine-tuned AV-HuBERT checkpoint at `checkpoints/self_large_vox_433h.pt`, place the selected GER model in its configured local directory, and let Whisper/ECAPA/InsightFace use their existing cache paths. Use a model override such as `configs/llama3_8b.yaml` consistently across training and evaluation when the experiment is not the default Qwen2.5-3B profile.
 
 Stage-1:
 
@@ -350,6 +351,7 @@ The metric namespaces written by each script:
 | `scripts/train_identity.py` | Stage-1: identity fuser training with bidirectional InfoNCE. | [`docs/TRAINING.md`](docs/TRAINING.md) |
 | `scripts/train_stage2.py` | Stage-2 multi-task training with selectable `--warmup` modes. **Enforces `lr_stage2 == lr_stage1 * ratio`** at runtime. | [`docs/TRAINING.md`](docs/TRAINING.md) |
 | `scripts/eval_ablations.py` | Run the five spec ablation rows on a session manifest, write metrics + energy. | [`docs/EVALUATION.md#ablation-runner`](docs/EVALUATION.md#ablation-runner) |
+| `scripts/finalize_eval_batch.py` | Finalize completed per-meeting eval reports into the canonical formal bundle. | [`docs/EVALUATION.md#finalizing-an-existing-eval-batch`](docs/EVALUATION.md#finalizing-an-existing-eval-batch) |
 | `one_go/train.py` | Optional convenience wrapper that calls Stage-1 and/or Stage-2 training. Not required for normal training. | See [Current Workflow](#current-workflow). |
 
 ---
@@ -376,20 +378,26 @@ scripts/              # CLI entry points
 
 ## Documentation index
 
-| File | Purpose |
-|---|---|
-| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | C1/C2/C3 module-level design, data shapes, key implementation choices. |
-| [`docs/RELATED_WORK.md`](docs/RELATED_WORK.md) | Side-by-side comparison vs. DualHyp, AVSD, DiarizationLM. |
-| [`docs/TRAINING.md`](docs/TRAINING.md) | Stage-1 / Stage-2 recipes, loss weights, the spec §7 LR invariant. |
-| [`docs/SERVER_TRAINING_RECIPE.md`](docs/SERVER_TRAINING_RECIPE.md) | Server AMI visual recipe: identity -> align_ctc -> joint training plus W&B/eval commands. |
-| [`docs/LRS2_VOXCELEB2_PREPROCESSING.md`](docs/LRS2_VOXCELEB2_PREPROCESSING.md) | Resumable server preprocessing for full LRS2 C2/GER and curated VoxCeleb2 C1 manifests. |
-| [`docs/REAL_MODEL_WORKFLOW.md`](docs/REAL_MODEL_WORKFLOW.md) | Current real-model setup, manifest expectations, Stage-1/Stage-2 commands, re-enrollment, and eval workflow. |
-| [`docs/EVALUATION.md`](docs/EVALUATION.md) | Manifest format, the five primary metrics, power monitor, ablation runner. |
-| [`docs/LEGACY_PHASE_ROLLOUT.md`](docs/LEGACY_PHASE_ROLLOUT.md) | Archived Phase 0/A-G rollout notes from the old README. Not the current training workflow. |
+| Status | File | Purpose |
+|---|---|---|
+| Current reference | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | C1/C2/C3 module design, data shapes, and implementation choices. |
+| Current reference | [`docs/TRAINING.md`](docs/TRAINING.md) | Stage-1/Stage-2 recipes, loss weights, resume/dev selection, and LR invariant. |
+| Current reference | [`docs/EVALUATION.md`](docs/EVALUATION.md) | Session format, metrics, ablations, formal artifacts, scoring gates, and offline audits. |
+| Current reference | [`docs/REAL_MODEL_WORKFLOW.md`](docs/REAL_MODEL_WORKFLOW.md) | Generic real-model setup, manifests, training, re-enrollment, and evaluation. |
+| Current reference | [`docs/AVSD_FRONTENDS.md`](docs/AVSD_FRONTENDS.md) | Raw-video frontend profiles and the turn-level input contract. |
+| Current reference | [`docs/AMI_DATA_PIPELINE.md`](docs/AMI_DATA_PIPELINE.md) | Versioned AMI rebuild/audit procedure; preserve old datasets rather than overwriting them. |
+| Current AMI v4 runbook | [`docs/AMI_FULL_V4_TRAINING_REPAIR.md`](docs/AMI_FULL_V4_TRAINING_REPAIR.md) | Implemented repair status, v4 commands, gates, and remaining operator steps. |
+| Operational recipe | [`docs/SERVER_TRAINING_RECIPE.md`](docs/SERVER_TRAINING_RECIPE.md) | Generic server/W&B identity → align/CTC → joint → eval example. |
+| Operational recipe | [`docs/LRS2_VOXCELEB2_PREPROCESSING.md`](docs/LRS2_VOXCELEB2_PREPROCESSING.md) | Resumable LRS2 and VoxCeleb2 preprocessing. |
+| Research context | [`docs/RELATED_WORK.md`](docs/RELATED_WORK.md) | Comparison with DualHyp, AVSD, and DiarizationLM. |
+| Planning | [`docs/DATASET_ROADMAP.md`](docs/DATASET_ROADMAP.md) | Long-term controlled dataset and GER-model experiment sequence. |
+| Overview | [`docs/tech_stack_map.md`](docs/tech_stack_map.md) | Chinese technical-stack map aligned to the registered model profiles. |
+| Archived | [`docs/LEGACY_PHASE_ROLLOUT.md`](docs/LEGACY_PHASE_ROLLOUT.md) | Historical Phase 0/A-G rollout; not the current workflow. |
+| Redirect | [`docs/PHASE_D_REAL_MODELS.md`](docs/PHASE_D_REAL_MODELS.md) | Compatibility pointer for old links. |
 
 ---
 
 ## Status
 
-Skeleton + spec-aligned wiring complete. AST + cross-import verified. Stub-mode enrollment, sample run, Stage-1, Stage-2, and ablation eval have working script paths. Current training uses `scripts/train_identity.py`, `scripts/train_stage2.py`, or the optional `one_go/train.py` wrapper.
+The C1/C2/C3 implementation, real/stub training paths, checkpoint lifecycle, five-row evaluation, optional causal/diagnostic rows, and formal artifact generation are implemented and covered by tests. Current training uses `scripts/train_identity.py`, `scripts/train_stage2.py`, or the optional `one_go/train.py` wrapper; AMI full-v4 execution status and gates live in `docs/AMI_FULL_V4_TRAINING_REPAIR.md`.
 

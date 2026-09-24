@@ -1,5 +1,7 @@
 # LRS2 and VoxCeleb2 server preprocessing
 
+> **Document status:** Current preprocessing recipe for the LRS2 and VoxCeleb2 roadmap stages. Outputs are versioned and portable; this document does not replace the AMI pipeline. See the [documentation index](../README.md#documentation-index).
+
 These builders create portable, versioned JSONL manifests and materialised
 inputs for the current AVSD-GER trainers. Run them from the repository root so
 manifest paths remain repository-relative. Copy the complete output directory

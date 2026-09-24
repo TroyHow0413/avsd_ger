@@ -1,5 +1,7 @@
 # Evaluation
 
+> **Document status:** Current evaluation and formal-artifact reference. It covers the default five-row matrix plus optional identity-causal and C3 diagnostic rows. See the [documentation index](../README.md#documentation-index).
+
 Lives under `avsd_ger/eval/` and is driven from `scripts/eval_ablations.py`.
 
 ```
@@ -377,6 +379,29 @@ python scripts/evaluate_scoring_gate.py \
     out/ami_full_v4_llama3_8b_dev_missing_ablations/summary.json \
   --out-dir out/ami_full_v4_llama3_8b_dev_scoring_gate
 ```
+
+## Finalizing an existing eval batch
+
+If a long batch used `--no-formal-artifacts` and already produced one legacy
+JSON report plus debug sidecars per meeting, rebuild the canonical bundle
+without rerunning inference:
+
+```bash
+python scripts/finalize_eval_batch.py \
+  --artifact-root out/ami_eval_partial \
+  --out-dir out/ami_eval_final \
+  --config configs/llama3_8b.yaml \
+  --pool checkpoints/ami_full_v4_stage1/identity_pool_stage1.pt \
+  --aligner-ckpt checkpoints/ami_full_v4_joint/aligner_stage2.pt \
+  --ger-ckpt checkpoints/ami_full_v4_joint/ger \
+  --expected-meetings 12
+```
+
+The destination must not already exist. The finalizer requires a complete and
+consistent ablation set, verifies the expected meeting count, restores the
+effective GER mode from saved turn-debug rows, and never loads checkpoints or
+media. Use `--expected-ablations ...` to enforce an exact matrix; use
+`--ger-mode` only for older artifacts that did not record it.
 
 ## Identity causal evaluation
 

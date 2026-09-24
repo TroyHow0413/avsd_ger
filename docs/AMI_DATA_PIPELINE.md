@@ -1,5 +1,7 @@
 # Repaired AMI Data Pipeline
 
+> **Document status:** Current versioned data-build reference. Use a new immutable run directory for every pipeline revision; AMI full-v4 training decisions are tracked in [`AMI_FULL_V4_TRAINING_REPAIR.md`](AMI_FULL_V4_TRAINING_REPAIR.md). See the [documentation index](../README.md#documentation-index).
+
 The production AMI path uses complete eligible turns, AMI global participant
 IDs, official meeting-specific Closeup mappings, measured visual tracking
 quality, explicit IHM metadata, and fixed disjoint split outputs.

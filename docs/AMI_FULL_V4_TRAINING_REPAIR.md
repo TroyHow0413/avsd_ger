@@ -1,5 +1,7 @@
 # AMI Full v4 Training Repair Specification
 
+> **Document status:** Current AMI full-v4 implementation record and operator runbook. It supplements the generic [`TRAINING.md`](TRAINING.md) workflow with v4-specific gates and paths. See the [documentation index](../README.md#documentation-index).
+
 ## Status and scope
 
 `data/ami_full_v4` is a completed dataset build, not an unfinished visual

@@ -1,5 +1,7 @@
 # Legacy Phase Rollout Notes
 
+> **Document status:** Archived historical instructions. Commands and model choices below are preserved for provenance and may not match current defaults; use [`REAL_MODEL_WORKFLOW.md`](REAL_MODEL_WORKFLOW.md) for current operation. See the [documentation index](../README.md#documentation-index).
+
 This document preserves the old Phase 0/A/B/C/D/E/F/G rollout notes from the README. These labels are historical shorthand only; the current training workflow uses concrete scripts such as `scripts/train_identity.py`, `scripts/train_stage2.py`, and the optional `one_go/train.py` wrapper.
 
 ## Legacy Rollout Notes: old Phase 0/A/B/C/D/E/F/G

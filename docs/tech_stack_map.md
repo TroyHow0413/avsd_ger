@@ -1,7 +1,8 @@
 # AVSD-GER 技术栈地图
 
 > Audio-Visual Speaker Diarization + Generative Error Correction  
-> 文档版本：2026-05-11 | 代码库：`avsd_ger/`
+> **文档状态：** 当前技术概览；运行参数以 `configs/default.yaml` 及继承的模型配置为准。详见[文档索引](../README.md#documentation-index)。
+> 对齐版本：2026-09-24 | 代码库：`avsd_ger/`
 
 ---
 
@@ -38,7 +39,7 @@
                  │ z_id [256]
     ┌────────────▼────────────┐
     │       C2 Alignment      │  ← Whisper + AV-HuBERT
-    │   IDConditionedAligner  │     QFormer + Llama-3-8B LoRA
+    │   IDConditionedAligner  │     QFormer + 已注册 Causal LM LoRA
     │        GER Head         │
     └────────────┬────────────┘
                  │ corrected transcript
@@ -78,7 +79,9 @@
 - `rescore()` → **N-best 声学模型重打分** (Acoustic Rescoring, Log-likelihood Scoring)
 - `pool_encoder_to_tokens()` → **声学帧到词级时序聚合** (Frame-to-Token Temporal Aggregation, Mean Pooling within word timestamp windows)
 
-> ⚠️ **已知问题**：faster-whisper streaming API 不支持 `num_return_sequences`，`n_best=5` 配置实际无效，`nbest_agreement` 信号始终为 1.0。修复方案：切换至 HF `generate(num_return_sequences=5)`。
+> **后端限制：** faster-whisper streaming API 只提供句级 1-best，因此该后端的
+> `n_best=5` 不会产生真实句级候选。需要文本 N-best 的 GER 训练时使用
+> `--asr-backend openai-whisper`；该实现会跨配置温度收集去重候选。
 
 ---
 
@@ -98,7 +101,9 @@
 - `Conv3D frontend` → **视频时空特征提取** (3D Convolutional Spatio-temporal Encoding)
 - `sentencepiece BPE decoder` → **视觉语音识别 / 唇语识别** (Visual Speech Recognition, VSR)
 
-> ⚠️ **已知问题**：`_decode_lip()` 中 `except Exception: return ""` 静默吞异常，调试时应打印异常原因。
+> **解码诊断：** 预训练 checkpoint 没有 decoder/dictionary 时会自动关闭
+> `lip_hyp`；运行时解码失败会写入 `last_decode_error`、输出 warning，并按配置
+> 禁用本次文本通道。连续视觉特征 `<AV_CTX>` 仍可使用。
 
 ---
 
@@ -129,18 +134,20 @@
 
 ---
 
-### 2.5 大语言模型 — Llama-3-8B-Instruct
+### 2.5 大语言模型 — 本地稠密 Hugging Face Causal LM
 
 | 属性 | 值 |
 |------|----|
-| 模型 | `meta-llama/Meta-Llama-3-8B-Instruct` |
-| 量化 | `llm_quant: auto` (bitsandbytes) |
+| 已注册模型 | Qwen2.5-3B（默认）、Llama-3.2-3B、Llama-3-8B（AMI full-v4 主模型）、Qwen2.5-7B |
+| 配置 | `configs/default.yaml`、`qwen25_3b.yaml`、`llama32_3b.yaml`、`llama3_8b.yaml`、`qwen25_7b.yaml` |
+| 权重策略 | `ger.model_path` 本地稠密权重；默认 `allow_download: false` |
+| 精度 | `dtype: auto`，或显式 `fp32` / `fp16` / `bf16` |
 | 解码 | Greedy decode (`do_sample=False`) |
 | 最大生成 | `max_new_tokens=64` |
 | 接口 | `inputs_embeds`（嵌入级输入，绕过 tokenizer） |
 
 **技术方向：**
-- **大语言模型 / 指令微调** (Instruction-tuned Autoregressive LLM, Llama-3 architecture)
+- **大语言模型 / 指令微调** (Instruction-tuned Autoregressive LM, Qwen2/Llama architecture)
 
 ---
 
@@ -274,7 +281,7 @@ attn = softmax(logits) @ V
 
 ---
 
-### 4.3 GER Head (Llama-3-8B + LoRA)
+### 4.3 GER Head（已注册 Causal LM + LoRA）
 
 #### 提示结构
 
@@ -302,9 +309,11 @@ Output:
 | r=16, α=32 | 低秩分解 | **参数高效微调** (Parameter-Efficient Fine-Tuning, Low-Rank Adaptation) |
 | target modules | q/k/v/o/gate/up/down_proj (全部) | **全模块 LoRA** (Full-module LoRA coverage) |
 | dropout=0.05 | LoRA dropout | **正则化** |
-| bitsandbytes INT8/FP4 | 基础权重量化 | **大模型量化推理** (QLoRA-style weight compression) |
+| 本地稠密权重 + `dtype` | `auto` / FP32 / FP16 / BF16 | **可复现本地推理与训练** |
 
-> ⚠️ **已知状态**：当前代码调用 `_load_llm_old()`（有 LoRA 但随机初始化，未训练）。`_load_llm()`（DoRA+FP8）为死代码。QFormer 软 token 对 LLM 目前是噪声，GER 完全依赖文本提示部分。
+> **训练状态说明：** 本地稠密权重由统一的 `LocalHFCausalLMBackend` 加载，
+> LoRA 与 QFormer/identity projector 在新建运行中从可训练初始值开始；正式推理必须加载
+> 与模型 family、hidden size、tokenizer 及 LoRA targets 匹配的 Stage-2 GER checkpoint。
 
 #### GER 训练损失
 
@@ -406,7 +415,7 @@ loss = cross_entropy(logits[:, :-1], labels[:, 1:], ignore_index=-100)
 |------|---------|---------|
 | `infonce_av` + `infonce_va` | 双向对称 τ=0.07 | **双向对比自监督学习** |
 | `ctc` | 序列标注辅助 | **连接时序分类** (CTC, Connectionist Temporal Classification) |
-| 停止条件 | `av_sid_acc_plateau` | — |
+| 模型选择 | dev 双向检索准确率均值；保存并恢复 `best.pt` | **验证集模型选择** |
 
 ### Stage 2（解冻全部）
 
@@ -455,11 +464,11 @@ pip install "torch==2.6.*" "torchaudio==2.6.*" "torchvision==0.21.*" \
 
 | 包 | 版本约束 | 原因 |
 |----|---------|------|
+| `numpy` | `>=1.24, <2.0` | 保持 InsightFace/ONNX/OpenCV ABI 兼容 |
 | `transformers` | `>=4.49, <4.55` | 兼容性上限 |
-| `tokenizers` | `>=0.21, <0.22` | transformers 4.49+ 强制 |
-| `opencv-python` | `>=4.9, <4.10` | 4.10+ 要求 numpy≥2，与 insightface 冲突 |
-| `bitsandbytes` | `>=0.45, <0.48` | torch 2.4+ `torch.library.impl_abstract` 要求 |
-| `huggingface_hub` | `>=0.27, <0.32` | transformers 4.49 兼容 |
+| `tokenizers` | `>=0.21, <0.22` | transformers 4.49+ 要求 |
+| `opencv-python` / `opencv-python-headless` | `>=4.9, <4.10` | 避免传递依赖升级到 NumPy 2.x |
+| `huggingface_hub` | `>=0.34, <1.0` | 提供 `hf` CLI 并保持 transformers 兼容 |
 
 ### 非 PyPI 依赖
 
@@ -477,10 +486,8 @@ git clone https://github.com/facebookresearch/av_hubert.git
 
 | 问题 | 根本原因 | 文件 |
 |------|---------|------|
-| N-best 实际为 1-best | faster-whisper streaming API 限制 | `backbones/asr_whisper.py` |
 | face_emb 全零（身份池仅声纹） | manifest 无 `enrollment_face` 字段 | frontend manifest |
 | 无 per-speaker 视觉掩码 | manifest turns 无 `speaker_mask_v` | frontend manifest |
-| LoRA 随机初始化（未训练） | `_load_llm_old()` 被调用，权重未训练 | `c2_alignment/ger_head.py` |
-| QFormer 软 token 为噪声 | LoRA/QFormer 未经 Stage 2 训练 | `c2_alignment/ger_head.py` |
-| config_real_en.yaml 无 mouth_roi 段 | 遗漏，导致 haar fallback | `one_go/runs/config_real_en.yaml` |
-| `_decode_lip()` 静默吞异常 | `except Exception: return ""` | `backbones/vsr_avhubert.py` |
+| 新建 GER 运行不可直接当作已训练模型 | LoRA/QFormer/projector 需要 Stage-2 训练或兼容 checkpoint | `c2_alignment/ger_head.py` |
+| `faster-whisper` 仅返回句级 1-best | 流式 segment API 不暴露真实句级 N-best；需要文本 N-best 时用 `openai-whisper` | `backbones/asr_whisper.py` |
+| VSR 文本可能为空 | 预训练 checkpoint 没有 decoder/dictionary；解码异常会记录 `last_decode_error` 并禁用本次文本通道 | `backbones/vsr_avhubert.py` |

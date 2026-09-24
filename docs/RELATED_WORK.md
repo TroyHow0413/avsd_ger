@@ -1,10 +1,12 @@
 # Related Work
 
+> **Document status:** Research-context document. It describes conceptual lineage and claim boundaries; implementation details are authoritative in [`ARCHITECTURE.md`](ARCHITECTURE.md). See the [documentation index](../README.md#documentation-index).
+
 ## At a glance
 
-![Comparison: Our Framework vs DualHyp vs AVSD vs DiarizationLM](figures/framework_comparison.png)
-
-> Drop the comparison figure at `docs/figures/framework_comparison.png`. It captures the four-way comparison summarised below.
+The comparison table below is the repository's maintained source of truth for
+the four-way comparison. A paper figure may be derived from it, but no generated
+figure asset is required by this documentation.
 
 ---
 

@@ -1,5 +1,7 @@
 # AVSD-GER Long-Term Dataset Roadmap
 
+> **Document status:** Planning document, not a command runbook. For implemented AMI full-v4 commands use [`AMI_FULL_V4_TRAINING_REPAIR.md`](AMI_FULL_V4_TRAINING_REPAIR.md). See the [documentation index](../README.md#documentation-index).
+
 This document is the project-level memory for the agreed dataset and training
 roadmap. The six stages are controlled experiments, not a requirement to mix
 all datasets in one dataloader. In the notation below, `A -> B` means

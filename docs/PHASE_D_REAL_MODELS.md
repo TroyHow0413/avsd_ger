@@ -1,5 +1,7 @@
 # Deprecated: Phase D-G Real-Model Notes
 
+> **Document status:** Deprecated compatibility redirect. Do not use this page as an operational runbook. See the [documentation index](../README.md#documentation-index).
+
 This file is kept only so old links do not break.
 
 The current real-model workflow is documented in [`REAL_MODEL_WORKFLOW.md`](REAL_MODEL_WORKFLOW.md). The old Phase 0/A/B/C/D/E/F/G rollout notes were moved to [`LEGACY_PHASE_ROLLOUT.md`](LEGACY_PHASE_ROLLOUT.md).

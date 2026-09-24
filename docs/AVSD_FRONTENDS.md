@@ -1,5 +1,7 @@
 # AVSD Frontend Profiles
 
+> **Document status:** Current frontend contract and experiment-profile reference. The core repository consumes turn-level manifests and does not claim end-to-end raw-video diarization. See the [documentation index](../README.md#documentation-index).
+
 This repo's core model is **frontend-agnostic**: it consumes turn-level
 manifests and focuses on identity-conditioned alignment, GER correction, and
 confidence-gated feedback. A raw multi-speaker meeting video still needs an
